@@ -9,7 +9,7 @@ interface KanbanCardModalProps {
   thought: Thought;
   onSave: (
     thoughtId: number,
-    updates: { content?: string; status?: string; importance?: number; type?: string }
+    updates: { content?: string; status?: string; importance?: number; type?: string; metadata?: Record<string, unknown> }
   ) => void;
   onArchive: (thoughtId: number) => void;
   onDelete: (thoughtId: number) => void;
@@ -27,6 +27,7 @@ export function KanbanCardModal({
   const [status, setStatus] = useState(thought.status ?? "new");
   const [importance, setImportance] = useState(thought.importance);
   const [type, setType] = useState(thought.type);
+  const [context, setContext] = useState((thought.metadata?.classification as string) || "personal");
   const [hasChanges, setHasChanges] = useState(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -38,9 +39,10 @@ export function KanbanCardModal({
       content !== thought.content ||
       status !== (thought.status ?? "new") ||
       importance !== thought.importance ||
-      type !== thought.type;
+      type !== thought.type ||
+      context !== ((thought.metadata?.classification as string) || "personal");
     setHasChanges(isChanged);
-  }, [content, status, importance, type, thought]);
+  }, [content, status, importance, type, context, thought]);
 
   useEffect(() => {
     function handleEscape(e: KeyboardEvent) {
@@ -95,6 +97,12 @@ export function KanbanCardModal({
       if (!KANBAN_TYPES.includes(type)) {
         updates.status = null;
       }
+    }
+    if (context !== ((thought.metadata?.classification as string) || "personal")) {
+      updates.metadata = {
+        ...(thought.metadata || {}),
+        classification: context,
+      };
     }
 
     if (Object.keys(updates).length > 0) {
@@ -217,6 +225,29 @@ export function KanbanCardModal({
                   This type won&apos;t appear on the kanban board
                 </p>
               )}
+            </div>
+          </div>
+
+          {/* Context Selector */}
+          <div>
+            <label className="block text-xs text-text-muted mb-2">Context</label>
+            <div className="flex bg-bg-primary border border-border rounded-lg p-1 w-full max-w-[240px]">
+              {["work", "personal"].map((ctx) => (
+                <button
+                  key={ctx}
+                  type="button"
+                  onClick={() => setContext(ctx)}
+                  className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                    context === ctx
+                      ? ctx === "work"
+                        ? "bg-work text-white shadow-sm"
+                        : "bg-personal text-white shadow-sm"
+                      : "text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  {ctx.charAt(0).toUpperCase() + ctx.slice(1)}
+                </button>
+              ))}
             </div>
           </div>
 

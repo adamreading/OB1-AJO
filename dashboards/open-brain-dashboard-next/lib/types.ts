@@ -14,6 +14,11 @@ export interface Thought {
   status_updated_at: string | null;
 }
 
+/** Helper to extract context (work/personal) from metadata */
+export function getThoughtContext(thought: Thought): "work" | "personal" {
+  return (thought.metadata?.classification as "work" | "personal") || "personal";
+}
+
 // --- Thought type constants ---
 
 export const THOUGHT_TYPES = [

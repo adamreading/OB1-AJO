@@ -2,6 +2,7 @@
 
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { getThoughtContext } from "@/lib/types";
 import type { Thought } from "@/lib/types";
 import { TypeBadge } from "@/components/ThoughtCard";
 import { PriorityDot } from "@/components/PriorityDot";
@@ -52,6 +53,9 @@ export function KanbanCard({
     ? (thought.metadata.topics as string[]).slice(0, 2)
     : [];
 
+  const context = getThoughtContext(thought);
+  const isWork = context === "work";
+
   return (
     <div
       ref={setNodeRef}
@@ -62,14 +66,27 @@ export function KanbanCard({
       className={`bg-bg-surface border rounded-lg p-3 cursor-pointer select-none transition-all ${
         isDragging
           ? "border-violet/40 shadow-lg opacity-80 scale-[1.02]"
-          : "border-border hover:border-violet/30"
+          : isWork
+          ? "border-work-border bg-work-surface hover:border-work/50"
+          : "border-personal-border/50 bg-personal-surface/30 hover:border-personal/40"
       }`}
     >
       <div className="flex items-start justify-between gap-2 mb-1.5">
-        <PriorityDot
-          importance={thought.importance}
-          onPriorityChange={(val) => onPriorityChange(thought.id, val)}
-        />
+        <div className="flex items-center gap-2">
+          <PriorityDot
+            importance={thought.importance}
+            onPriorityChange={(val) => onPriorityChange(thought.id, val)}
+          />
+          <span
+            className={`text-[9px] font-bold tracking-wider uppercase px-1.5 py-0.5 rounded ${
+              isWork
+                ? "bg-work text-white"
+                : "bg-personal/20 text-personal"
+            }`}
+          >
+            {context}
+          </span>
+        </div>
         <TypeBadge type={thought.type} />
       </div>
 

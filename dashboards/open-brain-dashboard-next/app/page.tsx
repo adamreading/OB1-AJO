@@ -7,15 +7,22 @@ import { AddToBrain } from "@/components/AddToBrain";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: { window?: string };
+}) {
   const { apiKey } = await requireSessionOrRedirect();
   const session = await getSession();
   const excludeRestricted = !session.restrictedUnlocked;
 
+  const windowParam = searchParams.window || "30";
+  const days = windowParam === "all" ? undefined : parseInt(windowParam);
+
   let stats, recent;
   try {
     [stats, recent] = await Promise.all([
-      fetchStats(apiKey, undefined, excludeRestricted),
+      fetchStats(apiKey, days, excludeRestricted),
       fetchThoughts(apiKey, { page: 1, per_page: 5, exclude_restricted: excludeRestricted }),
     ]);
   } catch (err) {
@@ -35,11 +42,29 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold mb-1">Dashboard</h1>
-        <p className="text-text-secondary text-sm">
-          Overview of your second brain
-        </p>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold mb-1">Dashboard</h1>
+          <p className="text-text-secondary text-sm">
+            Overview of your second brain
+          </p>
+        </div>
+
+        <div className="flex bg-bg-primary border border-border rounded-lg p-1">
+          {["7", "30", "90", "all"].map((w) => (
+            <a
+              key={w}
+              href={`/?window=${w}`}
+              className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                windowParam === w
+                  ? "bg-bg-surface text-text-primary shadow-sm"
+                  : "text-text-muted hover:text-text-secondary"
+              }`}
+            >
+              {w === "all" ? "All" : `${w}d`}
+            </a>
+          ))}
+        </div>
       </div>
 
       <StatsWidget stats={stats} />

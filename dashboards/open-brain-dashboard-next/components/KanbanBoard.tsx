@@ -39,6 +39,7 @@ export function KanbanBoard() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [contextFilter, setContextFilter] = useState<"all" | "work" | "personal">("all");
   const [selectedThought, setSelectedThought] = useState<Thought | null>(null);
   const [activeDragThought, setActiveDragThought] = useState<Thought | null>(null);
   const previousThoughts = useRef<Thought[]>([]);
@@ -75,6 +76,12 @@ export function KanbanBoard() {
     if (showArchived) groups["archived"] = [];
 
     for (const t of thoughts) {
+      // Apply Context Filter
+      if (contextFilter !== "all") {
+        const tContext = (t.metadata?.classification as string) || "personal";
+        if (tContext !== contextFilter) continue;
+      }
+
       const thoughtStatus = t.status ?? "new";
 
       // Auto-archive: done items older than 30 days
@@ -265,25 +272,42 @@ export function KanbanBoard() {
       )}
 
       {/* Controls */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+        <div className="flex items-center gap-6">
+          <div className="flex bg-bg-primary border border-border rounded-lg p-1">
+            {(["all", "work", "personal"] as const).map((ctx) => (
+              <button
+                key={ctx}
+                onClick={() => setContextFilter(ctx)}
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                  contextFilter === ctx
+                    ? "bg-bg-surface text-text-primary shadow-sm"
+                    : "text-text-muted hover:text-text-secondary"
+                }`}
+              >
+                {ctx.charAt(0).toUpperCase() + ctx.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
             <input
               type="checkbox"
               checked={showArchived}
               onChange={(e) => setShowArchived(e.target.checked)}
-              className="rounded border-border"
+              className="rounded border-border bg-bg-surface"
             />
             Show archived
           </label>
         </div>
+
         <button
           type="button"
           onClick={() => {
             setIsLoading(true);
             fetchData();
           }}
-          className="text-sm text-text-muted hover:text-text-primary transition-colors"
+          className="text-xs text-text-muted hover:text-text-primary transition-colors flex items-center gap-1.5"
         >
           ↻ Refresh
         </button>
