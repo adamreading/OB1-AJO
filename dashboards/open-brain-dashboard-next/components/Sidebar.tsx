@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 import { RestrictedToggle } from "@/components/RestrictedToggle";
+import { useTheme, THEMES } from "@/components/ThemeProvider";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: DashboardIcon },
@@ -21,6 +23,8 @@ interface SidebarProps {
 
 export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
   const pathname = usePathname();
+  const { theme, setTheme } = useTheme();
+  const [showSettings, setShowSettings] = useState(false);
 
   if (pathname === "/login") return null;
 
@@ -66,6 +70,49 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
 
       <div className="px-3 py-3 border-t border-border space-y-2">
         <RestrictedToggle />
+
+        {/* Settings / Theme Cog */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setShowSettings((v) => !v)}
+            className="flex items-center gap-2 px-3 py-1.5 w-full text-sm text-text-muted hover:text-text-primary transition-colors rounded-lg hover:bg-bg-hover"
+            title="Appearance settings"
+          >
+            <SettingsIcon />
+            <span>Appearance</span>
+          </button>
+
+          {showSettings && (
+            <div className="absolute bottom-full left-0 mb-1 w-52 bg-bg-elevated border border-border rounded-xl shadow-2xl p-3 z-50">
+              <p className="text-xs text-text-muted mb-2 px-1">Color Theme</p>
+              <div className="space-y-1">
+                {THEMES.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => {
+                      setTheme(t.id);
+                      setShowSettings(false);
+                    }}
+                    className={`flex items-center gap-2.5 w-full px-2.5 py-1.5 text-sm rounded-lg transition-colors ${
+                      theme.id === t.id
+                        ? "bg-violet-surface text-violet border border-violet/20"
+                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                    }`}
+                  >
+                    <ThemeSwatch vars={t.vars} />
+                    {t.label}
+                    {theme.id === t.id && (
+                      <span className="ml-auto text-[10px] text-violet">active</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
         <form action="/api/logout" method="POST">
           <button
             type="submit"
@@ -140,5 +187,32 @@ function AddIcon({ active }: { active: boolean }) {
       <circle cx="9" cy="9" r="7.5" stroke="currentColor" strokeWidth="1.5" />
       <path d="M9 5.5v7M5.5 9h7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-text-muted shrink-0">
+      <path
+        d="M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+      />
+      <path
+        d="M13.3 6.6l-.9-.5a5.3 5.3 0 0 0 0-1.2l.9-.5a1 1 0 0 0 .4-1.4l-.8-1.4a1 1 0 0 0-1.4-.4l-.9.5a5.4 5.4 0 0 0-1-.6V.8A1 1 0 0 0 8.7 0H7.3a1 1 0 0 0-1 .8l-.2 1c-.4.2-.7.4-1 .6l-.9-.5a1 1 0 0 0-1.4.4L2 3.7a1 1 0 0 0 .4 1.4l.9.5a5.3 5.3 0 0 0 0 1.2l-.9.5A1 1 0 0 0 2 8.7l.8 1.4a1 1 0 0 0 1.4.4l.9-.5c.3.2.6.4 1 .6l.2 1a1 1 0 0 0 1 .8h1.4a1 1 0 0 0 1-.8l.2-1c.4-.2.7-.4 1-.6l.9.5a1 1 0 0 0 1.4-.4l.8-1.4a1 1 0 0 0-.4-1.3z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ThemeSwatch({ vars }: { vars: Record<string, string> }) {
+  return (
+    <span
+      className="w-4 h-4 rounded-full border border-border shrink-0"
+      style={{ background: vars["--color-violet"] ?? "#8b5cf6" }}
+    />
   );
 }

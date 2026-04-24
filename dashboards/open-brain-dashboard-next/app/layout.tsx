@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { SidebarShell } from "@/components/SidebarShell";
+import { ThemeProvider } from "@/components/ThemeProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,12 +31,14 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-screen flex bg-bg-primary text-text-primary">
-        <SidebarShell />
-        <main className="flex-1 md:ml-56 min-h-screen pt-12 md:pt-0">
-          <div className="max-w-6xl mx-auto px-4 py-4 md:px-8 md:py-8">
-            {children}
-          </div>
-        </main>
+        <ThemeProvider>
+          <SidebarShell />
+          <main className="flex-1 md:ml-56 min-h-screen pt-12 md:pt-0">
+            <div className="max-w-6xl mx-auto px-4 py-4 md:px-8 md:py-8">
+              {children}
+            </div>
+          </main>
+        </ThemeProvider>
       </body>
     </html>
   );

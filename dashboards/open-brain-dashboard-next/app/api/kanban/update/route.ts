@@ -39,12 +39,22 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const { metadata } = body;
+
     const updates: Record<string, unknown> = {};
     if (status !== undefined) updates.status = status;
     if (importance !== undefined) updates.importance = importance;
     if (content !== undefined) updates.content = content;
     if (type !== undefined) updates.type = type;
     if (classification !== undefined) updates.classification = classification;
+    // metadata comes from the modal when context (classification) changes
+    if (metadata !== undefined && typeof metadata === "object" && metadata !== null) {
+      updates.metadata = metadata;
+      // Also sync the top-level classification column if metadata includes it
+      if (typeof (metadata as Record<string, unknown>).classification === "string") {
+        updates.classification = (metadata as Record<string, unknown>).classification;
+      }
+    }
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json(
