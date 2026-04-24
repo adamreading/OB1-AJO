@@ -5,19 +5,20 @@ import { LoginForm } from "./LoginForm";
 async function loginAction(formData: FormData) {
   "use server";
 
-  const apiKey = formData.get("apiKey") as string;
-  if (!apiKey?.trim()) {
-    return { error: "API key is required" };
-  }
+  const apiKey = formData.get("apiKey")?.toString().trim();
+  if (!apiKey) return { error: "API Key is required" };
 
-  // Validate key against health endpoint
   const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+  
   try {
     const res = await fetch(`${apiUrl}/health`, {
       headers: { "x-brain-key": apiKey },
     });
+    
     if (!res.ok) {
-      return { error: "Invalid API key or service unavailable" };
+      const errorText = await res.text().catch(() => "Unauthorized");
+      console.error("Login failed. Status:", res.status, "Error:", errorText);
+      return { error: `Invalid API key (${res.status})` };
     }
   } catch {
     return { error: "Could not reach API. Check your connection." };

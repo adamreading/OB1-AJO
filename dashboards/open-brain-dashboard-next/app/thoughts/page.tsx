@@ -33,6 +33,7 @@ export default async function ThoughtsPage({
   const importance_min = params.importance_min
     ? parseInt(params.importance_min, 10)
     : undefined;
+  const classification = params.classification || params.context || "";
 
   let data;
   try {
@@ -43,6 +44,7 @@ export default async function ThoughtsPage({
       source_type: source_type || undefined,
       importance_min,
       exclude_restricted: excludeRestricted,
+      classification: classification || undefined,
     });
   } catch (err) {
     return (
@@ -64,16 +66,21 @@ export default async function ThoughtsPage({
     if (type) sp.set("type", type);
     if (source_type) sp.set("source_type", source_type);
     if (importance_min) sp.set("importance_min", String(importance_min));
+    if (classification) sp.set("classification", classification);
     return `/thoughts?${sp.toString()}`;
   }
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold mb-1">Thoughts</h1>
-        <p className="text-text-secondary text-sm">
-          {data.total.toLocaleString()} total thoughts
-        </p>
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-text-primary tracking-tight">
+            Thoughts
+          </h1>
+          <p className="text-sm text-text-muted mt-1">
+            {data.total.toLocaleString()} total items in your memory
+          </p>
+        </div>
       </div>
 
       {/* Filters */}
@@ -82,6 +89,7 @@ export default async function ThoughtsPage({
         currentType={type}
         currentSource={source_type}
         currentImportance={importance_min}
+        currentClassification={classification}
       />
 
       {/* Table */}

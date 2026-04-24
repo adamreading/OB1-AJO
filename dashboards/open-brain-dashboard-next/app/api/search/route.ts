@@ -20,13 +20,14 @@ export async function GET(request: NextRequest) {
     | "semantic"
     | "text";
   const page = parseInt(request.nextUrl.searchParams.get("page") || "1", 10);
+  const classification = request.nextUrl.searchParams.get("classification") || request.nextUrl.searchParams.get("context");
 
   if (!q) {
     return NextResponse.json({ error: "Query required" }, { status: 400 });
   }
 
   try {
-    const data = await searchThoughts(apiKey, q, mode, 100, page, excludeRestricted);
+    const data = await searchThoughts(apiKey, q, mode, 100, page, excludeRestricted, classification || undefined);
     return NextResponse.json(data);
   } catch (err) {
     return NextResponse.json(

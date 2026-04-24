@@ -15,10 +15,8 @@ export async function GET(request: NextRequest) {
   const session = await getSession();
   const excludeRestricted = !session.restrictedUnlocked;
 
-  const page = parseInt(
-    request.nextUrl.searchParams.get("page") || "1",
-    10
-  );
+  const page = parseInt(request.nextUrl.searchParams.get("page") || "1", 10);
+  const classification = request.nextUrl.searchParams.get("classification") || request.nextUrl.searchParams.get("context");
 
   try {
     // Server-side filter: quality_score_max=29, sorted by quality ascending
@@ -29,6 +27,7 @@ export async function GET(request: NextRequest) {
       sort: "quality_score",
       order: "asc",
       exclude_restricted: excludeRestricted,
+      classification: classification || undefined,
     });
     return NextResponse.json(data);
   } catch (err) {

@@ -10,11 +10,13 @@ export function ThoughtsFilter({
   currentType,
   currentSource,
   currentImportance,
+  currentClassification,
 }: {
   types: string[];
   currentType: string;
   currentSource: string;
   currentImportance: number | undefined;
+  currentClassification: string | undefined;
 }) {
   const router = useRouter();
   const [sourceInput, setSourceInput] = useState(currentSource);
@@ -28,87 +30,122 @@ export function ThoughtsFilter({
         type: currentType,
         source_type: currentSource,
         importance_min: currentImportance?.toString() || "",
+        classification: currentClassification || "",
         ...overrides,
       };
       sp.set("page", "1");
       if (vals.type) sp.set("type", vals.type);
       if (vals.source_type) sp.set("source_type", vals.source_type);
       if (vals.importance_min) sp.set("importance_min", vals.importance_min);
+      if (vals.classification) sp.set("classification", vals.classification);
       router.push(`/thoughts?${sp.toString()}`);
     },
-    [router, currentType, currentSource, currentImportance]
+    [router, currentType, currentSource, currentImportance, currentClassification]
   );
 
   return (
-    <div className="flex flex-wrap items-end gap-4 bg-bg-surface border border-border rounded-lg p-4">
-      <div>
-        <label className="block text-xs text-text-muted mb-1">Type</label>
-        <select
-          value={currentType}
-          onChange={(e) => applyFilters({ type: e.target.value })}
-          className="bg-bg-elevated border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-violet"
-        >
-          <option value="">All types</option>
-          {types.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
-      </div>
+    <div className="flex flex-col gap-4 bg-bg-surface border border-border rounded-lg p-4">
+      <div className="flex flex-wrap items-end gap-4">
+        {/* Context Toggles */}
+        <div className="flex flex-col gap-1">
+          <label className="block text-xs font-medium text-text-muted">Context</label>
+          <div className="flex bg-bg-elevated border border-border rounded-lg p-1">
+            {[
+              { id: "", label: "All" },
+              { id: "work", label: "Work" },
+              { id: "personal", label: "Personal" },
+            ].map((c) => {
+              const isActive = (currentClassification || "") === c.id;
+              return (
+                <button
+                  key={c.label}
+                  onClick={() => applyFilters({ classification: c.id })}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                    isActive
+                      ? c.id === "work"
+                        ? "bg-work text-white"
+                        : c.id === "personal"
+                        ? "bg-personal text-white"
+                        : "bg-violet text-white shadow-sm"
+                      : "text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  {c.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
-      <div>
-        <label className="block text-xs text-text-muted mb-1">Source</label>
-        <input
-          type="text"
-          value={sourceInput}
-          onChange={(e) => setSourceInput(e.target.value)}
-          onBlur={() => {
-            if (sourceInput !== currentSource)
-              applyFilters({ source_type: sourceInput });
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter")
-              applyFilters({ source_type: sourceInput });
-          }}
-          placeholder="e.g. chatgpt_import"
-          className="bg-bg-elevated border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-violet w-44"
-        />
-      </div>
+        <div>
+          <label className="block text-xs text-text-muted mb-1">Type</label>
+          <select
+            value={currentType}
+            onChange={(e) => applyFilters({ type: e.target.value })}
+            className="bg-bg-elevated border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-violet"
+          >
+            <option value="">All types</option>
+            {types.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </div>
 
-      <div>
-        <label className="block text-xs text-text-muted mb-1">
-          Min Importance
-        </label>
-        <select
-          value={currentImportance?.toString() || ""}
-          onChange={(e) =>
-            applyFilters({
-              importance_min: e.target.value,
-            })
-          }
-          className="bg-bg-elevated border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-violet"
-        >
-          <option value="">All levels</option>
-          {IMPORTANCE_OPTIONS.map((level) => (
-            <option key={level} value={level}>
-              {level}
-            </option>
-          ))}
-        </select>
-      </div>
+        <div>
+          <label className="block text-xs text-text-muted mb-1">Source</label>
+          <input
+            type="text"
+            value={sourceInput}
+            onChange={(e) => setSourceInput(e.target.value)}
+            onBlur={() => {
+              if (sourceInput !== currentSource)
+                applyFilters({ source_type: sourceInput });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter")
+                applyFilters({ source_type: sourceInput });
+            }}
+            placeholder="e.g. chatgpt_import"
+            className="bg-bg-elevated border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-violet w-44"
+          />
+        </div>
 
-      {(currentType || currentSource || currentImportance) && (
-        <button
-          onClick={() => {
-            setSourceInput("");
-            applyFilters({ type: "", source_type: "", importance_min: "" });
-          }}
-          className="text-xs text-text-muted hover:text-danger transition-colors pb-2"
-        >
-          Clear filters
-        </button>
-      )}
+        <div>
+          <label className="block text-xs text-text-muted mb-1">
+            Min Importance
+          </label>
+          <select
+            value={currentImportance?.toString() || ""}
+            onChange={(e) =>
+              applyFilters({
+                importance_min: e.target.value,
+              })
+            }
+            className="bg-bg-elevated border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-violet"
+          >
+            <option value="">All levels</option>
+            {IMPORTANCE_OPTIONS.map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {(currentType || currentSource || currentImportance || currentClassification) && (
+          <button
+            onClick={() => {
+              setSourceInput("");
+              applyFilters({ type: "", source_type: "", importance_min: "", classification: "" });
+            }}
+            className="text-xs text-text-muted hover:text-danger transition-colors pb-2"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
     </div>
   );
 }

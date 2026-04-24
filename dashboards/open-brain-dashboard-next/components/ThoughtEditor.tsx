@@ -25,6 +25,7 @@ export function ThoughtEditor({
   editAction: (formData: FormData) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
+  const [context, setContext] = useState((thought.metadata?.classification as string) || "personal");
   const router = useRouter();
 
   if (!editing) {
@@ -95,6 +96,33 @@ export function ThoughtEditor({
               </option>
             ))}
           </select>
+        </div>
+
+        <div>
+          <label className="block text-xs text-text-muted mb-1">Context</label>
+          <div className="flex bg-bg-elevated border border-border rounded-lg p-1">
+            <input
+              type="hidden"
+              name="context"
+              value={context}
+            />
+            {["work", "personal"].map((ctx) => (
+              <button
+                key={ctx}
+                type="button"
+                onClick={() => setContext(ctx)}
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                  context === ctx
+                    ? ctx === "work"
+                      ? "bg-work text-white shadow-sm"
+                      : "bg-personal text-white shadow-sm"
+                    : "text-text-muted hover:text-text-secondary"
+                }`}
+              >
+                {ctx.charAt(0).toUpperCase() + ctx.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
       <div className="flex gap-2">

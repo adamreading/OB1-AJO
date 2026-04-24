@@ -2,11 +2,15 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { TypeBadge } from "@/components/ThoughtCard";
 import { DeleteModal } from "@/components/DeleteModal";
 import type { Thought, BrowseResponse } from "@/lib/types";
 
 export default function AuditPage() {
+  const searchParams = useSearchParams();
+  const context = searchParams.get("context");
+  
   const [data, setData] = useState<BrowseResponse | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [page, setPage] = useState(1);
@@ -18,7 +22,11 @@ export default function AuditPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/audit?page=${page}`);
+      const url = new URL("/api/audit", window.location.origin);
+      url.searchParams.set("page", String(page));
+      if (context) url.searchParams.set("context", context);
+      
+      const res = await fetch(url.toString());
       if (!res.ok) throw new Error("Failed to load");
       const d = await res.json();
       setData(d);
@@ -27,11 +35,16 @@ export default function AuditPage() {
     } finally {
       setLoading(false);
     }
-  }, [page]);
+  }, [page, context]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    // Reset selection when data changes
+    setSelected(new Set());
+  }, [data]);
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -84,7 +97,7 @@ export default function AuditPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold mb-1">Audit</h1>
           <p className="text-text-secondary text-sm">
@@ -92,15 +105,49 @@ export default function AuditPage() {
             {data && ` | ${data.total.toLocaleString()} total`}
           </p>
         </div>
-        {selected.size > 0 && (
+
+        <div className="flex bg-bg-surface border border-border rounded-lg p-1">
+          {[
+            { id: null, label: "All" },
+            { id: "work", label: "Work" },
+            { id: "personal", label: "Personal" },
+          ].map((c) => {
+            const isActive = context === c.id;
+            const sp = new URLSearchParams(searchParams.toString());
+            if (c.id) sp.set("context", c.id);
+            else sp.delete("context");
+
+            return (
+              <Link
+                key={c.label}
+                href={`/audit?${sp.toString()}`}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                  isActive
+                    ? c.id === "work"
+                      ? "bg-work text-white"
+                      : c.id === "personal"
+                      ? "bg-personal text-white"
+                      : "bg-violet text-white"
+                    : "text-text-muted hover:text-text-secondary"
+                }`}
+              >
+                {c.label}
+              </Link>
+            );
+          })}
+        </div>
+      </div>
+
+      {selected.size > 0 && (
+        <div className="flex justify-end">
           <button
             onClick={() => setShowDelete(true)}
             className="px-4 py-2 text-sm font-medium text-danger border border-danger/30 rounded-lg hover:bg-danger/10 transition-colors"
           >
             Delete {selected.size} selected
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {error && <p className="text-danger text-sm">{error}</p>}
 

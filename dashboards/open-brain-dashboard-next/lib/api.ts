@@ -52,6 +52,7 @@ export async function fetchThoughts(
     sort?: string;
     order?: string;
     exclude_restricted?: boolean;
+    classification?: string;
   }
 ): Promise<BrowseResponse> {
   const sp = new URLSearchParams();
@@ -67,6 +68,7 @@ export async function fetchThoughts(
   if (params?.order) sp.set("order", params.order);
   if (params?.exclude_restricted !== undefined)
     sp.set("exclude_restricted", String(params.exclude_restricted));
+  if (params?.classification) sp.set("classification", params.classification);
   const qs = sp.toString();
   return apiFetch<BrowseResponse>(apiKey, `/thoughts${qs ? `?${qs}` : ""}`);
 }
@@ -83,7 +85,11 @@ export async function fetchThought(
 export async function updateThought(
   apiKey: string,
   id: number,
-  data: { content?: string; type?: string; importance?: number; status?: string | null }
+  data: { content?: string;    type?: string;
+    importance?: number;
+    status?: string | null;
+    metadata?: Record<string, any>;
+  }
 ): Promise<{ id: number; action: string; message: string }> {
   return apiFetch<{ id: number; action: string; message: string }>(
     apiKey,
@@ -100,6 +106,7 @@ export async function fetchKanbanThoughts(
   params?: {
     status?: string;
     exclude_restricted?: boolean;
+    classification?: string;
   }
 ): Promise<Thought[]> {
   // Fetch tasks and ideas separately (API only supports single type filter)
@@ -113,6 +120,8 @@ export async function fetchKanbanThoughts(
     if (params?.status) sp.set("status", params.status);
     if (params?.exclude_restricted !== undefined)
       sp.set("exclude_restricted", String(params.exclude_restricted));
+    if (params?.classification)
+      sp.set("classification", params.classification);
     const qs = sp.toString();
     const data = await apiFetch<BrowseResponse>(apiKey, `/thoughts?${qs}`);
     results.push(...data.data);
@@ -124,12 +133,13 @@ export async function fetchKanbanThoughts(
 
 export async function fetchDuplicates(
   apiKey: string,
-  params?: { threshold?: number; limit?: number; offset?: number }
+  params?: { threshold?: number; limit?: number; offset?: number; classification?: string }
 ): Promise<import("./types").DuplicatesResponse> {
   const sp = new URLSearchParams();
   if (params?.threshold) sp.set("threshold", String(params.threshold));
   if (params?.limit) sp.set("limit", String(params.limit));
   if (params?.offset !== undefined) sp.set("offset", String(params.offset));
+  if (params?.classification) sp.set("classification", params.classification);
   const qs = sp.toString();
   return apiFetch(apiKey, `/duplicates${qs ? `?${qs}` : ""}`);
 }
@@ -163,24 +173,33 @@ export async function searchThoughts(
   apiKey: string,
   query: string,
   mode: "semantic" | "text" = "semantic",
-  limit: number = 25,
+  limit: number = 20,
   page: number = 1,
-  excludeRestricted: boolean = true
+  excludeRestricted: boolean = true,
+  classification?: string
 ): Promise<SearchResponse> {
-  return apiFetch(apiKey, `/search`, {
-    method: "POST",
-    body: JSON.stringify({ query, mode, limit, page, exclude_restricted: excludeRestricted }),
+  const sp = new URLSearchParams({
+    q: query,
+    mode,
+    limit: String(limit),
+    page: String(page),
+    exclude_restricted: String(excludeRestricted),
   });
+  if (classification) sp.set("classification", classification);
+  const qs = sp.toString();
+  return apiFetch<SearchResponse>(apiKey, `/search?${qs}`);
 }
 
 export async function fetchStats(
   apiKey: string,
   days?: number,
-  excludeRestricted: boolean = true
+  excludeRestricted: boolean = true,
+  classification?: string
 ): Promise<StatsResponse> {
   const sp = new URLSearchParams();
   if (days) sp.set("days", String(days));
   if (!excludeRestricted) sp.set("exclude_restricted", "false");
+  if (classification) sp.set("classification", classification);
   const qs = sp.toString();
   return apiFetch<StatsResponse>(apiKey, `/stats${qs ? `?${qs}` : ""}`);
 }

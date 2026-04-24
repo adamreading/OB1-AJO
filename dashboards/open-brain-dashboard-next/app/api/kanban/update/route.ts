@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { thoughtId, status, importance, content, type } = body;
+    const { thoughtId, status, importance, content, type, classification } = body;
 
     if (!thoughtId || typeof thoughtId !== "number") {
       return NextResponse.json(
@@ -44,6 +44,7 @@ export async function POST(request: NextRequest) {
     if (importance !== undefined) updates.importance = importance;
     if (content !== undefined) updates.content = content;
     if (type !== undefined) updates.type = type;
+    if (classification !== undefined) updates.classification = classification;
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json(

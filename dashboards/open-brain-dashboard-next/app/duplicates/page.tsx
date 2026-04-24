@@ -22,6 +22,7 @@ export default function DuplicatesPage() {
     action: "keep_a" | "keep_b";
     pair: DuplicatePair;
   } | null>(null);
+  const [classification, setClassification] = useState<string | null>(null);
 
   // Batch selection state: pairKey -> which side to keep
   const [selections, setSelections] = useState<Record<string, Selection>>({});
@@ -85,9 +86,13 @@ export default function DuplicatesPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(
-        `/api/duplicates?threshold=${threshold}&limit=${PER_PAGE}&offset=${offset}`
-      );
+      const url = new URL("/api/duplicates", window.location.origin);
+      url.searchParams.set("threshold", String(threshold));
+      url.searchParams.set("limit", String(PER_PAGE));
+      url.searchParams.set("offset", String(offset));
+      if (classification) url.searchParams.set("classification", classification);
+      
+      const res = await fetch(url.toString());
       if (!res.ok) throw new Error("Failed to load");
       const data = await res.json();
       setPairs(data.pairs ?? []);
@@ -96,7 +101,7 @@ export default function DuplicatesPage() {
     } finally {
       setLoading(false);
     }
-  }, [threshold, offset]);
+  }, [threshold, offset, classification]);
 
   useEffect(() => {
     load();
@@ -161,22 +166,55 @@ export default function DuplicatesPage() {
             {!loading && ` | ${pairs.length} pairs found`}
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <label className="text-text-muted text-xs">Threshold</label>
-          <select
-            value={threshold}
-            onChange={(e) => {
-              setThreshold(parseFloat(e.target.value));
-              setOffset(0);
-              clearSelections();
-            }}
-            className="bg-bg-elevated border border-border rounded-lg px-2 py-1.5 text-sm text-text-primary"
-          >
-            <option value={0.95}>95%</option>
-            <option value={0.90}>90%</option>
-            <option value={0.85}>85%</option>
-            <option value={0.80}>80%</option>
-          </select>
+        <div className="flex items-center gap-4">
+          <div className="flex bg-bg-surface border border-border rounded-lg p-1">
+            {[
+              { id: null, label: "All" },
+              { id: "work", label: "Work" },
+              { id: "personal", label: "Personal" },
+            ].map((c) => {
+              const isActive = classification === c.id;
+              return (
+                <button
+                  key={c.label}
+                  onClick={() => {
+                    setClassification(c.id);
+                    setOffset(0);
+                    clearSelections();
+                  }}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                    isActive
+                      ? c.id === "work"
+                        ? "bg-work text-white shadow-sm"
+                        : c.id === "personal"
+                        ? "bg-personal text-white shadow-sm"
+                        : "bg-violet text-white shadow-sm"
+                      : "text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  {c.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-3">
+            <label className="text-text-muted text-xs">Threshold</label>
+            <select
+              value={threshold}
+              onChange={(e) => {
+                setThreshold(parseFloat(e.target.value));
+                setOffset(0);
+                clearSelections();
+              }}
+              className="bg-bg-elevated border border-border rounded-lg px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-violet"
+            >
+              <option value={0.95}>95%</option>
+              <option value={0.90}>90%</option>
+              <option value={0.85}>85%</option>
+              <option value={0.80}>80%</option>
+            </select>
+          </div>
         </div>
       </div>
 

@@ -31,28 +31,47 @@ export function ThoughtCard({
   thought: Thought;
   showLink?: boolean;
 }) {
+  const context = (thought.metadata?.classification as string) || "personal";
+  const isWork = context === "work";
+
   const preview =
     thought.content.length > 200
       ? thought.content.slice(0, 200) + "..."
       : thought.content;
 
   const inner = (
-    <div className="bg-bg-surface border border-border rounded-lg p-4 hover:border-violet/30 transition-colors">
-      <div className="flex items-start justify-between gap-3 mb-2">
-        <div className="flex items-center gap-2">
+    <div
+      className={`bg-bg-surface border rounded-lg p-4 transition-all hover:shadow-sm ${
+        isWork
+          ? "border-work-border bg-work-surface hover:border-work/40"
+          : "border-personal-border/50 bg-personal-surface/30 hover:border-personal/30"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3 mb-2.5">
+        <div className="flex items-center gap-2 flex-wrap">
           <TypeBadge type={thought.type} />
+          <span
+            className={`text-[9px] font-bold tracking-wider uppercase px-1.5 py-0.5 rounded ${
+              isWork ? "bg-work text-white" : "bg-personal/20 text-personal"
+            }`}
+          >
+            {context}
+          </span>
           {thought.importance > 0 && (
-            <span className="text-xs text-text-muted">
+            <span className="text-[10px] text-text-muted font-medium">
               imp: {thought.importance}
             </span>
           )}
         </div>
-        <FormattedDate date={thought.created_at} className="text-xs text-text-muted whitespace-nowrap" />
+        <FormattedDate
+          date={thought.created_at}
+          className="text-[10px] text-text-muted whitespace-nowrap"
+        />
       </div>
       <p className="text-sm text-text-secondary leading-relaxed">{preview}</p>
       {thought.source_type && (
-        <span className="inline-block mt-2 text-xs text-text-muted">
-          {thought.source_type}
+        <span className="inline-block mt-2 text-[10px] text-text-muted font-medium uppercase tracking-tight opacity-70">
+          Source: {thought.source_type}
         </span>
       )}
     </div>

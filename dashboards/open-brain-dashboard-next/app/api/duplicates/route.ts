@@ -23,9 +23,10 @@ export async function GET(request: NextRequest) {
     request.nextUrl.searchParams.get("offset") || "0",
     10
   );
+  const classification = request.nextUrl.searchParams.get("classification") || request.nextUrl.searchParams.get("context");
 
   try {
-    const data = await fetchDuplicates(apiKey, { threshold, limit, offset });
+    const data = await fetchDuplicates(apiKey, { threshold, limit, offset, classification: classification || undefined });
     return NextResponse.json(data);
   } catch (err) {
     return NextResponse.json(

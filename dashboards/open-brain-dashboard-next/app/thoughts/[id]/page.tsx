@@ -69,8 +69,14 @@ export default async function ThoughtDetailPage({
     const { apiKey } = await requireSessionOrRedirect();
     const content = formData.get("content") as string;
     const type = formData.get("type") as string;
+    const context = formData.get("context") as string;
     const importance = parseInt(formData.get("importance") as string, 10);
-    await updateThought(apiKey, thoughtId, { content, type, importance });
+    await updateThought(apiKey, thoughtId, {
+      content,
+      type,
+      importance,
+      metadata: { classification: context },
+    });
   }
 
   async function deleteAction() {

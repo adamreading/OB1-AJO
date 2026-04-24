@@ -29,7 +29,7 @@ async function processQueue() {
     // 1. Get next pending item
     const { data: queueItem, error: queueError } = await supabase
       .from('entity_extraction_queue')
-      .select('thought_id, thoughts(content)')
+      .select('thought_id, thoughts(content, status, classification, metadata)')
       .eq('status', 'pending')
       .limit(1)
       .maybeSingle();
@@ -51,6 +51,16 @@ async function processQueue() {
 
     if (!content) {
       await supabase.from('entity_extraction_queue').update({ status: 'failed', last_error: 'No content' }).eq('thought_id', thought_id);
+      continue;
+    }
+
+    // Logic: If there is ALREADY a classification in metadata, it means a human or AI already processed it.
+    // If it was re-queued (due to trigger), we skip it to prevent overwriting manual moves.
+    const hasMetadataClass = thoughts?.metadata?.classification;
+
+    if (hasMetadataClass) {
+      console.log(`⏭️ Skipping ${thought_id.substring(0,8)}: Found existing classification in metadata.`);
+      await supabase.from('entity_extraction_queue').update({ status: 'done' }).eq('thought_id', thought_id);
       continue;
     }
 
@@ -107,7 +117,7 @@ OUTPUT THE JSON:`;
       const updates = {
         type: (analysis.type || 'idea').toLowerCase(),
         importance: parseInt(analysis.importance) || 50,
-        status: (analysis.type === 'task' || analysis.type === 'idea') ? 'new' : null,
+        status: thoughts?.status || ((analysis.type === 'task' || analysis.type === 'idea') ? 'new' : null),
         updated_at: new Date().toISOString(),
         metadata: {
           classification: (analysis.context || 'personal').toLowerCase(),
