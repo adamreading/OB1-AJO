@@ -1,17 +1,65 @@
 # Open Brain Pro (AJO Version) — Complete Setup Guide
 
-This guide provides everything needed to build your Open Brain from a completely clean slate.
+This is the definitive "ground-up" guide for building the AJO fork of Open Brain. Once finished, you will have a personal knowledge system with automatic "Work vs Personal" classification, semantic search, and a full Next.js dashboard.
 
 ---
 
-## 🛠️ Phase 1: Cloud Database (Supabase)
+## 📋 Phase 0: Prerequisites & Credential Tracker
 
-### 1. Core Schema
+You'll be generating API keys and passwords across several services. **Do not trust your memory.** Create a text file called `credentials.txt` and save these as you go:
 
-Run these in your Supabase SQL Editor to create the thoughts, reflections, and AI processing queues.
+1.  **Supabase Account**: Sign up at [supabase.com](https://supabase.com).
+2.  **OpenRouter Account**: Sign up at [openrouter.ai](https://openrouter.ai).
+3.  **Ollama**: Install [Ollama](https://ollama.com) locally if you want background classification.
+
+| Credential | Where to find it |
+| :--- | :--- |
+| `SUPABASE_PROJECT_REF` | Dashboard URL: `project/THIS_PART` |
+| `SUPABASE_DB_PASSWORD` | You set this during project creation |
+| `SUPABASE_SERVICE_ROLE_KEY` | Settings → API → `service_role` |
+| `OPENROUTER_API_KEY` | openrouter.ai/keys |
+| `BRAIN_KEY` | You choose this (your API password) |
+| `MCP_ACCESS_KEY` | You choose this (for remote AI access) |
+
+---
+
+## 🛠️ Phase 1: Supabase Project Setup
+
+1.  **Create Project**: Go to [Supabase](https://supabase.com) → **New Project**.
+2.  **Details**: Name it `open-brain`, set a strong **Database Password**, and pick a region near you.
+3.  **Wait**: It takes about 2 minutes to provision.
+4.  **Grab Details**: Go to **Settings** (gear) → **API**. Copy your **Project URL** and the **`service_role` (secret)** key.
+
+---
+
+## 💻 Phase 2: CLI & Project Linking
+
+The CLI is the fastest way to deploy your brain's logic.
+
+### 1. Install Supabase CLI
+*   **Mac/Linux**: `brew install supabase/tap/supabase`
+*   **Windows (PowerShell)**:
+    ```powershell
+    scoop bucket add supabase https://github.com/supabase/scoop-bucket.git
+    scoop install supabase
+    ```
+
+### 2. Initialize and Link
+In your terminal, navigate to your project folder and run:
+```powershell
+supabase login
+supabase init
+supabase link --project-ref your-project-ref
+```
+
+---
+
+## 🗄️ Phase 3: AJO SQL Schema
+
+Run the following block in your Supabase **SQL Editor** (New Query). This creates the core thoughts table, custom AJO classification queues, and advanced search functions.
 
 ```sql
--- 1. Enable Vector Extension
+-- 1. Enable Extensions
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- 2. Thoughts Table (The Core)
@@ -30,10 +78,22 @@ CREATE TABLE IF NOT EXISTS thoughts (
   source_type TEXT DEFAULT 'manual',
   status_updated_at TIMESTAMPTZ DEFAULT now(),
   created_at TIMESTAMPTZ DEFAULT now(),
-  updated_at TIMESTAMPTZ DEFAULT now()
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  version INTEGER DEFAULT 1,
+  content_fingerprint TEXT UNIQUE
 );
 
--- 3. Reflections Table
+-- 3. Thought Versions (Archiving updates)
+CREATE TABLE IF NOT EXISTS thought_versions (
+  id SERIAL PRIMARY KEY,
+  thought_id UUID REFERENCES thoughts(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  metadata JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 4. Reflections Table
 CREATE TABLE IF NOT EXISTS reflections (
   id SERIAL PRIMARY KEY,
   thought_id UUID REFERENCES thoughts(id) ON DELETE CASCADE,
@@ -45,7 +105,7 @@ CREATE TABLE IF NOT EXISTS reflections (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 4. Entity Extraction Queue (Background AI worker)
+-- 5. Entity Extraction Queue (Background AI worker)
 CREATE TABLE IF NOT EXISTS entity_extraction_queue (
   thought_id UUID PRIMARY KEY REFERENCES thoughts(id) ON DELETE CASCADE,
   status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'done', 'failed')),
@@ -54,7 +114,7 @@ CREATE TABLE IF NOT EXISTS entity_extraction_queue (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 5. Ingestion Jobs (bulk import tracking)
+-- 6. Ingestion Jobs (bulk import tracking)
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
   id SERIAL PRIMARY KEY,
   source_label TEXT DEFAULT 'manual',
@@ -65,7 +125,7 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
   completed_at TIMESTAMPTZ
 );
 
--- 6. Ingestion Items (individual extracted thoughts per job)
+-- 7. Ingestion Items (individual extracted thoughts per job)
 CREATE TABLE IF NOT EXISTS ingestion_items (
   id SERIAL PRIMARY KEY,
   job_id INTEGER REFERENCES ingestion_jobs(id) ON DELETE CASCADE,
@@ -78,7 +138,7 @@ CREATE TABLE IF NOT EXISTS ingestion_items (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 7. Semantic Search Function
+-- 8. Semantic Search Function
 -- Note: filter jsonb allows optional metadata filtering (e.g. by classification)
 CREATE OR REPLACE FUNCTION match_thoughts(
   query_embedding vector(1536),
@@ -122,6 +182,106 @@ BEGIN
   LIMIT match_count;
 END;
 $$;
+
+-- 9. Upsert Thought (Idempotent capture with fingerprinting)
+CREATE OR REPLACE FUNCTION upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')
+RETURNS JSONB AS $$
+DECLARE
+  v_fingerprint TEXT;
+  v_result JSONB;
+  v_id UUID;
+  v_serial INT;
+BEGIN
+  v_fingerprint := encode(sha256(convert_to(
+    lower(trim(regexp_replace(p_content, '\s+', ' ', 'g'))),
+    'UTF8'
+  )), 'hex');
+
+  INSERT INTO thoughts (content, content_fingerprint, metadata, type, importance, sensitivity_tier, source_type)
+  VALUES (
+    p_content, 
+    v_fingerprint, 
+    COALESCE(p_payload->'metadata', '{}'::jsonb),
+    COALESCE(p_payload->>'type', 'observation'),
+    COALESCE((p_payload->>'importance')::int, 3),
+    COALESCE(p_payload->>'sensitivity_tier', 'standard'),
+    COALESCE(p_payload->>'source_type', 'manual')
+  )
+  ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO UPDATE
+  SET updated_at = now(),
+      metadata = thoughts.metadata || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
+  RETURNING id, serial_id INTO v_id, v_serial;
+
+  v_result := jsonb_build_object('id', v_id, 'serial_id', v_serial, 'fingerprint', v_fingerprint);
+  RETURN v_result;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 10. Find Duplicates (Vector similarity pairs)
+CREATE OR REPLACE FUNCTION brain_duplicates_find(
+  p_threshold float DEFAULT 0.85,
+  p_limit int DEFAULT 50,
+  p_classification text DEFAULT NULL
+)
+RETURNS TABLE (
+  thought_a_serial int,
+  thought_b_serial int,
+  content_a text,
+  content_b text,
+  similarity float
+) LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    t1.serial_id AS thought_a_serial,
+    t2.serial_id AS thought_b_serial,
+    t1.content AS content_a,
+    t2.content AS content_b,
+    1 - (t1.embedding <=> t2.embedding) AS similarity
+  FROM thoughts t1
+  JOIN thoughts t2 ON t1.id < t2.id
+  WHERE (p_classification IS NULL OR (t1.metadata->>'classification' = p_classification AND t2.metadata->>'classification' = p_classification))
+    AND 1 - (t1.embedding <=> t2.embedding) > p_threshold
+  ORDER BY similarity DESC
+  LIMIT p_limit;
+END;
+$$;
+
+-- 11. Aggregate Stats
+CREATE OR REPLACE FUNCTION brain_stats_aggregate(
+  p_since_days int DEFAULT 30,
+  p_exclude_restricted boolean DEFAULT true,
+  p_classification text DEFAULT NULL
+)
+RETURNS JSONB LANGUAGE plpgsql AS $$
+DECLARE
+  v_total int;
+  v_types jsonb;
+BEGIN
+  SELECT count(*) INTO v_total
+  FROM thoughts
+  WHERE created_at > now() - (p_since_days || ' days')::interval
+    AND (NOT p_exclude_restricted OR sensitivity_tier <> 'restricted')
+    AND (p_classification IS NULL OR metadata->>'classification' = p_classification);
+
+  SELECT jsonb_object_agg(type, count) INTO v_types
+  FROM (
+    SELECT COALESCE(type, 'observation') as type, count(*) as count
+    FROM thoughts
+    WHERE created_at > now() - (p_since_days || ' days')::interval
+      AND (NOT p_exclude_restricted OR sensitivity_tier <> 'restricted')
+      AND (p_classification IS NULL OR metadata->>'classification' = p_classification)
+    GROUP BY type
+  ) t;
+
+  RETURN jsonb_build_object(
+    'total', v_total,
+    'types', COALESCE(v_types, '{}'::jsonb),
+    'top_topics', '[]'::jsonb,
+    'window_days', p_since_days
+  );
+END;
+$$;
 ```
 
 > **Important:** If you created `match_thoughts` before and semantic search returns errors about `operator does not exist: vector <=> vector`, run this fix:
@@ -154,15 +314,35 @@ The dashboard talks to a single Edge Function (`rest-api`) for all API calls. Th
 | POST | `/ingest` | Extract and commit a block of text as thoughts |
 | POST | `/ingestion-jobs/:id/execute` | Execute a pending job's items |
 
-### 1. Deploy the function
+### 1. Deploy via CLI (Recommended)
 
-1. Go to Supabase Dashboard → **Edge Functions** → **Create a new function** → name it `rest-api`
-2. Paste the full contents of `supabase/functions/rest-api/index.ts` from this repo
-3. Click **Deploy**
+If you have the Supabase CLI installed, run these from the project root:
 
-> **Updating:** When you pull new changes from this repo, re-paste and redeploy the Edge Function the same way — the Supabase UI editor is the deployment mechanism.
+```powershell
+# 1. Login and link your project
+supabase login
+supabase link --project-ref your-project-ref
 
-### 2. Set Edge Function secrets
+# 2. Set Secrets
+supabase secrets set BRAIN_KEY="your-api-password"
+supabase secrets set OPENROUTER_API_KEY="your-openrouter-key"
+supabase secrets set MCP_ACCESS_KEY="your-mcp-access-key"
+
+# 3. Deploy both functions
+supabase functions deploy rest-api --no-verify-jwt
+supabase functions deploy open-brain-mcp --no-verify-jwt
+```
+
+### 2. Manual Deployment (Fallback)
+
+If you prefer the web UI:
+1. Go to Supabase Dashboard → **Edge Functions** → **Create a new function** → name it `rest-api`.
+2. Paste the contents of `supabase/functions/rest-api/index.ts`.
+3. Repeat for `open-brain-mcp` using `supabase/functions/open-brain-mcp/index.ts`.
+
+> **Note:** `BRAIN_KEY` and `MCP_ACCESS_KEY` can be the same value for simplicity, or different if you want separate dashboard/MCP passwords.
+
+### 3. Set Edge Function secrets
 
 In Supabase Dashboard → **Edge Functions** → **Manage secrets**, add:
 
@@ -175,22 +355,24 @@ In Supabase Dashboard → **Edge Functions** → **Manage secrets**, add:
 
 ---
 
-## 🌐 Phase 3: Environment Setup
+## 🌐 Phase 4: Local Environment & Worker
 
-### 1. Root `.env` (for the local AI worker)
+For background classification (Work vs Personal) and importance scoring, you run a local Node.js worker that talks to your local Ollama instance.
 
-Create `.env` in the project root:
+### 1. Root `.env` Setup
+
+Create a file named `.env` in the project root:
 
 ```env
-SUPABASE_URL="https://your-ref.supabase.co"
+SUPABASE_URL="https://your-project-ref.supabase.co"
 SUPABASE_KEY="your-service-role-key"
-BRAIN_KEY="choose-a-strong-api-password"
+BRAIN_KEY="your-api-password"
 OLLAMA_URL="http://localhost:11434/api"
 OLLAMA_MODEL="qwen3:30b"
 
-# Context definitions used by the AI worker for classification
-WORK_CONTEXT_DESC="Professional work and corporate projects"
-PERSONAL_CONTEXT_DESC="Home life, side projects, and hobbies"
+# Context definitions for the AI worker
+WORK_CONTEXT_DESC="Professional work, software development, and corporate projects"
+PERSONAL_CONTEXT_DESC="Home life, hobbies, fitness, and family"
 ```
 
 ### 2. Dashboard `.env.local`
@@ -198,64 +380,67 @@ PERSONAL_CONTEXT_DESC="Home life, side projects, and hobbies"
 Create `dashboards/open-brain-dashboard-next/.env.local`:
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL="https://your-ref.supabase.co"
+NEXT_PUBLIC_SUPABASE_URL="https://your-project-ref.supabase.co"
 NEXT_PUBLIC_SUPABASE_ANON_KEY="your-anon-key"
-NEXT_PUBLIC_API_URL="https://your-ref.supabase.co/functions/v1/rest-api"
-BRAIN_KEY="the-same-password-as-BRAIN_KEY-above"
+NEXT_PUBLIC_API_URL="https://your-project-ref.supabase.co/functions/v1/rest-api"
+BRAIN_KEY="the-same-password-as-above"
 ```
-
-> `NEXT_PUBLIC_API_URL` points at the Edge Function. Replace `your-ref` with your actual Supabase project reference ID (found in Settings → General).
 
 ---
 
-## 🚀 Phase 4: Launching
+## 🚀 Phase 5: Launching
 
-### 1. Install dashboard dependencies
-
-```powershell
-cd dashboards/open-brain-dashboard-next
-npm install
-```
-
-### 2. Start everything
-
-Run the unified script from the project root:
+Run the unified start script from the project root. This launches the dashboard and the background AI worker simultaneously.
 
 ```powershell
 .\start_brain.ps1
 ```
 
-This launches:
-1. **Next.js Dashboard** on port 3000
-2. **Local AI Worker** — background classification via your local Ollama instance
+*   **Dashboard**: [http://localhost:3000](http://localhost:3000)
+*   **Worker**: Watch the terminal for "Polling entity_extraction_queue..."
 
 ---
 
-## 📂 Architecture
+## 🤖 Phase 6: Connect to your AI
 
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| Dashboard | `dashboards/open-brain-dashboard-next/` | Next.js UI (Kanban, Search, Ingest, Audit) |
-| Edge Function | `supabase/functions/rest-api/index.ts` | REST API — all dashboard calls go here |
-| AI Worker | `scripts/local-brain-worker.js` | Polls Supabase queue, classifies via Ollama |
-| Schema | Phase 1 SQL above | Supabase tables + `match_thoughts` RPC |
+You can now connect any MCP-compatible AI to your brain. Use your **MCP Connection URL**:
+`https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=YOUR_MCP_ACCESS_KEY`
 
-**Key design decisions:**
-- `serial_id` (integer) is used as the dashboard-facing `id`; `id` (UUID) is the DB primary key. The Edge Function's `mapThought()` swaps these on every response.
-- The Edge Function is the single source of truth for all API logic. The dashboard's `app/api/` routes are thin auth proxies that forward to it.
-- Semantic search uses OpenRouter (`text-embedding-3-small`) with automatic text-search fallback if embeddings are unavailable or the RPC fails.
-- Theme switching (Coal / Midnight / Slate / Ocean / Forest) is built into the sidebar — click the cog icon at the bottom. No setup needed.
-- The `match_thoughts` function **must** be created with `SET search_path = public, extensions` (included in the Phase 1 SQL above). Without this, Supabase's pgvector `<=>` operator won't resolve and semantic search will silently fall back to text.
+### 1. Claude Desktop (Easiest)
+1. Open Claude Desktop → **Settings** → **Connectors**.
+2. Click **Add custom connector**.
+3. Name: `Open Brain`.
+4. URL: Paste your **MCP Connection URL**.
+5. Click **Add**.
+
+### 2. ChatGPT (Plus/Pro)
+1. Go to ChatGPT Settings → **Apps & Connectors**.
+2. Click **Create** → Name: `Open Brain`.
+3. URL: Paste your **MCP Connection URL**.
+4. Auth: Select **No Authentication** (it's in the URL).
+
+### 3. Claude Code / CLI
+```bash
+claude mcp add --transport http open-brain \
+  https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp \
+  --header "x-brain-key: your-mcp-access-key"
+```
 
 ---
 
-## 🔄 Keeping Up to Date
+## 📂 Architecture Reference
 
-When you pull new changes from this repo:
+| Component | Location | Source of Truth |
+| :--- | :--- | :--- |
+| **Dashboard** | `dashboards/open-brain-dashboard-next/` | UI & Visual State |
+| **REST API** | `supabase/functions/rest-api/index.ts` | All logic for the Dashboard |
+| **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude/ChatGPT |
+| **AI Worker** | `scripts/local-brain-worker.js` | Background classification (Ollama) |
 
-1. **Edge Function** — re-paste `supabase/functions/rest-api/index.ts` into the Supabase editor and redeploy
-2. **Dashboard** — `npm install` if `package.json` changed, then restart `npm run dev`
-3. **Schema** — check `AJO_Readme.md` for any new SQL to run; new tables are always `CREATE TABLE IF NOT EXISTS` safe to re-run
+**Key Divergences in this Fork:**
+*   **Context-Aware**: Every thought is tagged as `work` or `personal`.
+*   **Serial IDs**: The dashboard uses simple integers (1, 2, 3) for display, while the DB uses UUIDs for security. The Edge Function maps these automatically.
+*   **Local Processing**: We use local LLMs (Ollama) for classification to save on API costs and maintain privacy for sensitive thoughts.
 
 ---
 
