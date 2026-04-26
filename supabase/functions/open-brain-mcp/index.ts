@@ -1,0 +1,450 @@
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPTransport } from "@hono/mcp";
+import { Hono } from "hono";
+import { z } from "zod";
+import { createClient } from "@supabase/supabase-js";
+
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
+const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
+
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+async function getEmbedding(text: string): Promise<number[]> {
+  const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "openai/text-embedding-3-small",
+      input: text,
+    }),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
+  }
+  const d = await r.json();
+  return d.data[0].embedding;
+}
+
+async function extractMetadata(text: string): Promise<Record<string, unknown>> {
+  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "openai/gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `Extract metadata from the user's captured thought. Return JSON with:
+- "people": array of people mentioned (empty if none)
+- "action_items": array of implied to-dos (empty if none)
+- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
+- "topics": array of 1-3 short topic tags (always at least one)
+- "type": one of "observation", "task", "idea", "reference", "person_note"
+Only extract what's explicitly there.`,
+        },
+        { role: "user", content: text },
+      ],
+    }),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    throw new Error(`OpenRouter metadata extraction failed: ${r.status} ${msg}`);
+  }
+  const d = await r.json();
+  try {
+    return JSON.parse(d.choices[0].message.content);
+  } catch {
+    return { topics: ["uncategorized"], type: "observation" };
+  }
+}
+
+function createServer(): McpServer {
+  const server = new McpServer({
+    name: "open-brain",
+    version: "1.2.0",
+  });
+
+  // Tool 1: Semantic Search
+  server.registerTool(
+    "search_thoughts",
+    {
+      title: "Search Thoughts",
+      description:
+        "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea. Respects Work/Personal context.",
+      inputSchema: {
+        query: z.string().describe("What to search for"),
+        classification: z.enum(["work", "personal"]).optional().describe("Filter by 'work' or 'personal' context (Strict: hiding nulls if set)"),
+        limit: z.number().optional().default(10),
+        threshold: z.number().optional().default(0.15),
+      },
+    },
+    async ({ query, classification, limit, threshold }) => {
+      try {
+        const qEmb = await getEmbedding(query);
+        const rpcParams: Record<string, unknown> = {
+          query_embedding: qEmb,
+          match_threshold: threshold,
+          match_count: limit,
+        };
+        if (classification) rpcParams.filter = { classification };
+
+        const { data, error } = await supabase.rpc("match_thoughts", rpcParams);
+
+        if (error) return { content: [{ type: "text", text: `Search error: ${error.message}` }], isError: true };
+
+        if (!data || data.length === 0) {
+          return { content: [{ type: "text", text: `No ${classification || ""} thoughts found matching "${query}".` }] };
+        }
+
+        const results = data.map((t: any, i: number) => {
+          const m = t.metadata || {};
+          const label = m.classification ? `[${m.classification.toUpperCase()}] ` : "";
+          return `${i + 1}. ${label}#${t.serial_id || t.id}\n${t.content}\nSimilarity: ${(t.similarity * 100).toFixed(0)}%`;
+        });
+
+        return { content: [{ type: "text", text: `Found ${data.length} results:\n\n${results.join("\n\n")}` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 2: List Recent
+  server.registerTool(
+    "list_thoughts",
+    {
+      title: "List Recent Thoughts",
+      description: "List recently captured thoughts. Supports context filtering.",
+      inputSchema: {
+        limit: z.number().optional().default(10),
+        classification: z.enum(["work", "personal"]).optional().describe("Filter: 'work' or 'personal'"),
+        type: z.string().optional().describe("e.g. task, idea, reference"),
+      },
+    },
+    async ({ limit, classification, type }) => {
+      try {
+        let q = supabase.from("thoughts").select("serial_id, id, content, metadata, created_at").order("created_at", { ascending: false }).limit(limit);
+
+        if (classification) {
+          q = q.filter("metadata->>classification", "eq", classification);
+        }
+        if (type) q = q.eq("type", type);
+
+        const { data, error } = await q;
+        if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+        if (!data?.length) return { content: [{ type: "text", text: "No thoughts found." }] };
+
+        const results = data.map((t: any) => {
+          const m = t.metadata || {};
+          const label = m.classification ? `[${m.classification.toUpperCase()}] ` : "";
+          return `#${t.serial_id} ${label}(${t.created_at.split("T")[0]})\n${t.content}`;
+        });
+
+        return { content: [{ type: "text", text: results.join("\n\n") }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 3: Stats
+  server.registerTool(
+    "thought_stats",
+    {
+      title: "Thought Statistics",
+      description: "Get summary stats. Can be filtered by context.",
+      inputSchema: {
+        classification: z.enum(["work", "personal"]).optional(),
+      },
+    },
+    async ({ classification }) => {
+      try {
+        const { data, error } = await supabase.rpc("brain_stats_aggregate", {
+          p_since_days: 30,
+
+          p_classification: classification || null
+        });
+        if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+
+        const res = [
+          `Total thoughts: ${data.total}`,
+          `Top topics: ${(data.top_topics || []).map((t:any) => t.topic).join(", ")}`,
+          `Classification: ${classification || "All"}`
+        ];
+        return { content: [{ type: "text", text: res.join("\n") }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 4: Capture Thought
+  server.registerTool(
+    "capture_thought",
+    {
+      title: "Capture Thought",
+      description: "Save a new thought. IMPORTANT: If you have a long transcript or multiple unrelated ideas, call this tool MULTIPLE TIMES (once per distinct idea). Atomic thoughts ensure 10X better search quality. Do not save giant blocks of text if they can be split. You MUST pass your own client identity in the 'source' parameter (e.g., 'n8n', 'chatgpt').",
+      inputSchema: {
+        content: z.string().describe("The atomic thought to capture"),
+        classification: z.enum(["work", "personal"]).optional().describe("Work or Personal context"),
+        type: z.string().optional().describe("e.g. task, idea, reference"),
+        source: z.string().optional().describe("CRITICAL: You must self-identify here. Enter your client application name (e.g., 'n8n', 'chatgpt', 'openwebui', 'claude')."),
+      },
+    },
+    async ({ content, classification, type, source }) => {
+      try {
+        const [embedding, extracted] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
+        
+        const finalSource = source ? `mcp-${source}` : "mcp";
+        const metadata = { ...extracted, source: finalSource, classification };
+        
+        const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
+          p_content: content.trim(),
+          p_payload: { 
+            metadata,
+            type: type || (metadata.type as string),
+            importance: 3,
+
+            source_type: finalSource
+          },
+        });
+
+        if (upsertError) return { content: [{ type: "text", text: `Failed: ${upsertError.message}` }], isError: true };
+
+        await supabase.from("thoughts").update({ embedding }).eq("id", upsertResult.id);
+
+        return { content: [{ type: "text", text: `Captured: #${upsertResult.serial_id} [${classification?.toUpperCase() || "UNCATEGORIZED"}]` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 5: Update Thought
+  server.registerTool(
+    "update_thought",
+    {
+      title: "Update Thought",
+      description: "Update content and optionally move context. Archives old version.",
+      inputSchema: {
+        id: z.string().describe("UUID or Serial ID (as string)"),
+        content: z.string(),
+        classification: z.enum(["work", "personal"]).optional(),
+      },
+    },
+    async ({ id, content, classification }) => {
+      try {
+        const filter = /^[0-9a-f]{8}-/.test(id) ? { id } : { serial_id: parseInt(id, 10) };
+        const { data: current } = await supabase.from("thoughts").select("*").match(filter).single();
+        if (!current) return { content: [{ type: "text", text: "Not found" }], isError: true };
+
+        // Archive
+        await supabase.from("thought_versions").insert({
+          thought_id: current.id,
+          version: current.version || 1,
+          content: current.content,
+          metadata: current.metadata,
+        });
+
+        const embedding = await getEmbedding(content);
+        const metadata = { ...(current.metadata || {}), classification: classification || current.metadata?.classification };
+
+        const { error } = await supabase.from("thoughts").update({
+          content,
+          embedding,
+          metadata,
+          version: (current.version || 1) + 1,
+          updated_at: new Date().toISOString()
+        }).match(filter);
+
+        if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+        return { content: [{ type: "text", text: "Updated successfully." }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 6: Distill Transcript
+  server.registerTool(
+    "distill_transcript",
+    {
+      title: "Distill Transcript",
+      description: "Analyze a long transcript or text block and break it down into separate, atomic thoughts for capture. Returns suggestions; use capture_thought to save them.",
+      inputSchema: {
+        text: z.string().describe("The raw text to split"),
+        classification: z.enum(["work", "personal"]).optional().describe("Assign context to all distilled thoughts"),
+      },
+    },
+    async ({ text, classification }) => {
+      try {
+        const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "openai/gpt-4o-mini",
+            response_format: { type: "json_object" },
+            messages: [
+              { role: "system", content: "Break the provided transcript into separate atomic thoughts. Return JSON with 'thoughts' array where each item has 'content' and 'type' (task, idea, reference, observation). Ensure each thought is standalone and self-contained." },
+              { role: "user", content: text }
+            ]
+          })
+        });
+        const d = await r.json();
+        const thoughts = JSON.parse(d.choices[0].message.content).thoughts;
+        const res = thoughts.map((t:any, i:number) => `${i+1}. [${t.type.toUpperCase()}] ${t.content}`);
+        return { content: [{ type: "text", text: `Distilled ${thoughts.length} thoughts:\n\n${res.join("\n\n")}\n\nPlease review and use capture_thought to save any you want to keep.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: "Distillation failed." }], isError: true };
+      }
+    }
+  );
+
+  // Tool 7: Delete Thought
+  server.registerTool(
+    "delete_thought",
+    {
+      title: "Delete Thought",
+      description: "Permanently delete a thought by UUID or Serial ID.",
+      inputSchema: {
+        id: z.string().describe("UUID or Serial ID"),
+      },
+    },
+    async ({ id }) => {
+      try {
+        const filter = /^[0-9a-f]{8}-/.test(id) ? { id } : { serial_id: parseInt(id, 10) };
+        const { error } = await supabase.from("thoughts").delete().match(filter);
+        if (error) return { content: [{ type: "text", text: error.message }], isError: true };
+        return { content: [{ type: "text", text: `Deleted thought ${id}` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 8: Find Duplicates
+  server.registerTool(
+    "find_duplicates",
+    {
+      title: "Find Duplicates",
+      description: "Identify semantically similar thoughts that might be duplicates.",
+      inputSchema: {
+        classification: z.enum(["work", "personal"]).optional(),
+        threshold: z.number().optional().default(0.85),
+      },
+    },
+    async ({ classification, threshold }) => {
+      const { data, error } = await supabase.rpc("brain_duplicates_find", {
+        p_threshold: threshold,
+        p_classification: classification || null
+      });
+      if (error) return { content: [{ type: "text", text: error.message }], isError: true };
+      const res = (data || []).map((p: any) => `* Duplicate pair (${(p.similarity * 100).toFixed(0)}% match):\n  A: #${p.thought_a_serial} "${p.content_a.substring(0, 50)}..."\n  B: #${p.thought_b_serial} "${p.content_b.substring(0, 50)}..."`);
+      return { content: [{ type: "text", text: res.length ? res.join("\n\n") : "No duplicates found." }] };
+    }
+  );
+
+  // Tool 9: Add Reflection
+  server.registerTool(
+    "add_reflection",
+    {
+      title: "Add Reflection",
+      description: "Save an AI-generated realization or reflection about a specific thought.",
+      inputSchema: {
+        thought_id: z.string().describe("The ID of the thought to reflect on"),
+        reflection: z.string().describe("The insight or realization to save"),
+      },
+    },
+    async ({ thought_id, reflection }) => {
+      const filter = /^[0-9a-f]{8}-/.test(thought_id) ? { id: thought_id } : { serial_id: parseInt(thought_id, 10) };
+      const { data: thought } = await supabase.from("thoughts").select("id").match(filter).single();
+      if (!thought) return { content: [{ type: "text", text: "Thought not found" }], isError: true };
+
+      const { error } = await supabase.from("reflections").insert({
+        thought_id: thought.id,
+        content: reflection,
+      });
+      if (error) return { content: [{ type: "text", text: error.message }], isError: true };
+      return { content: [{ type: "text", text: "Reflection saved." }] };
+    }
+  );
+
+  return server;
+}
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, accept, mcp-session-id",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
+};
+
+const app = new Hono();
+
+// CORS preflight
+app.options("*", (c) => c.text("ok", 200, corsHeaders));
+
+app.all("*", async (c) => {
+  // 1. Auth check
+  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
+  if (!provided || provided !== MCP_ACCESS_KEY) {
+    return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
+  }
+
+  // 2. GET: Health Check or SSE Initiation
+  if (c.req.method === "GET") {
+    if (c.req.header("accept")?.includes("text/event-stream")) {
+      const server = createServer();
+      const transport = new StreamableHTTPTransport();
+      await server.connect(transport);
+      return transport.handleRequest(c);
+    }
+    return c.json({
+      status: "ok",
+      name: "open-brain",
+      version: "1.2.0",
+      capabilities: { tools: true, resources: false, prompts: false }
+    }, 200, corsHeaders);
+  }
+
+  // 3. MCP Request Handling
+  // We ensure the internal Hono/MCP transport always sees the required Accept headers,
+  // even if n8n or generic curl clients don't send them.
+  const headers = new Headers(c.req.raw.headers);
+  const currentAccept = headers.get("accept") || "";
+  
+  if (!currentAccept.includes("application/json") || !currentAccept.includes("text/event-stream")) {
+    headers.set("Accept", "application/json, text/event-stream");
+    const patched = new Request(c.req.raw.url, {
+      method: c.req.raw.method,
+      headers,
+      body: c.req.raw.body,
+      // @ts-ignore - Duplex is required for streaming bodies in Deno
+      duplex: "half",
+    });
+    const newContext = { ...c, req: { ...c.req, raw: patched } };
+    const server = createServer();
+    const transport = new StreamableHTTPTransport();
+    await server.connect(transport);
+    return transport.handleRequest(newContext as any);
+  }
+
+  const server = createServer();
+  const transport = new StreamableHTTPTransport();
+  await server.connect(transport);
+  return transport.handleRequest(c);
+});
+
+Deno.serve(app.fetch);

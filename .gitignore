@@ -1,9 +1,8 @@
 node_modules/
 .DS_Store
 .planning/
-supabase/
-
 # Credentials & runtime state
+supabase/.temp/
 .env
 .env.local
 .env.*.local
