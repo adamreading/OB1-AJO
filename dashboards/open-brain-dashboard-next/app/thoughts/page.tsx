@@ -24,8 +24,7 @@ export default async function ThoughtsPage({
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
   const { apiKey } = await requireSessionOrRedirect();
-  const session = await getSession();
-  const excludeRestricted = session.restrictedUnlocked !== true;
+
   const params = await searchParams;
   const page = parseInt(params.page || "1", 10);
   const type = params.type || "";
@@ -43,7 +42,7 @@ export default async function ThoughtsPage({
       type: type || undefined,
       source_type: source_type || undefined,
       importance_min,
-      exclude_restricted: excludeRestricted,
+
       classification: classification || undefined,
     });
   } catch (err) {

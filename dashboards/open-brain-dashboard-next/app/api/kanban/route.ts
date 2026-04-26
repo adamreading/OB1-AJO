@@ -13,8 +13,7 @@ export async function GET(request: NextRequest) {
     throw err;
   }
 
-  const session = await getSession();
-  const excludeRestricted = session.restrictedUnlocked !== true;
+
   const includeArchived =
     request.nextUrl.searchParams.get("archived") === "true";
 
@@ -25,7 +24,7 @@ export async function GET(request: NextRequest) {
   try {
     const thoughts = await fetchKanbanThoughts(apiKey, {
       status: statusFilter,
-      exclude_restricted: excludeRestricted,
+
     });
     return NextResponse.json({ thoughts });
   } catch (err) {

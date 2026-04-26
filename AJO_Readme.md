@@ -144,8 +144,7 @@ CREATE OR REPLACE FUNCTION match_thoughts(
   query_embedding vector(1536),
   match_threshold float DEFAULT 0.3,
   match_count int DEFAULT 20,
-  filter jsonb DEFAULT '{}'::jsonb,
-  p_exclude_restricted boolean DEFAULT true
+  filter jsonb DEFAULT '{}'::jsonb
 )
 RETURNS TABLE (
   id uuid,
@@ -176,7 +175,6 @@ BEGIN
     t.created_at
   FROM thoughts t
   WHERE 1 - (t.embedding <=> query_embedding) > match_threshold
-    AND (NOT p_exclude_restricted OR t.sensitivity_tier <> 'restricted')
     AND (filter = '{}'::jsonb OR t.metadata @> filter)
   ORDER BY similarity DESC
   LIMIT match_count;
@@ -250,7 +248,6 @@ $$;
 -- 11. Aggregate Stats
 CREATE OR REPLACE FUNCTION brain_stats_aggregate(
   p_since_days int DEFAULT 30,
-  p_exclude_restricted boolean DEFAULT true,
   p_classification text DEFAULT NULL
 )
 RETURNS JSONB LANGUAGE plpgsql AS $$
@@ -261,7 +258,6 @@ BEGIN
   SELECT count(*) INTO v_total
   FROM thoughts
   WHERE created_at > now() - (p_since_days || ' days')::interval
-    AND (NOT p_exclude_restricted OR sensitivity_tier <> 'restricted')
     AND (p_classification IS NULL OR metadata->>'classification' = p_classification);
 
   SELECT jsonb_object_agg(type, count) INTO v_types
@@ -269,7 +265,6 @@ BEGIN
     SELECT COALESCE(type, 'observation') as type, count(*) as count
     FROM thoughts
     WHERE created_at > now() - (p_since_days || ' days')::interval
-      AND (NOT p_exclude_restricted OR sensitivity_tier <> 'restricted')
       AND (p_classification IS NULL OR metadata->>'classification' = p_classification)
     GROUP BY type
   ) t;
@@ -286,7 +281,7 @@ $$;
 
 > **Important:** If you created `match_thoughts` before and semantic search returns errors about `operator does not exist: vector <=> vector`, run this fix:
 > ```sql
-> ALTER FUNCTION match_thoughts(vector, float, int, jsonb, boolean)
+> ALTER FUNCTION match_thoughts(vector, float, int, jsonb)
 >   SET search_path = public, extensions;
 > ```
 > This is needed because Supabase installs pgvector in the `extensions` schema.
@@ -396,7 +391,7 @@ Run the unified start script from the project root. This launches the dashboard 
 .\start_brain.ps1
 ```
 
-*   **Dashboard**: [http://localhost:3000](http://localhost:3000)
+*   **Dashboard**: [http://localhost:3010](http://localhost:3010)
 *   **Worker**: Watch the terminal for "Polling entity_extraction_queue..."
 
 ---

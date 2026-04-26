@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 export interface SessionData {
   apiKey?: string;
   loggedIn?: boolean;
-  restrictedUnlocked?: boolean;
+
 }
 
 export class AuthError extends Error {

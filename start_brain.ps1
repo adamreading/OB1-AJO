@@ -18,9 +18,9 @@ if ($null -eq $OllamaCheck) {
 
 # 2. Start Dashboard
 Write-Host ""
-Write-Host "Launching Dashboard (Next.js) on Port 3000..." -ForegroundColor Cyan
+Write-Host "Launching Dashboard (Next.js) on Port 3010..." -ForegroundColor Cyan
 $DashboardPath = Join-Path $ProjectRoot "dashboards\open-brain-dashboard-next"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$DashboardPath'; `$env:PORT=3000; npm run dev"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$DashboardPath'; `$env:PORT=3010; npm run dev"
 
 # 3. Start Local Brain Worker
 Write-Host "Starting Local Brain Worker (AI Categorizer)..." -ForegroundColor Cyan
@@ -30,7 +30,7 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$ProjectRoot'
 Write-Host ""
 Write-Host "Everything is starting up!" -ForegroundColor Green
 Write-Host "------------------------------------------------"
-Write-Host "Dashboard:  http://localhost:3000"
+Write-Host "Dashboard:  http://localhost:3010"
 Write-Host "AI Worker:  Running in background window"
 Write-Host "------------------------------------------------"
 Write-Host "Close this window to keep the other two running."

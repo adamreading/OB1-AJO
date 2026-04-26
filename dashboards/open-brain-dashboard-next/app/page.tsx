@@ -19,8 +19,7 @@ export default async function DashboardPage(props: {
   searchParams: Promise<{ window?: string; context?: string }>;
 }) {
   const { apiKey } = await requireSessionOrRedirect();
-  const session = await getSession();
-  const excludeRestricted = !session.restrictedUnlocked;
+
   const searchParams = await props.searchParams;
 
   const windowParam = searchParams.window || "30";
@@ -30,11 +29,10 @@ export default async function DashboardPage(props: {
   let stats, recent;
   try {
     [stats, recent] = await Promise.all([
-      fetchStats(apiKey, days, excludeRestricted, context),
+      fetchStats(apiKey, days, context),
       fetchThoughts(apiKey, {
         page: 1,
         per_page: 5,
-        exclude_restricted: excludeRestricted,
         classification: context,
       }),
     ]);

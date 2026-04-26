@@ -51,10 +51,9 @@ export async function fetchThoughts(
     quality_score_max?: number;
     sort?: string;
     order?: string;
-    exclude_restricted?: boolean;
     classification?: string;
   }
-): Promise<BrowseResponse> {
+) {
   const sp = new URLSearchParams();
   if (params?.page) sp.set("page", String(params.page));
   if (params?.per_page) sp.set("per_page", String(params.per_page));
@@ -66,8 +65,7 @@ export async function fetchThoughts(
     sp.set("quality_score_max", String(params.quality_score_max));
   if (params?.sort) sp.set("sort", params.sort);
   if (params?.order) sp.set("order", params.order);
-  if (params?.exclude_restricted !== undefined)
-    sp.set("exclude_restricted", String(params.exclude_restricted));
+
   if (params?.classification) sp.set("classification", params.classification);
   const qs = sp.toString();
   return apiFetch<BrowseResponse>(apiKey, `/thoughts${qs ? `?${qs}` : ""}`);
@@ -75,11 +73,9 @@ export async function fetchThoughts(
 
 export async function fetchThought(
   apiKey: string,
-  id: number,
-  excludeRestricted: boolean = true
+  id: number
 ): Promise<Thought> {
-  const qs = excludeRestricted ? "" : "?exclude_restricted=false";
-  return apiFetch<Thought>(apiKey, `/thought/${id}${qs}`);
+  return apiFetch<Thought>(apiKey, `/thought/${id}`);
 }
 
 export async function updateThought(
@@ -105,7 +101,6 @@ export async function fetchKanbanThoughts(
   apiKey: string,
   params?: {
     status?: string;
-    exclude_restricted?: boolean;
     classification?: string;
   }
 ): Promise<Thought[]> {
@@ -118,8 +113,7 @@ export async function fetchKanbanThoughts(
     sp.set("order", "desc");
     sp.set("type", thoughtType);
     if (params?.status) sp.set("status", params.status);
-    if (params?.exclude_restricted !== undefined)
-      sp.set("exclude_restricted", String(params.exclude_restricted));
+
     if (params?.classification)
       sp.set("classification", params.classification);
     const qs = sp.toString();
@@ -175,7 +169,6 @@ export async function searchThoughts(
   mode: "semantic" | "text" = "semantic",
   limit: number = 20,
   page: number = 1,
-  excludeRestricted: boolean = true,
   classification?: string
 ): Promise<SearchResponse> {
   const sp = new URLSearchParams({
@@ -183,7 +176,6 @@ export async function searchThoughts(
     mode,
     limit: String(limit),
     page: String(page),
-    exclude_restricted: String(excludeRestricted),
   });
   if (classification) sp.set("classification", classification);
   const qs = sp.toString();
@@ -193,12 +185,10 @@ export async function searchThoughts(
 export async function fetchStats(
   apiKey: string,
   days?: number,
-  excludeRestricted: boolean = true,
   classification?: string
 ): Promise<StatsResponse> {
   const sp = new URLSearchParams();
   if (days) sp.set("days", String(days));
-  if (!excludeRestricted) sp.set("exclude_restricted", "false");
   if (classification) sp.set("classification", classification);
   const qs = sp.toString();
   return apiFetch<StatsResponse>(apiKey, `/stats${qs ? `?${qs}` : ""}`);

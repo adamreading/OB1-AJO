@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { RestrictedToggle } from "@/components/RestrictedToggle";
+
 import { useTheme, THEMES } from "@/components/ThemeProvider";
 
 const nav = [
@@ -69,7 +69,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       </nav>
 
       <div className="px-3 py-3 border-t border-border space-y-2">
-        <RestrictedToggle />
+
 
         {/* Settings / Theme Cog */}
         <div className="relative">

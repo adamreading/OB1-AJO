@@ -6,7 +6,7 @@ export interface Thought {
   source_type: string;
   importance: number;
   quality_score: number;
-  sensitivity_tier: string;
+
   metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;

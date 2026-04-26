@@ -12,8 +12,7 @@ export async function GET(request: NextRequest) {
     throw err;
   }
 
-  const session = await getSession();
-  const excludeRestricted = session.restrictedUnlocked !== true;
+
 
   const q = request.nextUrl.searchParams.get("q");
   const mode = (request.nextUrl.searchParams.get("mode") || "semantic") as
@@ -27,7 +26,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const data = await searchThoughts(apiKey, q, mode, 100, page, excludeRestricted, classification || undefined);
+    const data = await searchThoughts(apiKey, q, mode, 100, page, classification || undefined);
     return NextResponse.json(data);
   } catch (err) {
     return NextResponse.json(

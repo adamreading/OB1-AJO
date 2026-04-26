@@ -23,33 +23,15 @@ export default async function ThoughtDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { apiKey } = await requireSessionOrRedirect();
-  const session = await getSession();
-  const excludeRestricted = !session.restrictedUnlocked;
+
   const { id } = await params;
   const thoughtId = parseInt(id, 10);
   if (isNaN(thoughtId)) notFound();
 
   let thought;
   try {
-    thought = await fetchThought(apiKey, thoughtId, excludeRestricted);
+    thought = await fetchThought(apiKey, thoughtId);
   } catch (err) {
-    if (err instanceof ApiError && err.status === 403) {
-      return (
-        <div className="flex flex-col items-center justify-center min-h-[400px] space-y-4">
-          <div className="text-4xl">🔒</div>
-          <h1 className="text-xl font-semibold text-text-primary">Restricted Content</h1>
-          <p className="text-text-secondary text-sm text-center max-w-md">
-            This thought is classified as restricted. Unlock restricted content using the lock icon in the sidebar to view it.
-          </p>
-          <Link
-            href="/thoughts"
-            className="px-4 py-2 bg-violet hover:bg-violet-dim text-white text-sm rounded-lg transition-colors"
-          >
-            Back to Thoughts
-          </Link>
-        </div>
-      );
-    }
     notFound();
   }
 
@@ -118,9 +100,7 @@ export default async function ThoughtDetailPage({
           <p className="text-xs text-text-muted">
             Created <FormattedDate date={thought.created_at} />
             {thought.source_type && ` | Source: ${thought.source_type}`}
-            {thought.sensitivity_tier &&
-              thought.sensitivity_tier !== "standard" &&
-              ` | Sensitivity: ${thought.sensitivity_tier}`}
+
           </p>
         </div>
         <ThoughtDeleteButton deleteAction={deleteAction} />

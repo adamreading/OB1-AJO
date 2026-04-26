@@ -40,7 +40,7 @@ Provides 9 pages for managing your thoughts:
 |------------|----------------|---------------|
 | `NEXT_PUBLIC_API_URL` | Your Supabase project URL + `/functions/v1/open-brain-rest` | `.env` or hosting env vars |
 | `SESSION_SECRET` | Generate: `openssl rand -hex 32` | `.env` or hosting env vars |
-| `RESTRICTED_PASSPHRASE_HASH` | Optional. Generate: `echo -n "passphrase" \| shasum -a 256` | `.env` or hosting env vars |
+
 
 ## Steps
 
@@ -165,16 +165,7 @@ The dashboard calls these endpoints on your Open Brain REST API:
 > [!NOTE]
 > If your Open Brain instance doesn't have all these endpoints (e.g., no smart-ingest or duplicates), those pages will show errors but the core pages (dashboard, browse, search, detail) will still work.
 
-## Optional: Restricted Content
 
-If you've applied the [sensitivity-tiers](https://github.com/NateBJones-Projects/OB1/pull/110) primitive and want to control access to sensitive thoughts:
-
-1. Set `RESTRICTED_PASSPHRASE_HASH` in your environment
-2. A lock/unlock toggle appears in the sidebar
-3. When locked (default), restricted thoughts are filtered from all views
-4. Enter your passphrase to temporarily unlock restricted content for the session
-
-If `RESTRICTED_PASSPHRASE_HASH` is not set, the toggle is hidden — no action needed.
 
 ## Authentication
 
