@@ -74,7 +74,7 @@ Only extract what's explicitly there.`,
 function createServer(): McpServer {
   const server = new McpServer({
     name: "open-brain",
-    version: "1.2.0",
+    version: "1.3.0",
   });
 
   // Tool 1: Semantic Search
@@ -83,23 +83,27 @@ function createServer(): McpServer {
     {
       title: "Search Thoughts",
       description:
-        "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea. Respects Work/Personal context.",
+        "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea. Respects Work/Personal context. Returns source so you can see where each memory came from.",
       inputSchema: {
         query: z.string().describe("What to search for"),
         classification: z.enum(["work", "personal"]).optional().describe("Filter by 'work' or 'personal' context (Strict: hiding nulls if set)"),
         limit: z.number().optional().default(10),
         threshold: z.number().optional().default(0.15),
+        source: z.string().optional().describe("Filter by source e.g. 'mcp-fieldy-auto', 'mcp-chatgpt', 'mcp-n8n'"),
       },
     },
-    async ({ query, classification, limit, threshold }) => {
+    async ({ query, classification, limit, threshold, source }) => {
       try {
-        const qEmb = await getEmbedding(query);
+        const qEmb = await getEmbedding(query.toLowerCase());
+        const filterObj: Record<string, unknown> = {};
+        if (classification) filterObj.classification = classification;
+
         const rpcParams: Record<string, unknown> = {
           query_embedding: qEmb,
           match_threshold: threshold,
           match_count: limit,
         };
-        if (classification) rpcParams.filter = { classification };
+        if (Object.keys(filterObj).length > 0) rpcParams.filter = filterObj;
 
         const { data, error } = await supabase.rpc("match_thoughts", rpcParams);
 
@@ -109,13 +113,23 @@ function createServer(): McpServer {
           return { content: [{ type: "text", text: `No ${classification || ""} thoughts found matching "${query}".` }] };
         }
 
-        const results = data.map((t: any, i: number) => {
+        // Apply source filter post-query if specified (match_thoughts doesn't support it natively)
+        const filtered = source
+          ? data.filter((t: any) => t.source_type === source || t.metadata?.source === source)
+          : data;
+
+        if (filtered.length === 0) {
+          return { content: [{ type: "text", text: `No thoughts found matching "${query}" from source "${source}".` }] };
+        }
+
+        const results = filtered.map((t: any, i: number) => {
           const m = t.metadata || {};
           const label = m.classification ? `[${m.classification.toUpperCase()}] ` : "";
-          return `${i + 1}. ${label}#${t.serial_id || t.id}\n${t.content}\nSimilarity: ${(t.similarity * 100).toFixed(0)}%`;
+          const src = t.source_type ? ` (${t.source_type})` : "";
+          return `${i + 1}. ${label}#${t.serial_id || t.id}${src}\n${t.content}\nSimilarity: ${(t.similarity * 100).toFixed(0)}%`;
         });
 
-        return { content: [{ type: "text", text: `Found ${data.length} results:\n\n${results.join("\n\n")}` }] };
+        return { content: [{ type: "text", text: `Found ${filtered.length} results:\n\n${results.join("\n\n")}` }] };
       } catch (err: unknown) {
         return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
       }
@@ -127,21 +141,32 @@ function createServer(): McpServer {
     "list_thoughts",
     {
       title: "List Recent Thoughts",
-      description: "List recently captured thoughts. Supports context filtering.",
+      description: "List recently captured thoughts. Supports filtering by context, type, and source. Always shows source so you know where each memory came from.",
       inputSchema: {
         limit: z.number().optional().default(10),
         classification: z.enum(["work", "personal"]).optional().describe("Filter: 'work' or 'personal'"),
         type: z.string().optional().describe("e.g. task, idea, reference"),
+        source: z.string().optional().describe("Filter by source e.g. 'mcp-fieldy-auto', 'mcp-chatgpt', 'mcp-n8n'"),
+        since_hours: z.number().optional().describe("Only return thoughts created in the last N hours e.g. 24"),
       },
     },
-    async ({ limit, classification, type }) => {
+    async ({ limit, classification, type, source, since_hours }) => {
       try {
-        let q = supabase.from("thoughts").select("serial_id, id, content, metadata, created_at").order("created_at", { ascending: false }).limit(limit);
+        let q = supabase
+          .from("thoughts")
+          .select("serial_id, id, content, metadata, source_type, created_at")
+          .order("created_at", { ascending: false })
+          .limit(limit);
 
         if (classification) {
           q = q.filter("metadata->>classification", "eq", classification);
         }
         if (type) q = q.eq("type", type);
+        if (source) q = q.eq("source_type", source);
+        if (since_hours) {
+          const since = new Date(Date.now() - since_hours * 60 * 60 * 1000).toISOString();
+          q = q.gte("created_at", since);
+        }
 
         const { data, error } = await q;
         if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
@@ -150,7 +175,8 @@ function createServer(): McpServer {
         const results = data.map((t: any) => {
           const m = t.metadata || {};
           const label = m.classification ? `[${m.classification.toUpperCase()}] ` : "";
-          return `#${t.serial_id} ${label}(${t.created_at.split("T")[0]})\n${t.content}`;
+          const src = t.source_type ? ` (${t.source_type})` : "";
+          return `#${t.serial_id} ${label}(${t.created_at.split("T")[0]})${src}\n${t.content}`;
         });
 
         return { content: [{ type: "text", text: results.join("\n\n") }] };
@@ -174,7 +200,6 @@ function createServer(): McpServer {
       try {
         const { data, error } = await supabase.rpc("brain_stats_aggregate", {
           p_since_days: 30,
-
           p_classification: classification || null
         });
         if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
@@ -207,17 +232,16 @@ function createServer(): McpServer {
     async ({ content, classification, type, source }) => {
       try {
         const [embedding, extracted] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-        
+
         const finalSource = source ? `mcp-${source}` : "mcp";
         const metadata = { ...extracted, source: finalSource, classification };
-        
+
         const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
           p_content: content.trim(),
-          p_payload: { 
+          p_payload: {
             metadata,
             type: type || (metadata.type as string),
             importance: 3,
-
             source_type: finalSource
           },
         });
@@ -238,7 +262,7 @@ function createServer(): McpServer {
     "update_thought",
     {
       title: "Update Thought",
-      description: "Update content and optionally move context. Archives old version.",
+      description: "Update content and optionally move context. Archives old version. Use the serial number shown in search results (e.g. '132'), not a UUID.",
       inputSchema: {
         id: z.string().describe("UUID or Serial ID (as string)"),
         content: z.string(),
@@ -382,6 +406,46 @@ function createServer(): McpServer {
     }
   );
 
+  // Tool 10: Fieldy Review — list recent Fieldy-captured memories for daily review
+  server.registerTool(
+    "fieldy_review",
+    {
+      title: "Fieldy Review",
+      description: "Fetch recent memories captured by Fieldy (source: mcp-fieldy-auto or mcp-fieldy-pending) for daily review. Returns serial ID, content, classification, and timestamp so a reviewer can check for errors, wrong attribution, or missing context.",
+      inputSchema: {
+        since_hours: z.number().optional().default(24).describe("How many hours back to look (default 24)"),
+        limit: z.number().optional().default(50),
+      },
+    },
+    async ({ since_hours, limit }) => {
+      try {
+        const since = new Date(Date.now() - since_hours * 60 * 60 * 1000).toISOString();
+
+        const { data, error } = await supabase
+          .from("thoughts")
+          .select("serial_id, content, metadata, source_type, created_at")
+          .in("source_type", ["mcp-fieldy-auto", "mcp-fieldy-pending"])
+          .gte("created_at", since)
+          .order("created_at", { ascending: false })
+          .limit(limit);
+
+        if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+        if (!data?.length) return { content: [{ type: "text", text: `No Fieldy memories found in the last ${since_hours} hours.` }] };
+
+        const results = data.map((t: any) => {
+          const m = t.metadata || {};
+          const label = m.classification ? `[${m.classification.toUpperCase()}] ` : "";
+          const src = t.source_type === "mcp-fieldy-pending" ? " ⚠️ PENDING" : "";
+          return `#${t.serial_id} ${label}(${t.created_at.split("T")[0]}) ${t.source_type}${src}\n${t.content}`;
+        });
+
+        return { content: [{ type: "text", text: `${data.length} Fieldy memories from the last ${since_hours}h:\n\n${results.join("\n\n")}` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   return server;
 }
 
@@ -414,17 +478,15 @@ app.all("*", async (c) => {
     return c.json({
       status: "ok",
       name: "open-brain",
-      version: "1.2.0",
+      version: "1.3.0",
       capabilities: { tools: true, resources: false, prompts: false }
     }, 200, corsHeaders);
   }
 
   // 3. MCP Request Handling
-  // We ensure the internal Hono/MCP transport always sees the required Accept headers,
-  // even if n8n or generic curl clients don't send them.
   const headers = new Headers(c.req.raw.headers);
   const currentAccept = headers.get("accept") || "";
-  
+
   if (!currentAccept.includes("application/json") || !currentAccept.includes("text/event-stream")) {
     headers.set("Accept", "application/json, text/event-stream");
     const patched = new Request(c.req.raw.url, {
