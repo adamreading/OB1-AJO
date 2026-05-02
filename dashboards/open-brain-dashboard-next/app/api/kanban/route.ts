@@ -18,8 +18,8 @@ export async function GET(request: NextRequest) {
     request.nextUrl.searchParams.get("archived") === "true";
 
   const statusFilter = includeArchived
-    ? "new,planning,active,review,done,archived"
-    : "new,planning,active,review,done";
+    ? "backlog,planning,active,review,done,archived"
+    : "backlog,planning,active,review,done";
 
   try {
     const thoughts = await fetchKanbanThoughts(apiKey, {

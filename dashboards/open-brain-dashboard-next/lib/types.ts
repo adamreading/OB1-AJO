@@ -38,11 +38,11 @@ export const KANBAN_TYPES: string[] = ["task", "idea"];
 
 // --- Kanban workflow constants ---
 
-export const KANBAN_STATUSES = ["new", "planning", "active", "review", "done"] as const;
+export const KANBAN_STATUSES = ["backlog", "planning", "active", "review", "done"] as const;
 export type KanbanStatus = (typeof KANBAN_STATUSES)[number];
 
 export const KANBAN_LABELS: Record<KanbanStatus, string> = {
-  new: "New",
+  backlog: "Backlog",
   planning: "Planning",
   active: "Active",
   review: "Review",
@@ -50,7 +50,7 @@ export const KANBAN_LABELS: Record<KanbanStatus, string> = {
 };
 
 export const KANBAN_COLORS: Record<KanbanStatus, string> = {
-  new: "slate",
+  backlog: "slate",
   planning: "violet",
   active: "blue",
   review: "amber",
