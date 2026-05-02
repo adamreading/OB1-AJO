@@ -1,6 +1,18 @@
 node_modules/
 .DS_Store
 .planning/
+supabase/
+
+# Maintainer-local overlays (not part of upstream contribution contract)
+.local/
+.agent/
+.claude.json
+.claude/worktrees/
+
+# Python caches
+__pycache__/
+*.pyc
+
 # Credentials & runtime state
 supabase/.temp/
 .env
