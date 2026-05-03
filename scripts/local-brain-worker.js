@@ -10,6 +10,8 @@
  * should run on demand or on a schedule, not for every new capture.
  */
 const crypto = require("node:crypto");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
 const { createClient } = require("@supabase/supabase-js");
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -20,6 +22,11 @@ const MODEL = process.env.OLLAMA_MODEL || "qwen3:30b";
 const POLL_MS = Number(process.env.LOCAL_WORKER_POLL_MS || 10000);
 const INITIAL_KANBAN_STATUS = process.env.KANBAN_INITIAL_STATUS || "backlog";
 const WORKER_VERSION = "ajo-local-brain-worker-v2";
+const WIKI_SCRIPT = path.join(__dirname, "../recipes/entity-wiki/generate-wiki.mjs");
+const WIKI_REPO_ROOT = path.join(__dirname, "..");
+
+// Entity IDs touched since the last queue drain — wiki is regenerated for these when queue empties
+const dirtyEntityIds = new Set();
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error("Missing SUPABASE_URL or SUPABASE_KEY/SUPABASE_SERVICE_ROLE_KEY in .env.");
@@ -393,6 +400,7 @@ async function writeGraph(thoughtId, analysis) {
     if (!id) continue;
     entityIds.set(normalizeName(entity.name), id);
     await linkThoughtEntity(thoughtId, id, entity.confidence);
+    dirtyEntityIds.add(id);
   }
 
   let edgeCount = 0;
@@ -488,6 +496,24 @@ async function processItem(queueItem) {
   );
 }
 
+function spawnWiki(entityId) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [WIKI_SCRIPT, "--id", String(entityId)], {
+      stdio: "inherit",
+      env: process.env,
+      cwd: WIKI_REPO_ROOT,
+    });
+    child.on("exit", (code) => {
+      if (code !== 0) console.error(`[wiki] Entity #${entityId} exited with code ${code}`);
+      resolve();
+    });
+    child.on("error", (err) => {
+      console.error(`[wiki] Failed to spawn wiki for #${entityId}: ${err.message}`);
+      resolve();
+    });
+  });
+}
+
 async function processQueue() {
   await resetFailedItems();
   await detectGraphTables();
@@ -498,6 +524,13 @@ async function processQueue() {
     try {
       item = await claimNextItem();
       if (!item) {
+        if (dirtyEntityIds.size > 0) {
+          const ids = [...dirtyEntityIds];
+          dirtyEntityIds.clear();
+          console.log(`[wiki] Queue drained — regenerating wiki for ${ids.length} entit${ids.length === 1 ? "y" : "ies"}...`);
+          for (const id of ids) await spawnWiki(id);
+          console.log("[wiki] Done.");
+        }
         console.log(`Queue empty. Waiting ${Math.round(POLL_MS / 1000)}s...`);
         await sleep(POLL_MS);
         continue;
