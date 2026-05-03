@@ -141,8 +141,8 @@ function printUsage() {
 // ---------------------------------------------------------------
 
 function createSupabase(env) {
-  const base = String(env.OPEN_BRAIN_URL || "").replace(/\/$/, "");
-  const key = env.OPEN_BRAIN_SERVICE_KEY;
+  const base = String(env.OPEN_BRAIN_URL || env.SUPABASE_URL || "").replace(/\/$/, "");
+  const key = env.OPEN_BRAIN_SERVICE_KEY || env.SUPABASE_KEY;
   if (!base || !key) {
     throw new Error("OPEN_BRAIN_URL and OPEN_BRAIN_SERVICE_KEY are required.");
   }
@@ -517,9 +517,9 @@ function fenceSnippets(payload) {
 }
 
 async function synthesize(env, model, payload) {
-  const baseUrl = (env.LLM_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/$/, "");
-  const apiKey = env.LLM_API_KEY;
-  if (!apiKey) throw new Error("LLM_API_KEY not set.");
+  const ollamaBase = env.OLLAMA_URL ? `${env.OLLAMA_URL.replace(/\/api\/?$/, "").replace(/\/$/, "")}/v1` : null;
+  const baseUrl = (env.LLM_BASE_URL || ollamaBase || "https://openrouter.ai/api/v1").replace(/\/$/, "");
+  const apiKey = env.LLM_API_KEY || "ollama";
   const headers = {
     "content-type": "application/json",
     authorization: `Bearer ${apiKey}`,
@@ -658,8 +658,8 @@ function writeFile(wiki, entity, sourceCounts, provenance, outDir) {
 
 async function upsertWikiPage(env, pageData) {
   // pageData: { slug, type, entity_id, title, content, thought_count, generated_at, metadata }
-  const base = String(env.OPEN_BRAIN_URL || "").replace(/\/$/, "");
-  const key = env.OPEN_BRAIN_SERVICE_KEY;
+  const base = String(env.OPEN_BRAIN_URL || env.SUPABASE_URL || "").replace(/\/$/, "");
+  const key = env.OPEN_BRAIN_SERVICE_KEY || env.SUPABASE_KEY;
   if (!base || !key) return; // env not configured — skip silently
 
   // Check if the page already exists and was manually edited
@@ -882,7 +882,7 @@ async function generateForEntity(sb, env, entity, args) {
     args.maxLinked,
     args.maxSemantic,
   );
-  const model = args.model || env.LLM_MODEL || "anthropic/claude-haiku-4-5";
+  const model = args.model || env.LLM_MODEL || env.OLLAMA_MODEL || "anthropic/claude-haiku-4-5";
   const wiki = await synthesize(env, model, payload);
   const sourceCounts = { linked: linked.length, semantic: semantic.length };
   const provenance = [...payload.provenance.linked_ids, ...payload.provenance.semantic_ids];
@@ -948,12 +948,12 @@ async function main() {
     process.exit(2);
   }
   const env = process.env;
-  for (const k of ["OPEN_BRAIN_URL", "OPEN_BRAIN_SERVICE_KEY", "LLM_API_KEY"]) {
-    if (!env[k]) {
-      console.error(`Missing required env var: ${k}`);
-      process.exit(2);
-    }
-  }
+  const hasSupabase = env.OPEN_BRAIN_URL || env.SUPABASE_URL;
+  const hasSupabaseKey = env.OPEN_BRAIN_SERVICE_KEY || env.SUPABASE_KEY;
+  const hasLlm = env.LLM_API_KEY || env.OLLAMA_URL;
+  if (!hasSupabase) { console.error("Missing required env var: OPEN_BRAIN_URL (or SUPABASE_URL)"); process.exit(2); }
+  if (!hasSupabaseKey) { console.error("Missing required env var: OPEN_BRAIN_SERVICE_KEY (or SUPABASE_KEY)"); process.exit(2); }
+  if (!hasLlm) { console.error("Missing required env var: LLM_API_KEY (or OLLAMA_URL for local)"); process.exit(2); }
   // --output-mode=thought writes a dossier row into public.thoughts and relies
   // on an embedding for match_thoughts / MCP search. Without an embedding the
   // row is unreachable — the entire point of the mode is defeated. Enforce the

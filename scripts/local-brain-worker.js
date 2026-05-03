@@ -127,6 +127,7 @@ Return this exact JSON shape:
 Rules:
 - importance is an integer from 1 to 5.
 - Extract only concrete, recognizable entities. Use "PostgreSQL", not "database".
+- Always use the most complete canonical form of a name. Use "Tom Falconar" not "Tom". Use "Adam Ososki" not "Adam".
 - Omit entities and relationships below 0.5 confidence.
 - Relationship endpoints must exactly match returned entity names.
 - If there are no useful entities or relationships, return empty arrays.
@@ -264,8 +265,42 @@ async function detectGraphTables() {
   return graphAvailable;
 }
 
+async function findEntityByAlias(name) {
+  // Check if name (or its normalized form) matches an existing entity's aliases
+  const { data } = await supabase
+    .from("entities")
+    .select("id")
+    .contains("aliases", [name])
+    .limit(1)
+    .maybeSingle();
+  if (data) return data.id;
+
+  const lower = name.toLowerCase();
+  if (lower !== name) {
+    const { data: d2 } = await supabase
+      .from("entities")
+      .select("id")
+      .contains("aliases", [lower])
+      .limit(1)
+      .maybeSingle();
+    if (d2) return d2.id;
+  }
+  return null;
+}
+
 async function upsertEntity(entity) {
   const normalized = normalizeName(entity.name);
+
+  // Before inserting, check if this name is an alias for an existing entity
+  const aliasMatchId = await findEntityByAlias(entity.name);
+  if (aliasMatchId) {
+    await supabase
+      .from("entities")
+      .update({ last_seen_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", aliasMatchId);
+    return aliasMatchId;
+  }
+
   const { data, error } = await supabase
     .from("entities")
     .upsert(
