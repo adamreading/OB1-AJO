@@ -1,6 +1,6 @@
 # Open Brain Pro (AJO Version) — Complete Setup Guide
 
-This is the definitive "ground-up" guide for building the AJO fork of Open Brain. Once finished, you will have a personal knowledge system with automatic "Work vs Personal" classification, semantic search, and a full Next.js dashboard.
+This is the definitive "ground-up" guide for building the AJO fork of Open Brain. Once finished, you will have a personal knowledge system with automatic "Work vs Personal" classification, local entity graph extraction, semantic search, optional compiled wiki generation, and a full Next.js dashboard.
 
 ---
 
@@ -9,15 +9,15 @@ This is the definitive "ground-up" guide for building the AJO fork of Open Brain
 You'll be generating API keys and passwords across several services. **Do not trust your memory.** Create a text file called `credentials.txt` and save these as you go:
 
 1.  **Supabase Account**: Sign up at [supabase.com](https://supabase.com).
-2.  **OpenRouter Account**: Sign up at [openrouter.ai](https://openrouter.ai).
-3.  **Ollama**: Install [Ollama](https://ollama.com) locally if you want background classification.
+2.  **Ollama**: Install [Ollama](https://ollama.com) locally for background classification, entity graph extraction, and wiki compilation.
+3.  **OpenRouter Account (optional)**: Only needed if you deliberately want hosted embeddings or hosted metadata extraction inside Edge Functions.
 
 | Credential | Where to find it |
 | :--- | :--- |
 | `SUPABASE_PROJECT_REF` | Dashboard URL: `project/THIS_PART` |
 | `SUPABASE_DB_PASSWORD` | You set this during project creation |
 | `SUPABASE_SERVICE_ROLE_KEY` | Settings → API → `service_role` |
-| `OPENROUTER_API_KEY` | openrouter.ai/keys |
+| `OPENROUTER_API_KEY` | Optional: openrouter.ai/keys |
 | `BRAIN_KEY` | You choose this (your API password) |
 | `MCP_ACCESS_KEY` | You choose this (for remote AI access) |
 
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS thoughts (
   serial_id SERIAL UNIQUE,
   content TEXT NOT NULL,
   type TEXT DEFAULT 'observation',
-  status TEXT DEFAULT 'new' CHECK (status IN ('new', 'planning', 'active', 'review', 'done', 'archived')),
+  status TEXT DEFAULT 'backlog' CHECK (status IN ('backlog', 'planning', 'active', 'review', 'done', 'archived')),
   importance INTEGER DEFAULT 3 CHECK (importance BETWEEN 1 AND 5),
   quality_score INTEGER DEFAULT 50,
   classification TEXT DEFAULT 'personal' CHECK (classification IN ('work', 'personal')),
@@ -108,8 +108,16 @@ CREATE TABLE IF NOT EXISTS reflections (
 -- 5. Entity Extraction Queue (Background AI worker)
 CREATE TABLE IF NOT EXISTS entity_extraction_queue (
   thought_id UUID PRIMARY KEY REFERENCES thoughts(id) ON DELETE CASCADE,
-  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'complete', 'failed', 'skipped')),
+  attempt_count INTEGER DEFAULT 0,
   last_error TEXT,
+  queued_at TIMESTAMPTZ DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  processed_at TIMESTAMPTZ,
+  source_fingerprint TEXT,
+  source_updated_at TIMESTAMPTZ,
+  worker_version TEXT,
+  metadata JSONB DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -320,8 +328,9 @@ supabase link --project-ref your-project-ref
 
 # 2. Set Secrets
 supabase secrets set BRAIN_KEY="your-api-password"
-supabase secrets set OPENROUTER_API_KEY="your-openrouter-key"
 supabase secrets set MCP_ACCESS_KEY="your-mcp-access-key"
+# Optional hosted fallback only:
+# supabase secrets set OPENROUTER_API_KEY="your-openrouter-key"
 
 # 3. Deploy both functions
 supabase functions deploy rest-api --no-verify-jwt
@@ -344,7 +353,8 @@ In Supabase Dashboard → **Edge Functions** → **Manage secrets**, add:
 | Secret | Value |
 |--------|-------|
 | `BRAIN_KEY` | Your chosen API password (must match `BRAIN_KEY` in dashboard `.env.local`) |
-| `OPENROUTER_API_KEY` | Your OpenRouter API key (for embeddings + AI extraction) |
+| `MCP_ACCESS_KEY` | Your chosen MCP connector password |
+| `OPENROUTER_API_KEY` | Optional hosted fallback for embeddings and metadata extraction |
 
 > `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically by Supabase — do not add them manually.
 
@@ -352,7 +362,7 @@ In Supabase Dashboard → **Edge Functions** → **Manage secrets**, add:
 
 ## 🌐 Phase 4: Local Environment & Worker
 
-For background classification (Work vs Personal) and importance scoring, you run a local Node.js worker that talks to your local Ollama instance.
+For background classification (Work vs Personal), importance scoring, summaries, and entity graph extraction, you run a local Node.js worker that talks to your local Ollama instance.
 
 ### 1. Root `.env` Setup
 
@@ -364,6 +374,15 @@ SUPABASE_KEY="your-service-role-key"
 BRAIN_KEY="your-api-password"
 OLLAMA_URL="http://localhost:11434/api"
 OLLAMA_MODEL="qwen3:30b"
+KANBAN_INITIAL_STATUS="backlog"
+
+# Wiki compiler aliases used by recipes/wiki-compiler
+OPEN_BRAIN_URL="https://your-project-ref.supabase.co"
+OPEN_BRAIN_SERVICE_KEY="your-service-role-key"
+LLM_BASE_URL="http://localhost:11434/v1"
+LLM_MODEL="qwen3:30b"
+LLM_API_KEY="ollama"
+WIKI_ENTITY_EXTRACTION_MODE="local"
 
 # Context definitions for the AI worker
 WORK_CONTEXT_DESC="Professional work, software development, and corporate projects"
@@ -385,14 +404,49 @@ BRAIN_KEY="the-same-password-as-above"
 
 ## 🚀 Phase 5: Launching
 
-Run the unified start script from the project root. This launches the dashboard and the background AI worker simultaneously.
+Run the unified start script from the project root. This launches the dashboard and the local background worker simultaneously.
 
 ```powershell
 .\start_brain.ps1
 ```
 
 *   **Dashboard**: [http://localhost:3010](http://localhost:3010)
-*   **Worker**: Watch the terminal for "Polling entity_extraction_queue..."
+*   **Worker**: Watch the terminal for "Starting Open Brain local worker..."
+
+### Optional: compile the wiki
+
+The local worker keeps per-thought enrichment and the entity graph warm continuously. The wiki compiler is intentionally separate because it performs batch, cross-thought synthesis, but AJO defaults it to local Ollama through `http://localhost:11434/v1`. Run it manually or on a schedule after the worker has drained the queue:
+
+```powershell
+node recipes/wiki-compiler/compile-wiki.mjs --edge-limit 10
+```
+
+Start with a low `--edge-limit` because typed reasoning edges compare pairs of thoughts and can take time on a local model. Add `--skip-edges` when you only want wiki pages and do not want to classify cross-thought relationships in that run.
+
+### Current integrated workflow
+
+The AJO fork now combines the upstream graph/wiki stack with the existing local worker:
+
+1. **Capture stays fast and remote-safe.** `rest-api` and `open-brain-mcp` run as Supabase Edge Functions. They can use OpenRouter for cheap embeddings and lightweight metadata extraction, but capture still works with graceful fallbacks if OpenRouter is unavailable.
+2. **Local worker owns private/heavier enrichment.** `scripts/local-brain-worker.js` drains `entity_extraction_queue` with Ollama (`qwen3:30b` by default), preserves manual classification where present, writes summaries/classification/importance, and populates `entities`, `thought_entities`, and entity `edges` when the graph schema is installed.
+3. **Historical thoughts need a catchup queue.** Existing thoughts created before the graph trigger was installed need to be inserted into `entity_extraction_queue` once. The entity-extraction schema contains the backfill SQL at the bottom; run it after applying the schema, then leave `start_brain.ps1` running until the queue drains.
+4. **Wiki compilation is a batch artifact step.** `recipes/wiki-compiler/compile-wiki.mjs` assumes the local worker has already warmed the graph. It skips remote extraction by default, runs typed reasoning edges locally through Ollama, then writes generated wiki pages under `compiled-wiki/`.
+5. **Typed reasoning edges are now local-capable.** `recipes/typed-edge-classifier/classify-edges.mjs` still supports the upstream Anthropic path, but AJO defaults to Ollama's OpenAI-compatible endpoint (`http://localhost:11434/v1`) and `qwen3:30b`.
+
+### Thought quality and wiki readiness
+
+The repo already contains the building blocks for Nate's thought-capture benchmark, but they are not yet wired into one AJO quality workflow:
+
+| Need | Existing building block |
+|------|-------------------------|
+| Label-led captures such as `Decision:` and person notes | `docs/02-companion-prompts.md` quick capture templates |
+| Splitting long or multi-topic text | MCP `distill_transcript` and dashboard ingestion jobs |
+| Confidence-gated classification | `recipes/adaptive-capture-classification/` |
+| Backfilling metadata, summaries, topics, people, actions | `recipes/thought-enrichment/` and the AJO local worker |
+| Duplicate detection | `brain_duplicates_find`, dashboard duplicates API, and `recipes/fingerprint-dedup-backfill/` |
+| Low-quality review | `quality_score` plus the dashboard audit API |
+
+Planned next layer: an AJO "thought quality + wiki readiness" pass that scores existing thoughts against the benchmark: one concept, enough context, owner/status/why present where relevant, useful length, not noise, and not a duplicate. That should report first, then optionally queue fixes or split candidates for review.
 
 ---
 
@@ -430,13 +484,14 @@ claude mcp add --transport http open-brain \
 | **Dashboard** | `dashboards/open-brain-dashboard-next/` | UI & Visual State |
 | **REST API** | `supabase/functions/rest-api/index.ts` | All logic for the Dashboard |
 | **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude/ChatGPT |
-| **AI Worker** | `scripts/local-brain-worker.js` | Background classification (Ollama) |
+| **AI Worker** | `scripts/local-brain-worker.js` | Background classification + entity graph extraction (Ollama) |
 
 **Key Divergences in this Fork:**
 *   **Context-Aware**: Every thought is tagged as `work` or `personal`.
 *   **Serial IDs**: The dashboard uses simple integers (1, 2, 3) for display, while the DB uses UUIDs for security. The Edge Function maps these automatically.
-*   **Local Processing**: We use local LLMs (Ollama) for classification to save on API costs and maintain privacy for sensitive thoughts.
+*   **Local Processing**: We use local LLMs (Ollama) for classification and entity graph extraction to save on API costs and maintain privacy for sensitive thoughts.
+*   **Compiled Wiki**: Wiki pages are generated artifacts from SQL + graph tables. They are not the source of truth and should be regenerated rather than manually edited.
 
 ---
 
-*Documentation maintained by Open Brain Pro (AJO fork). Last updated April 2026.*
+*Documentation maintained by Open Brain Pro (AJO fork). Last updated May 2026.*

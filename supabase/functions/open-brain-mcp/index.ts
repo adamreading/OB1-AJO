@@ -8,13 +8,14 @@ import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
+const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-async function getEmbedding(text: string): Promise<number[]> {
+async function getEmbedding(text: string): Promise<number[] | null> {
+  if (!OPENROUTER_API_KEY) return null;
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
     method: "POST",
     headers: {
@@ -28,13 +29,17 @@ async function getEmbedding(text: string): Promise<number[]> {
   });
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
-    throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
+    console.warn(`OpenRouter embeddings failed: ${r.status} ${msg}`);
+    return null;
   }
   const d = await r.json();
   return d.data[0].embedding;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
+  if (!OPENROUTER_API_KEY) {
+    return { topics: ["uncategorized"], type: "observation" };
+  }
   const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: "POST",
     headers: {
@@ -61,7 +66,8 @@ Only extract what's explicitly there.`,
   });
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
-    throw new Error(`OpenRouter metadata extraction failed: ${r.status} ${msg}`);
+    console.warn(`OpenRouter metadata extraction failed: ${r.status} ${msg}`);
+    return { topics: ["uncategorized"], type: "observation" };
   }
   const d = await r.json();
   try {
@@ -69,6 +75,15 @@ Only extract what's explicitly there.`,
   } catch {
     return { topics: ["uncategorized"], type: "observation" };
   }
+}
+
+function distillHeuristic(text: string): Array<{ content: string; type: string }> {
+  return text
+    .split(/\n+/)
+    .map((line) => line.replace(/^[\-\*\u2022]\s*/, "").replace(/^\d+[.)]\s*/, "").trim())
+    .filter((line) => line.length > 10)
+    .slice(0, 20)
+    .map((content) => ({ content, type: "observation" }));
 }
 
 function createServer(): McpServer {
@@ -95,17 +110,36 @@ function createServer(): McpServer {
     async ({ query, classification, limit, threshold, source }) => {
       try {
         const qEmb = await getEmbedding(query.toLowerCase());
-        const filterObj: Record<string, unknown> = {};
-        if (classification) filterObj.classification = classification;
+        let data: any[] | null = null;
+        let error: any = null;
 
-        const rpcParams: Record<string, unknown> = {
-          query_embedding: qEmb,
-          match_threshold: threshold,
-          match_count: limit,
-        };
-        if (Object.keys(filterObj).length > 0) rpcParams.filter = filterObj;
+        if (qEmb) {
+          const filterObj: Record<string, unknown> = {};
+          if (classification) filterObj.classification = classification;
 
-        const { data, error } = await supabase.rpc("match_thoughts", rpcParams);
+          const rpcParams: Record<string, unknown> = {
+            query_embedding: qEmb,
+            match_threshold: threshold,
+            match_count: limit,
+          };
+          if (Object.keys(filterObj).length > 0) rpcParams.filter = filterObj;
+
+          const result = await supabase.rpc("match_thoughts", rpcParams);
+          data = result.data;
+          error = result.error;
+        } else {
+          let textQuery = supabase
+            .from("thoughts")
+            .select("serial_id, id, content, metadata, source_type, created_at")
+            .ilike("content", `%${query}%`)
+            .order("created_at", { ascending: false })
+            .limit(limit);
+          if (classification) textQuery = textQuery.filter("metadata->>classification", "eq", classification);
+          if (source) textQuery = textQuery.eq("source_type", source);
+          const result = await textQuery;
+          data = (result.data || []).map((t: any) => ({ ...t, similarity: null }));
+          error = result.error;
+        }
 
         if (error) return { content: [{ type: "text", text: `Search error: ${error.message}` }], isError: true };
 
@@ -126,7 +160,8 @@ function createServer(): McpServer {
           const m = t.metadata || {};
           const label = m.classification ? `[${m.classification.toUpperCase()}] ` : "";
           const src = t.source_type ? ` (${t.source_type})` : "";
-          return `${i + 1}. ${label}#${t.serial_id || t.id}${src}\n${t.content}\nSimilarity: ${(t.similarity * 100).toFixed(0)}%`;
+          const score = typeof t.similarity === "number" ? `\nSimilarity: ${(t.similarity * 100).toFixed(0)}%` : "\nMatch: text";
+          return `${i + 1}. ${label}#${t.serial_id || t.id}${src}\n${t.content}${score}`;
         });
 
         return { content: [{ type: "text", text: `Found ${filtered.length} results:\n\n${results.join("\n\n")}` }] };
@@ -248,7 +283,7 @@ function createServer(): McpServer {
 
         if (upsertError) return { content: [{ type: "text", text: `Failed: ${upsertError.message}` }], isError: true };
 
-        await supabase.from("thoughts").update({ embedding }).eq("id", upsertResult.id);
+        if (embedding) await supabase.from("thoughts").update({ embedding }).eq("id", upsertResult.id);
 
         return { content: [{ type: "text", text: `Captured: #${upsertResult.serial_id} [${classification?.toUpperCase() || "UNCATEGORIZED"}]` }] };
       } catch (err: unknown) {
@@ -286,13 +321,15 @@ function createServer(): McpServer {
         const embedding = await getEmbedding(content);
         const metadata = { ...(current.metadata || {}), classification: classification || current.metadata?.classification };
 
-        const { error } = await supabase.from("thoughts").update({
+        const updatePayload: Record<string, unknown> = {
           content,
-          embedding,
           metadata,
           version: (current.version || 1) + 1,
           updated_at: new Date().toISOString()
-        }).match(filter);
+        };
+        if (embedding) updatePayload.embedding = embedding;
+
+        const { error } = await supabase.from("thoughts").update(updatePayload).match(filter);
 
         if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
         return { content: [{ type: "text", text: "Updated successfully." }] };
@@ -315,6 +352,12 @@ function createServer(): McpServer {
     },
     async ({ text, classification }) => {
       try {
+        if (!OPENROUTER_API_KEY) {
+          const thoughts = distillHeuristic(text);
+          const res = thoughts.map((t:any, i:number) => `${i+1}. [${t.type.toUpperCase()}] ${t.content}`);
+          return { content: [{ type: "text", text: `Distilled ${thoughts.length} thoughts:\n\n${res.join("\n\n")}\n\nPlease review and use capture_thought to save any you want to keep.` }] };
+        }
+
         const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
@@ -332,7 +375,9 @@ function createServer(): McpServer {
         const res = thoughts.map((t:any, i:number) => `${i+1}. [${t.type.toUpperCase()}] ${t.content}`);
         return { content: [{ type: "text", text: `Distilled ${thoughts.length} thoughts:\n\n${res.join("\n\n")}\n\nPlease review and use capture_thought to save any you want to keep.` }] };
       } catch (err) {
-        return { content: [{ type: "text", text: "Distillation failed." }], isError: true };
+        const thoughts = distillHeuristic(text);
+        const res = thoughts.map((t:any, i:number) => `${i+1}. [${t.type.toUpperCase()}] ${t.content}`);
+        return { content: [{ type: "text", text: `Distilled ${thoughts.length} thoughts using local fallback:\n\n${res.join("\n\n")}\n\nPlease review and use capture_thought to save any you want to keep.` }] };
       }
     }
   );

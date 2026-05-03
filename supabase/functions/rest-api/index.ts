@@ -343,6 +343,7 @@ app.post("/capture", async (c) => {
       quality_score: 50,
       classification: "personal",
       source_type: source_type || "manual",
+      content_fingerprint: fp,
       metadata: { content_fingerprint: fp },
     })
     .select("id, serial_id, type")
@@ -479,6 +480,7 @@ async function executeJob(jobId: number): Promise<number> {
     const { data: ins } = await supabase.from("thoughts").insert({
       content: item.content, type: item.type || "observation",
       importance: 3, quality_score: 50, classification: "personal",
+      content_fingerprint: fp,
       metadata: { content_fingerprint: fp, job_id: jobId },
     }).select("id, serial_id").single();
     if (ins) {

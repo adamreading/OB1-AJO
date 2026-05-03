@@ -28,12 +28,34 @@ function parseEnvFile(filePath) {
   return out;
 }
 
+function normalizeOllamaChatBaseUrl(rawUrl) {
+  let base = String(rawUrl || "http://localhost:11434").replace(/\/+$/, "");
+  base = base.replace(/\/api\/generate$/, "");
+  base = base.replace(/\/api\/chat$/, "");
+  base = base.replace(/\/api$/, "");
+  if (!base.endsWith("/v1")) base += "/v1";
+  return base;
+}
+
+function isLocalOllamaBaseUrl(rawUrl) {
+  return /(^http:\/\/localhost:11434\/v1$|^http:\/\/127\.0\.0\.1:11434\/v1$)/u.test(
+    String(rawUrl || "").replace(/\/+$/, ""),
+  );
+}
+
 function loadEnv() {
-  return {
+  const env = {
     ...parseEnvFile(path.join(REPO_ROOT, ".env")),
     ...parseEnvFile(path.join(REPO_ROOT, ".env.local")),
     ...process.env,
   };
+  env.OPEN_BRAIN_URL ||= env.SUPABASE_URL;
+  env.OPEN_BRAIN_SERVICE_KEY ||= env.SUPABASE_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
+  env.LLM_BASE_URL ||= normalizeOllamaChatBaseUrl(env.OLLAMA_URL);
+  env.LLM_MODEL ||= env.OLLAMA_MODEL || "qwen3:30b";
+  env.LLM_API_KEY ||= isLocalOllamaBaseUrl(env.LLM_BASE_URL) ? "ollama" : env.OPENROUTER_API_KEY;
+  env.WIKI_ENTITY_EXTRACTION_MODE ||= "local";
+  return env;
 }
 
 function defaultArgs() {
@@ -154,11 +176,14 @@ Entity wiki:
   --semantic-expand            Enable semantic expansion for entity wiki runs
 
 Environment:
-  OPEN_BRAIN_URL
-  OPEN_BRAIN_SERVICE_KEY
-  ENTITY_EXTRACTION_WORKER_URL (optional; defaults from OPEN_BRAIN_URL)
-  ENTITY_EXTRACTION_MCP_ACCESS_KEY or MCP_ACCESS_KEY (for worker trigger)
-  LLM_API_KEY / LLM_MODEL / related vars used by the underlying recipes
+  OPEN_BRAIN_URL             (AJO alias: SUPABASE_URL)
+  OPEN_BRAIN_SERVICE_KEY     (AJO alias: SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY)
+  LLM_API_KEY                (default: ollama for local Ollama)
+  LLM_BASE_URL               (default from OLLAMA_URL -> http://localhost:11434/v1)
+  LLM_MODEL                  (default from OLLAMA_MODEL -> qwen3:30b)
+  WIKI_ENTITY_EXTRACTION_MODE=local|remote (default: local)
+  ENTITY_EXTRACTION_WORKER_URL (remote mode only; defaults from OPEN_BRAIN_URL)
+  ENTITY_EXTRACTION_MCP_ACCESS_KEY or MCP_ACCESS_KEY (remote worker trigger)
 `);
 }
 
@@ -179,7 +204,7 @@ function formatCommand(args) {
 }
 
 function spawnNode(scriptPath, scriptArgs, envOverrides = {}) {
-  const childEnv = { ...process.env, ...envOverrides };
+  const childEnv = { ...process.env, ...loadEnv(), ...envOverrides };
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [scriptPath, ...scriptArgs], {
       cwd: REPO_ROOT,
@@ -195,6 +220,15 @@ function spawnNode(scriptPath, scriptArgs, envOverrides = {}) {
 }
 
 async function triggerEntityExtraction(args, env) {
+  if (env.WIKI_ENTITY_EXTRACTION_MODE !== "remote" && !env.ENTITY_EXTRACTION_WORKER_URL) {
+    const message =
+      "Skipping remote entity extraction; WIKI_ENTITY_EXTRACTION_MODE=local. " +
+      "Run scripts/local-brain-worker.js to keep the graph queue drained.";
+    if (args.requireExtraction) throw new Error(message);
+    console.warn(`[wiki-compiler] ${message}`);
+    return { skipped: true, mode: "local", reason: message };
+  }
+
   const workerUrl =
     env.ENTITY_EXTRACTION_WORKER_URL ||
     (env.OPEN_BRAIN_URL ? `${String(env.OPEN_BRAIN_URL).replace(/\/+$/, "")}/functions/v1/entity-extraction-worker` : null);
@@ -316,6 +350,7 @@ async function main() {
     ];
     if (args.dryRun) edgeArgs.push("--dry-run");
     if (args.mirrorSupersedes) edgeArgs.push("--mirror-supersedes");
+    if (isLocalOllamaBaseUrl(env.LLM_BASE_URL)) edgeArgs.push("--no-cost-cap");
 
     await runStep(
       manifest,

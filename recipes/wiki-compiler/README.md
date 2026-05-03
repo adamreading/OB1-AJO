@@ -19,7 +19,7 @@ That gives you the Karpathy-style "readable compiled understanding" layer withou
 
 `compile-wiki.mjs` orchestrates the graph/wiki stack that now exists on `main`:
 
-1. Triggers the **entity extraction worker** so new thoughts become entities, links, and evidence rows.
+1. Ensures entity extraction has run so new thoughts become entities, links, and evidence rows. In the AJO fork this is normally handled by `scripts/local-brain-worker.js`; remote Edge Function triggering is optional.
 2. Runs the **typed edge classifier** so the system can capture reasoning relations like `supports`, `contradicts`, and `supersedes`.
 3. Batch-generates **entity wiki pages** from linked thoughts and graph edges.
 4. Generates **topic wiki pages** from the core `thoughts` table.
@@ -87,24 +87,26 @@ compiled-wiki/ + compile-manifest.json
 - The merged graph/wiki stack on `main`
 - Node.js 18+
 - A valid `.env.local` or shell env for the underlying recipes
-- A deployed `entity-extraction-worker` Edge Function if you want the wrapper to trigger extraction automatically
+- A drained entity extraction queue. In the AJO fork, keep `scripts/local-brain-worker.js` running via `start_brain.ps1`. Deploy `entity-extraction-worker` only if you explicitly want remote extraction.
 
 ### Required environment
 
 At minimum, the downstream recipes expect:
 
 ```text
-OPEN_BRAIN_URL
-OPEN_BRAIN_SERVICE_KEY
-LLM_API_KEY
+OPEN_BRAIN_URL            # AJO alias: SUPABASE_URL
+OPEN_BRAIN_SERVICE_KEY    # AJO alias: SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY
+LLM_BASE_URL              # AJO default from OLLAMA_URL -> http://localhost:11434/v1
+LLM_MODEL                 # AJO default from OLLAMA_MODEL -> qwen3:30b
+LLM_API_KEY               # AJO default: ollama for local Ollama
 ```
 
 Additional environment varies by phase:
 
-- `LLM_MODEL`, `LLM_BASE_URL` for wiki synthesis
-- `ANTHROPIC_API_KEY` for typed-edge classification
+- `ANTHROPIC_API_KEY` only if you explicitly want the legacy direct-Anthropic typed-edge path
 - `EMBEDDING_API_KEY` if you want semantic expansion or thought-mode entity dossiers
-- `MCP_ACCESS_KEY` or `ENTITY_EXTRACTION_MCP_ACCESS_KEY` if you want this wrapper to trigger the entity extraction worker automatically
+- `WIKI_ENTITY_EXTRACTION_MODE=local|remote` (AJO default: `local`)
+- `MCP_ACCESS_KEY` or `ENTITY_EXTRACTION_MCP_ACCESS_KEY` if you want this wrapper to trigger the remote entity extraction worker automatically
 - `ENTITY_EXTRACTION_WORKER_URL` if you do not want the wrapper to derive it from `OPEN_BRAIN_URL`
 
 ## Install
@@ -129,9 +131,9 @@ This is the default "build the compiled understanding layer" run:
 node recipes/wiki-compiler/compile-wiki.mjs
 ```
 
-By default this:
+By default in the AJO fork this:
 
-- tries to trigger entity extraction
+- skips remote entity extraction and assumes the local worker has drained the queue
 - runs typed-edge classification
 - generates entity wiki pages
 - generates the built-in `autobiography` topic wiki
@@ -264,7 +266,7 @@ At that point you can browse the compiled layer like a wiki while keeping SQL as
 Solution: set `ENTITY_EXTRACTION_WORKER_URL` plus `ENTITY_EXTRACTION_MCP_ACCESS_KEY`, or define `OPEN_BRAIN_URL` plus `MCP_ACCESS_KEY` so the wrapper can derive the worker endpoint.
 
 **Issue: typed-edge classification fails**
-Solution: confirm `ANTHROPIC_API_KEY` is available and that the `typed-reasoning-edges` schema is installed on the target brain.
+Solution: confirm `typed-reasoning-edges` is installed and that your selected LLM endpoint is reachable. In AJO local mode, `OLLAMA_URL=http://localhost:11434/api`, `OLLAMA_MODEL=qwen3:30b`, and `LLM_API_KEY=ollama` are enough; the compiler converts that to Ollama's OpenAI-compatible `/v1` endpoint.
 
 **Issue: entity pages fail with missing relation/table errors**
 Solution: confirm the entity extraction schema and worker have been applied and allowed to populate `entities`, `edges`, and `thought_entities`.

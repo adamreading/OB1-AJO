@@ -52,6 +52,7 @@ import process from "node:process";
 // ── constants ──────────────────────────────────────────────────────────────
 
 const CLASSIFIER_VERSION = "typed-edge-classifier-1.0.0";
+const DEFAULT_LOCAL_MODEL = "qwen3:30b";
 
 // Must match the CHECK constraint in schemas/typed-reasoning-edges/schema.sql
 const TYPED_RELATIONS = new Set([
@@ -80,9 +81,15 @@ const PRICING = {
 // model in after startup.
 const _warnedUnknownPricing = new Set();
 
+function isProbablyLocalModel(model) {
+  const name = String(model || "");
+  return Boolean(name) && !name.includes("/") && !name.startsWith("claude-") && !name.startsWith("gpt-");
+}
+
 function estimateCost(model, inTokens, outTokens) {
   const p = PRICING[model];
   if (!p) {
+    if (isProbablyLocalModel(model)) return 0;
     if (!_warnedUnknownPricing.has(model)) {
       _warnedUnknownPricing.add(model);
       console.warn(
@@ -113,7 +120,7 @@ function assertPricingKnown(args) {
   if (args.hybrid) used.add(args.filterModel);
   used.add(args.singleModel || args.classifyModel);
 
-  const unknown = [...used].filter((m) => !PRICING[m]);
+  const unknown = [...used].filter((m) => !PRICING[m] && !isProbablyLocalModel(m));
   if (unknown.length === 0) return;
 
   if (args.noCostCap) {
@@ -175,6 +182,10 @@ function parseArgs(argv) {
     maxCostUsd: 5.0,
     noCostCap: false,
     mirrorSupersedes: false,
+    modelExplicit: false,
+    filterModelExplicit: false,
+    classifyModelExplicit: false,
+    hybridExplicit: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -188,10 +199,18 @@ function parseArgs(argv) {
     } else if (a === "--model") {
       args.singleModel = argv[++i];
       args.hybrid = false;
-    } else if (a === "--filter-model") args.filterModel = argv[++i];
-    else if (a === "--classify-model") args.classifyModel = argv[++i];
-    else if (a === "--no-hybrid") args.hybrid = false;
-    else if (a === "--max-cost-usd") args.maxCostUsd = Number(argv[++i]) || 5.0;
+      args.modelExplicit = true;
+      args.hybridExplicit = true;
+    } else if (a === "--filter-model") {
+      args.filterModel = argv[++i];
+      args.filterModelExplicit = true;
+    } else if (a === "--classify-model") {
+      args.classifyModel = argv[++i];
+      args.classifyModelExplicit = true;
+    } else if (a === "--no-hybrid") {
+      args.hybrid = false;
+      args.hybridExplicit = true;
+    } else if (a === "--max-cost-usd") args.maxCostUsd = Number(argv[++i]) || 5.0;
     else if (a === "--no-cost-cap") args.noCostCap = true;
     else if (a === "--mirror-supersedes") args.mirrorSupersedes = true;
     else if (a === "--help" || a === "-h") {
@@ -219,6 +238,15 @@ function printHelp() {
       "  --filter-model MODEL     Haiku model for candidate filter (default claude-haiku-4-5-20251001)",
       "  --classify-model MODEL   Opus model for final classification (default claude-opus-4-7)",
       "  --no-hybrid              Skip Haiku filter; run --classify-model on every pair",
+      "                           With LLM_BASE_URL/OLLAMA_URL set and no explicit model",
+      `                           the default is local ${DEFAULT_LOCAL_MODEL} with no hybrid split.`,
+      "",
+      "Environment:",
+      "  OPEN_BRAIN_URL / OPEN_BRAIN_SERVICE_KEY",
+      "  LLM_BASE_URL              OpenAI-compatible base URL; Ollama default http://localhost:11434/v1",
+      `  LLM_MODEL                 default ${DEFAULT_LOCAL_MODEL} for local Ollama`,
+      "  LLM_API_KEY               use any non-empty value for local Ollama",
+      "  ANTHROPIC_API_KEY         supported only for legacy direct-Anthropic mode",
       "",
       "Cost / safety:",
       "  --max-cost-usd N         Hard cap on estimated spend (default 5.00)",
@@ -238,24 +266,79 @@ function printHelp() {
   );
 }
 
+function normalizeOllamaChatBaseUrl(rawUrl) {
+  let base = String(rawUrl || "http://localhost:11434").replace(/\/+$/, "");
+  base = base.replace(/\/api\/generate$/, "");
+  base = base.replace(/\/api\/chat$/, "");
+  base = base.replace(/\/api$/, "");
+  if (!base.endsWith("/v1")) base += "/v1";
+  return base;
+}
+
+function normalizeChatBaseUrl(rawUrl) {
+  return String(rawUrl || "")
+    .replace(/\/chat\/completions$/, "")
+    .replace(/\/+$/, "");
+}
+
+function isLocalOllamaBaseUrl(rawUrl) {
+  return /(^http:\/\/localhost:11434\/v1$|^http:\/\/127\.0\.0\.1:11434\/v1$)/u.test(
+    normalizeChatBaseUrl(rawUrl),
+  );
+}
+
 function loadEnv() {
-  const env = process.env;
+  const raw = process.env;
+  const directAnthropic =
+    !raw.LLM_BASE_URL &&
+    !raw.LLM_MODEL &&
+    !raw.LLM_API_KEY &&
+    !raw.OLLAMA_URL &&
+    !raw.OLLAMA_MODEL &&
+    Boolean(raw.ANTHROPIC_API_KEY);
+
+  const llmBaseUrl = directAnthropic ? null : normalizeChatBaseUrl(raw.LLM_BASE_URL || normalizeOllamaChatBaseUrl(raw.OLLAMA_URL));
+  const llmModel = raw.LLM_MODEL || raw.OLLAMA_MODEL || (directAnthropic ? null : DEFAULT_LOCAL_MODEL);
+  const llmApiKey =
+    raw.LLM_API_KEY ||
+    (llmBaseUrl && isLocalOllamaBaseUrl(llmBaseUrl) ? "ollama" : raw.OPENROUTER_API_KEY) ||
+    null;
   const missing = [];
-  for (const k of ["OPEN_BRAIN_URL", "OPEN_BRAIN_SERVICE_KEY", "ANTHROPIC_API_KEY"]) {
-    if (!env[k]) missing.push(k);
+  const openBrainUrl = raw.OPEN_BRAIN_URL || raw.SUPABASE_URL;
+  const openBrainKey = raw.OPEN_BRAIN_SERVICE_KEY || raw.SUPABASE_SERVICE_ROLE_KEY || raw.SUPABASE_KEY;
+  if (!openBrainUrl) missing.push("OPEN_BRAIN_URL or SUPABASE_URL");
+  if (!openBrainKey) missing.push("OPEN_BRAIN_SERVICE_KEY or SUPABASE_SERVICE_ROLE_KEY");
+  if (directAnthropic && !raw.ANTHROPIC_API_KEY) missing.push("ANTHROPIC_API_KEY");
+  if (!directAnthropic && !llmApiKey) {
+    missing.push("LLM_API_KEY (or OPENROUTER_API_KEY for remote OpenAI-compatible providers)");
   }
   if (missing.length > 0) {
     throw new Error(`Missing env vars: ${missing.join(", ")}`);
   }
   // Normalize URL — allow OPEN_BRAIN_URL with or without trailing slash,
   // with or without /rest/v1. Store the base project URL.
-  let base = String(env.OPEN_BRAIN_URL).replace(/\/+$/, "");
+  let base = String(openBrainUrl).replace(/\/+$/, "");
   base = base.replace(/\/rest\/v1$/, "");
   return {
     OPEN_BRAIN_URL: base,
-    OPEN_BRAIN_SERVICE_KEY: env.OPEN_BRAIN_SERVICE_KEY,
-    ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+    OPEN_BRAIN_SERVICE_KEY: openBrainKey,
+    ANTHROPIC_API_KEY: raw.ANTHROPIC_API_KEY,
+    LLM_PROVIDER: directAnthropic ? "anthropic" : "openai-compatible",
+    LLM_BASE_URL: llmBaseUrl,
+    LLM_API_KEY: llmApiKey,
+    LLM_MODEL: llmModel,
   };
+}
+
+function applyEnvModelDefaults(args, env) {
+  if (env.LLM_PROVIDER !== "openai-compatible") return;
+
+  const modelWasExplicit =
+    args.modelExplicit || args.filterModelExplicit || args.classifyModelExplicit || args.hybridExplicit;
+  if (!modelWasExplicit) {
+    args.singleModel = env.LLM_MODEL || DEFAULT_LOCAL_MODEL;
+    args.hybrid = false;
+  }
 }
 
 // ── Supabase REST client ───────────────────────────────────────────────────
@@ -476,11 +559,83 @@ async function callAnthropic(env, model, system, userMsg, maxTokens) {
   throw lastErr;
 }
 
+async function callOpenAiCompatibleOnce(env, model, system, userMsg, maxTokens) {
+  const res = await fetch(`${normalizeChatBaseUrl(env.LLM_BASE_URL)}/chat/completions`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.LLM_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      temperature: 0,
+      stream: false,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userMsg },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    const err = new Error(`OpenAI-compatible ${model}: ${res.status} ${body.slice(0, 400)}`);
+    err.status = res.status;
+    err.retryable = shouldRetryAnthropicStatus(res.status);
+    throw err;
+  }
+  const body = await res.json();
+  const raw = body?.choices?.[0]?.message?.content?.trim() ?? "";
+  const usage = body?.usage || {};
+  return {
+    raw,
+    inTokens: usage.prompt_tokens || usage.input_tokens || 0,
+    outTokens: usage.completion_tokens || usage.output_tokens || 0,
+  };
+}
+
+async function callOpenAiCompatible(env, model, system, userMsg, maxTokens) {
+  let lastErr;
+  for (let attempt = 0; attempt <= ANTHROPIC_RETRY_MAX; attempt++) {
+    try {
+      return await callOpenAiCompatibleOnce(env, model, system, userMsg, maxTokens);
+    } catch (e) {
+      lastErr = e;
+      if (!e.retryable || attempt === ANTHROPIC_RETRY_MAX) {
+        throw e;
+      }
+      const delay = backoffDelayMs(attempt);
+      console.warn(
+        `[classify-edges] OpenAI-compatible ${model} ${e.status || "network"}: retry ${attempt + 1}/${ANTHROPIC_RETRY_MAX} in ${delay}ms`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
+async function callModel(env, model, system, userMsg, maxTokens) {
+  if (env.LLM_PROVIDER === "anthropic") {
+    return callAnthropic(env, model, system, userMsg, maxTokens);
+  }
+  return callOpenAiCompatible(env, model, system, userMsg, maxTokens);
+}
+
 function parseJsonStrict(raw) {
-  const cleaned = raw.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
+  const withoutThinking = raw.replace(/<think>[\s\S]*?<\/think>/giu, "").trim();
+  const cleaned = withoutThinking.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
   try {
     return JSON.parse(cleaned);
   } catch (e) {
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+      } catch {
+        // Fall through to the original parse error with the raw excerpt.
+      }
+    }
     throw new Error(`JSON parse failed: ${e.message}; raw=${raw.slice(0, 200)}`);
   }
 }
@@ -500,7 +655,7 @@ async function filterCandidate(env, model, thoughtA, thoughtB) {
     `Thought B (${thoughtB.id}, ${String(thoughtB.created_at || "").slice(0, 10)}):\n` +
     `${String(thoughtB.content || "").slice(0, 400)}\n\n` +
     `Is there a meaningful relation? Return strict JSON.`;
-  const { raw, inTokens, outTokens } = await callAnthropic(env, model, system, user, 128);
+  const { raw, inTokens, outTokens } = await callModel(env, model, system, user, 128);
   const parsed = parseJsonStrict(raw);
   return {
     worthClassifying: Boolean(parsed.worth_classifying),
@@ -553,7 +708,7 @@ async function classifyPair(env, model, thoughtA, thoughtB) {
     `${String(thoughtB.content || "").slice(0, 800)}\n\n` +
     `Classify the relationship.`;
 
-  const { raw, inTokens, outTokens } = await callAnthropic(env, model, system, user, 512);
+  const { raw, inTokens, outTokens } = await callModel(env, model, system, user, 512);
   const parsed = parseJsonStrict(raw);
   return { ...parsed, inTokens, outTokens };
 }
@@ -845,6 +1000,8 @@ async function processInChunks(items, fn, parallelism, costState, maxCostUsd, wo
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const env = loadEnv();
+  applyEnvModelDefaults(args, env);
 
   // Preflight: if any model we're about to call has no pricing entry,
   // refuse to run with --max-cost-usd unless --no-cost-cap is set. See
@@ -852,7 +1009,6 @@ async function main() {
   // uncapped" failure mode before any LLM spend.
   assertPricingKnown(args);
 
-  const env = loadEnv();
   const sb = sbClient(env);
 
   let pairs;
@@ -871,7 +1027,8 @@ async function main() {
   }
   console.log(`[classify-edges] processing ${pairs.length} pairs${args.dryRun ? " (dry-run)" : ""}`);
   console.log(
-    `[classify-edges] mode=${args.hybrid ? "hybrid(Haiku->Opus)" : args.singleModel || args.classifyModel}` +
+    `[classify-edges] mode=${args.hybrid ? "hybrid(filter->classify)" : args.singleModel || args.classifyModel}` +
+      ` | provider=${env.LLM_PROVIDER}` +
       ` | max-cost=$${args.maxCostUsd.toFixed(2)}` +
       ` | mirror-supersedes=${args.mirrorSupersedes}`,
   );
