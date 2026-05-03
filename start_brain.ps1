@@ -20,12 +20,12 @@ if ($null -eq $OllamaCheck) {
 Write-Host ""
 Write-Host "Launching Dashboard (Next.js) on Port 3010..." -ForegroundColor Cyan
 $DashboardPath = Join-Path $ProjectRoot "dashboards\open-brain-dashboard-next"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$DashboardPath'; `$env:PORT=3010; npm run dev"
+Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$DashboardPath'; `$env:PORT=3010; npm.cmd run dev"
 
 # 3. Start Local Brain Worker
 Write-Host "Starting Local Brain Worker (classification + entity graph extraction)..." -ForegroundColor Cyan
 $WorkerPath = Join-Path $ProjectRoot "scripts\local-brain-worker.js"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$ProjectRoot'; node --env-file=.env '$WorkerPath'"
+Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$ProjectRoot'; node --env-file=.env '$WorkerPath'"
 
 Write-Host ""
 Write-Host "Everything is starting up!" -ForegroundColor Green
