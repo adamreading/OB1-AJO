@@ -98,7 +98,8 @@ function buildPrompt(content) {
     .replace(/<thought_content>/gi, "<thought_content_escaped>")
     .replace(/<\/thought_content>/gi, "</thought_content_escaped>");
 
-  return `You enrich one Open Brain thought. Return ONLY strict JSON.
+  return `/no_think
+You enrich one Open Brain thought. Return ONLY strict JSON.
 
 Work context means: ${workDesc}
 Personal context means: ${personalDesc}
@@ -141,12 +142,16 @@ async function callOllama(content) {
       prompt: buildPrompt(content),
       stream: false,
       format: "json",
+      options: {
+        temperature: 0,
+      },
     }),
   });
 
   if (!response.ok) throw new Error(`Ollama error ${response.status}: ${await response.text()}`);
   const result = await response.json();
-  return parseJsonObject(result.response);
+  const raw = result.response || result.message?.content || result.thinking || "";
+  return parseJsonObject(raw);
 }
 
 function normalizeAnalysis(raw, existingThought) {
