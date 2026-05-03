@@ -571,6 +571,7 @@ async function callOpenAiCompatibleOnce(env, model, system, userMsg, maxTokens) 
       max_tokens: maxTokens,
       temperature: 0,
       stream: false,
+      think: false,
       messages: [
         { role: "system", content: system },
         { role: "user", content: userMsg },
@@ -585,7 +586,8 @@ async function callOpenAiCompatibleOnce(env, model, system, userMsg, maxTokens) 
     throw err;
   }
   const body = await res.json();
-  const raw = body?.choices?.[0]?.message?.content?.trim() ?? "";
+  const msg = body?.choices?.[0]?.message ?? {};
+  const raw = (msg.content || msg.reasoning || "").trim();
   const usage = body?.usage || {};
   return {
     raw,

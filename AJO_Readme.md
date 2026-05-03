@@ -425,28 +425,21 @@ Start with a low `--edge-limit` because typed reasoning edges compare pairs of t
 
 ### Current integrated workflow
 
-The AJO fork now combines the upstream graph/wiki stack with the existing local worker:
+The AJO fork combines the upstream graph/wiki stack with the existing local worker:
 
 1. **Capture stays fast and remote-safe.** `rest-api` and `open-brain-mcp` run as Supabase Edge Functions. They can use OpenRouter for cheap embeddings and lightweight metadata extraction, but capture still works with graceful fallbacks if OpenRouter is unavailable.
-2. **Local worker owns private/heavier enrichment.** `scripts/local-brain-worker.js` drains `entity_extraction_queue` with Ollama (`qwen3:30b` by default), preserves manual classification where present, writes summaries/classification/importance, and populates `entities`, `thought_entities`, and entity `edges` when the graph schema is installed.
-3. **Historical thoughts need a catchup queue.** Existing thoughts created before the graph trigger was installed need to be inserted into `entity_extraction_queue` once. The entity-extraction schema contains the backfill SQL at the bottom; run it after applying the schema, then leave `start_brain.ps1` running until the queue drains.
-4. **Wiki compilation is a batch artifact step.** `recipes/wiki-compiler/compile-wiki.mjs` assumes the local worker has already warmed the graph. It skips remote extraction by default, runs typed reasoning edges locally through Ollama, then writes generated wiki pages under `compiled-wiki/`.
-5. **Typed reasoning edges are now local-capable.** `recipes/typed-edge-classifier/classify-edges.mjs` still supports the upstream Anthropic path, but AJO defaults to Ollama's OpenAI-compatible endpoint (`http://localhost:11434/v1`) and `qwen3:30b`.
+2. **Local worker owns enrichment.** `scripts/local-brain-worker.js` drains `entity_extraction_queue` with Ollama (`qwen3:30b` by default), preserves manual classification where present, writes summaries/classification/importance, and populates `entities`, `thought_entities`, and entity `edges`.
+3. **Historical thoughts need a one-time catchup queue.** Existing thoughts created before the graph trigger was installed need to be inserted into `entity_extraction_queue` once. The entity-extraction schema contains the backfill SQL at the bottom; run it after applying the schema, then leave `start_brain.ps1` running until the queue drains.
+4. **Wiki compilation runs on demand (auto-trigger coming).** `recipes/wiki-compiler/compile-wiki.mjs --skip-extraction` assumes the local worker has already warmed the graph. It runs typed reasoning edges and generates entity + topic wiki pages. Run manually after the queue drains; a worker-driven auto-trigger (queue drains → compile fires) is the next planned addition.
+5. **Typed reasoning edges are fully local.** `recipes/typed-edge-classifier/classify-edges.mjs` defaults to Ollama's OpenAI-compatible endpoint (`http://localhost:11434/v1`) and `qwen3:30b`. No external API required.
 
-### Thought quality and wiki readiness
+### Next: wiki_pages table + dashboard wiki view
 
-The repo already contains the building blocks for Nate's thought-capture benchmark, but they are not yet wired into one AJO quality workflow:
+Wiki output currently lands in `compiled-wiki/` as markdown files. The next additions are:
 
-| Need | Existing building block |
-|------|-------------------------|
-| Label-led captures such as `Decision:` and person notes | `docs/02-companion-prompts.md` quick capture templates |
-| Splitting long or multi-topic text | MCP `distill_transcript` and dashboard ingestion jobs |
-| Confidence-gated classification | `recipes/adaptive-capture-classification/` |
-| Backfilling metadata, summaries, topics, people, actions | `recipes/thought-enrichment/` and the AJO local worker |
-| Duplicate detection | `brain_duplicates_find`, dashboard duplicates API, and `recipes/fingerprint-dedup-backfill/` |
-| Low-quality review | `quality_score` plus the dashboard audit API |
-
-Planned next layer: an AJO "thought quality + wiki readiness" pass that scores existing thoughts against the benchmark: one concept, enough context, owner/status/why present where relevant, useful length, not noise, and not a duplicate. That should report first, then optionally queue fixes or split candidates for review.
+- A `wiki_pages` Supabase table so generated pages live in the database and are queryable
+- A `/wiki` dashboard page to browse entity and topic pages without leaving the dashboard
+- Worker auto-trigger: when the entity extraction queue drains to zero after processing new thoughts, the worker spawns a full wiki compile automatically
 
 ---
 
@@ -483,8 +476,9 @@ claude mcp add --transport http open-brain \
 | :--- | :--- | :--- |
 | **Dashboard** | `dashboards/open-brain-dashboard-next/` | UI & Visual State |
 | **REST API** | `supabase/functions/rest-api/index.ts` | All logic for the Dashboard |
-| **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude/ChatGPT |
+| **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude, ChatGPT, Perplexity, Copilot, etc. |
 | **AI Worker** | `scripts/local-brain-worker.js` | Background classification + entity graph extraction (Ollama) |
+| **Wiki Compiler** | `recipes/wiki-compiler/compile-wiki.mjs` | On-demand compiled wiki generation |
 
 **Key Divergences in this Fork:**
 *   **Context-Aware**: Every thought is tagged as `work` or `personal`.
@@ -494,4 +488,4 @@ claude mcp add --transport http open-brain \
 
 ---
 
-*Documentation maintained by Open Brain Pro (AJO fork). Last updated May 2026.*
+*Documentation maintained by Open Brain Pro (AJO fork). Last updated May 2026 — graph pipeline, Ollama/qwen3 local processing, and wiki compiler integrated.*
