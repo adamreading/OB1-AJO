@@ -121,6 +121,19 @@ ALTER TABLE public.entity_extraction_queue
   ADD COLUMN IF NOT EXISTS worker_version TEXT,
   ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 
+-- AJO compatibility: earlier graph prototypes may already have created
+-- entities/thought_entities without the timestamp/provenance columns used by
+-- the upstream graph/wiki recipes and local worker.
+ALTER TABLE public.entities
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+ALTER TABLE public.thought_entities
+  ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'entity_worker',
+  ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
 UPDATE public.entity_extraction_queue
 SET status = 'complete'
 WHERE status = 'done';
