@@ -255,6 +255,132 @@ function AliasModal({
   );
 }
 
+// ── Merge Modal ────────────────────────────────────────────────────────────
+
+function MergeModal({
+  source,
+  pages,
+  onClose,
+  onMerged,
+}: {
+  source: WikiPageDetail;
+  pages: WikiPageSummary[];
+  onClose: () => void;
+  onMerged: (targetSlug: string) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [target, setTarget] = useState<WikiPageSummary | null>(null);
+  const [merging, setMerging] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const candidates = pages.filter(
+    (p) =>
+      p.entity_id &&
+      p.entity_id !== source.entity_id &&
+      (search === "" ||
+        p.title.toLowerCase().includes(search.toLowerCase()) ||
+        (p.aliases ?? []).some((a) => a.toLowerCase().includes(search.toLowerCase())))
+  );
+
+  const handleMerge = async () => {
+    if (!target || !source.entity_id || !target.entity_id) return;
+    setMerging(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/entities/${source.entity_id}/merge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_id: target.entity_id }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      onMerged(target.slug);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Merge failed");
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="bg-bg-surface border border-border rounded-xl shadow-xl w-full max-w-md mx-4 p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-text-primary">
+            Merge &ldquo;{source.title}&rdquo; into&hellip;
+          </h3>
+          <button onClick={onClose} className="text-text-muted hover:text-text-secondary transition-colors text-lg leading-none">
+            ×
+          </button>
+        </div>
+
+        <p className="text-xs text-text-muted mb-3">
+          All thoughts, edges, and aliases move to the target. The source entity is permanently deleted.
+        </p>
+
+        <input
+          type="text"
+          autoFocus
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setTarget(null); }}
+          placeholder="Search entities…"
+          className="w-full bg-bg-elevated border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-violet mb-2"
+        />
+
+        <div className="max-h-48 overflow-y-auto border border-border rounded-lg mb-3">
+          {candidates.length === 0 ? (
+            <p className="px-3 py-4 text-xs text-text-muted text-center">No matching entities</p>
+          ) : (
+            candidates.slice(0, 20).map((p) => (
+              <button
+                key={p.slug}
+                onClick={() => setTarget(p)}
+                className={`w-full text-left px-3 py-2 border-b border-border/50 last:border-0 transition-colors text-sm ${
+                  target?.slug === p.slug
+                    ? "bg-violet-surface text-violet"
+                    : "hover:bg-bg-hover text-text-primary"
+                }`}
+              >
+                {p.title}
+                <span className="ml-1.5 text-xs text-text-muted">{p.type}</span>
+              </button>
+            ))
+          )}
+        </div>
+
+        {target && (
+          <p className="text-xs text-amber-400 mb-3">
+            ⚠ &ldquo;{source.title}&rdquo; will be deleted. Everything moves to &ldquo;{target.title}&rdquo;.
+          </p>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleMerge}
+            disabled={!target || merging}
+            className="px-3 py-1.5 text-sm bg-danger text-white rounded-lg hover:bg-danger/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {merging ? "Merging…" : target ? `Merge into ${target.title}` : "Select a target first"}
+          </button>
+        </div>
+
+        {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────
 
 export default function WikiPage() {
@@ -269,6 +395,7 @@ export default function WikiPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [showAliasModal, setShowAliasModal] = useState(false);
+  const [showMergeModal, setShowMergeModal] = useState(false);
   const [contextFilter, setContextFilter] = useState<"all" | "work" | "personal">("all");
 
   useEffect(() => {
@@ -335,6 +462,19 @@ export default function WikiPage() {
     }
   }, [selected, editContent]);
 
+  const handleMerged = useCallback((targetSlug: string) => {
+    setShowMergeModal(false);
+    setLoading(true);
+    fetch("/api/wiki")
+      .then((r) => r.json())
+      .then((d: { data: WikiPageSummary[] }) => {
+        setPages(d.data || []);
+        setLoading(false);
+        loadDetail(targetSlug);
+      })
+      .catch(() => setLoading(false));
+  }, [loadDetail]);
+
   const handleAliasAdded = useCallback((alias: string) => {
     // Keep list aliases in sync so search works immediately
     setPages((prev) =>
@@ -372,6 +512,15 @@ export default function WikiPage() {
           page={selected}
           onClose={() => setShowAliasModal(false)}
           onAliasAdded={handleAliasAdded}
+        />
+      )}
+
+      {showMergeModal && selected && (
+        <MergeModal
+          source={selected}
+          pages={pages}
+          onClose={() => setShowMergeModal(false)}
+          onMerged={handleMerged}
         />
       )}
 
@@ -543,13 +692,22 @@ export default function WikiPage() {
 
                 <div className="flex items-center gap-2 shrink-0">
                   {selected.entity_id && (
-                    <button
-                      onClick={() => setShowAliasModal(true)}
-                      title="Manage aliases"
-                      className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
-                    >
-                      Aliases {(selected.aliases ?? []).length > 0 ? `(${selected.aliases!.length})` : ""}
-                    </button>
+                    <>
+                      <button
+                        onClick={() => setShowAliasModal(true)}
+                        title="Manage aliases"
+                        className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+                      >
+                        Aliases {(selected.aliases ?? []).length > 0 ? `(${selected.aliases!.length})` : ""}
+                      </button>
+                      <button
+                        onClick={() => setShowMergeModal(true)}
+                        title="Merge into another entity"
+                        className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+                      >
+                        Merge
+                      </button>
+                    </>
                   )}
                   {editing ? (
                     <>

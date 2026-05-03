@@ -576,6 +576,69 @@ app.put("/wiki-pages/:slug", async (c) => {
   return c.json({ slug: data.slug, action: "updated", message: "Saved" }, 200, corsHeaders);
 });
 
+// Entity merge — reassigns thought_entities + edges to target, then deletes source
+app.post("/entities/:id/merge", async (c) => {
+  const sourceId = Number(c.req.param("id"));
+  const body = await c.req.json();
+  const targetId = Number(body.target_id);
+  if (!targetId || isNaN(targetId) || targetId === sourceId) {
+    return c.json({ error: "Valid target_id (different from source) required" }, 400, corsHeaders);
+  }
+
+  const { data: source, error: srcErr } = await supabase
+    .from("entities").select("canonical_name, aliases").eq("id", sourceId).single();
+  if (srcErr || !source) return c.json({ error: "Source entity not found" }, 404, corsHeaders);
+
+  const { data: target, error: tgtErr } = await supabase
+    .from("entities").select("canonical_name, aliases").eq("id", targetId).single();
+  if (tgtErr || !target) return c.json({ error: "Target entity not found" }, 404, corsHeaders);
+
+  // Re-assign thought_entities
+  await supabase.from("thought_entities").update({ entity_id: targetId }).eq("entity_id", sourceId);
+
+  // Re-assign edges (as source) — drop duplicates
+  const { data: srcEdges } = await supabase.from("edges")
+    .select("id, to_entity_id, relation").eq("from_entity_id", sourceId);
+  for (const edge of srcEdges || []) {
+    const { data: dup } = await supabase.from("edges").select("id")
+      .eq("from_entity_id", targetId).eq("to_entity_id", edge.to_entity_id)
+      .eq("relation", edge.relation).maybeSingle();
+    if (dup) {
+      await supabase.from("edges").delete().eq("id", edge.id);
+    } else {
+      await supabase.from("edges").update({ from_entity_id: targetId }).eq("id", edge.id);
+    }
+  }
+
+  // Re-assign edges (as target) — drop duplicates
+  const { data: tgtEdges } = await supabase.from("edges")
+    .select("id, from_entity_id, relation").eq("to_entity_id", sourceId);
+  for (const edge of tgtEdges || []) {
+    const { data: dup } = await supabase.from("edges").select("id")
+      .eq("from_entity_id", edge.from_entity_id).eq("to_entity_id", targetId)
+      .eq("relation", edge.relation).maybeSingle();
+    if (dup) {
+      await supabase.from("edges").delete().eq("id", edge.id);
+    } else {
+      await supabase.from("edges").update({ to_entity_id: targetId }).eq("id", edge.id);
+    }
+  }
+
+  // Merge aliases — add source canonical_name + aliases into target
+  const srcAliases: string[] = Array.isArray(source.aliases) ? source.aliases : [];
+  const tgtAliases: string[] = Array.isArray(target.aliases) ? target.aliases : [];
+  const combined = Array.from(new Set([...tgtAliases, ...srcAliases, source.canonical_name]));
+  await supabase.from("entities")
+    .update({ aliases: combined, updated_at: new Date().toISOString() })
+    .eq("id", targetId);
+
+  // Delete source wiki page + entity
+  await supabase.from("wiki_pages").delete().eq("entity_id", sourceId);
+  await supabase.from("entities").delete().eq("id", sourceId);
+
+  return c.json({ merged: true, source_id: sourceId, target_id: targetId }, 200, corsHeaders);
+});
+
 // Double Mount — handles both /rest-api/... and /...
 const api = new Hono();
 api.route("/rest-api", app);
