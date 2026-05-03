@@ -1,6 +1,6 @@
 # Open Brain Pro (AJO Version) — Complete Setup Guide
 
-This is the definitive "ground-up" guide for building the AJO fork of Open Brain. Once finished, you will have a personal knowledge system with automatic "Work vs Personal" classification, local entity graph extraction, semantic search, optional compiled wiki generation, and a full Next.js dashboard.
+This is the definitive "ground-up" guide for building the AJO fork of Open Brain. Once finished, you will have a personal knowledge system with automatic "Work vs Personal" classification, local entity graph extraction, semantic search, compiled wiki generation (with auto-trigger), and a full Next.js dashboard.
 
 ---
 
@@ -9,17 +9,18 @@ This is the definitive "ground-up" guide for building the AJO fork of Open Brain
 You'll be generating API keys and passwords across several services. **Do not trust your memory.** Create a text file called `credentials.txt` and save these as you go:
 
 1.  **Supabase Account**: Sign up at [supabase.com](https://supabase.com).
-2.  **Ollama**: Install [Ollama](https://ollama.com) locally for background classification, entity graph extraction, and wiki compilation.
-3.  **OpenRouter Account (optional)**: Only needed if you deliberately want hosted embeddings or hosted metadata extraction inside Edge Functions.
+2.  **Ollama**: Install [Ollama](https://ollama.com) locally for background classification, entity graph extraction, and wiki compilation. Pull the default model: `ollama pull qwen3:30b`
+3.  **OpenRouter Account (optional)**: Only needed if you want hosted embeddings or metadata extraction inside Edge Functions.
 
 | Credential | Where to find it |
 | :--- | :--- |
 | `SUPABASE_PROJECT_REF` | Dashboard URL: `project/THIS_PART` |
 | `SUPABASE_DB_PASSWORD` | You set this during project creation |
 | `SUPABASE_SERVICE_ROLE_KEY` | Settings → API → `service_role` |
+| `SUPABASE_ANON_KEY` | Settings → API → `anon` (public) |
 | `OPENROUTER_API_KEY` | Optional: openrouter.ai/keys |
-| `BRAIN_KEY` | You choose this (your API password) |
-| `MCP_ACCESS_KEY` | You choose this (for remote AI access) |
+| `BRAIN_KEY` | You choose this (dashboard API password) |
+| `MCP_ACCESS_KEY` | You choose this (for remote AI/MCP access) |
 
 ---
 
@@ -28,13 +29,12 @@ You'll be generating API keys and passwords across several services. **Do not tr
 1.  **Create Project**: Go to [Supabase](https://supabase.com) → **New Project**.
 2.  **Details**: Name it `open-brain`, set a strong **Database Password**, and pick a region near you.
 3.  **Wait**: It takes about 2 minutes to provision.
-4.  **Grab Details**: Go to **Settings** (gear) → **API**. Copy your **Project URL** and the **`service_role` (secret)** key.
+4.  **Grab Details**: Go to **Settings** (gear) → **API**. Copy your **Project URL**, the **`service_role` (secret)** key, and the **`anon` (public)** key.
+5.  **Enable pgvector**: Database → Extensions → search "vector" → flip pgvector ON.
 
 ---
 
 ## 💻 Phase 2: CLI & Project Linking
-
-The CLI is the fastest way to deploy your brain's logic.
 
 ### 1. Install Supabase CLI
 *   **Mac/Linux**: `brew install supabase/tap/supabase`
@@ -56,13 +56,12 @@ supabase link --project-ref your-project-ref
 
 ## 🗄️ Phase 3: AJO SQL Schema
 
-Run the following block in your Supabase **SQL Editor** (New Query). This creates the core thoughts table, custom AJO classification queues, and advanced search functions.
+Run each block below in your Supabase **SQL Editor** (New Query → Run). Run them in order.
+
+### Block 1: Core Thoughts Table + Functions
 
 ```sql
--- 1. Enable Extensions
-CREATE EXTENSION IF NOT EXISTS vector;
-
--- 2. Thoughts Table (The Core)
+-- 1. Thoughts Table (The Core)
 CREATE TABLE IF NOT EXISTS thoughts (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   serial_id SERIAL UNIQUE,
@@ -83,7 +82,7 @@ CREATE TABLE IF NOT EXISTS thoughts (
   content_fingerprint TEXT UNIQUE
 );
 
--- 3. Thought Versions (Archiving updates)
+-- 2. Thought Versions (archiving updates)
 CREATE TABLE IF NOT EXISTS thought_versions (
   id SERIAL PRIMARY KEY,
   thought_id UUID REFERENCES thoughts(id) ON DELETE CASCADE,
@@ -93,7 +92,7 @@ CREATE TABLE IF NOT EXISTS thought_versions (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 4. Reflections Table
+-- 3. Reflections Table
 CREATE TABLE IF NOT EXISTS reflections (
   id SERIAL PRIMARY KEY,
   thought_id UUID REFERENCES thoughts(id) ON DELETE CASCADE,
@@ -105,24 +104,7 @@ CREATE TABLE IF NOT EXISTS reflections (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 5. Entity Extraction Queue (Background AI worker)
-CREATE TABLE IF NOT EXISTS entity_extraction_queue (
-  thought_id UUID PRIMARY KEY REFERENCES thoughts(id) ON DELETE CASCADE,
-  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'complete', 'failed', 'skipped')),
-  attempt_count INTEGER DEFAULT 0,
-  last_error TEXT,
-  queued_at TIMESTAMPTZ DEFAULT now(),
-  started_at TIMESTAMPTZ,
-  processed_at TIMESTAMPTZ,
-  source_fingerprint TEXT,
-  source_updated_at TIMESTAMPTZ,
-  worker_version TEXT,
-  metadata JSONB DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ DEFAULT now(),
-  updated_at TIMESTAMPTZ DEFAULT now()
-);
-
--- 6. Ingestion Jobs (bulk import tracking)
+-- 4. Ingestion Jobs (bulk import tracking)
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
   id SERIAL PRIMARY KEY,
   source_label TEXT DEFAULT 'manual',
@@ -133,7 +115,7 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
   completed_at TIMESTAMPTZ
 );
 
--- 7. Ingestion Items (individual extracted thoughts per job)
+-- 5. Ingestion Items (individual extracted thoughts per job)
 CREATE TABLE IF NOT EXISTS ingestion_items (
   id SERIAL PRIMARY KEY,
   job_id INTEGER REFERENCES ingestion_jobs(id) ON DELETE CASCADE,
@@ -146,8 +128,7 @@ CREATE TABLE IF NOT EXISTS ingestion_items (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 8. Semantic Search Function
--- Note: filter jsonb allows optional metadata filtering (e.g. by classification)
+-- 6. Semantic Search Function
 CREATE OR REPLACE FUNCTION match_thoughts(
   query_embedding vector(1536),
   match_threshold float DEFAULT 0.3,
@@ -189,7 +170,7 @@ BEGIN
 END;
 $$;
 
--- 9. Upsert Thought (Idempotent capture with fingerprinting)
+-- 7. Upsert Thought (idempotent capture with fingerprinting)
 CREATE OR REPLACE FUNCTION upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')
 RETURNS JSONB AS $$
 DECLARE
@@ -205,8 +186,8 @@ BEGIN
 
   INSERT INTO thoughts (content, content_fingerprint, metadata, type, importance, sensitivity_tier, source_type)
   VALUES (
-    p_content, 
-    v_fingerprint, 
+    p_content,
+    v_fingerprint,
     COALESCE(p_payload->'metadata', '{}'::jsonb),
     COALESCE(p_payload->>'type', 'observation'),
     COALESCE((p_payload->>'importance')::int, 3),
@@ -223,7 +204,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- 10. Find Duplicates (Vector similarity pairs)
+-- 8. Find Duplicates (vector similarity pairs)
 CREATE OR REPLACE FUNCTION brain_duplicates_find(
   p_threshold float DEFAULT 0.85,
   p_limit int DEFAULT 50,
@@ -253,7 +234,7 @@ BEGIN
 END;
 $$;
 
--- 11. Aggregate Stats
+-- 9. Aggregate Stats
 CREATE OR REPLACE FUNCTION brain_stats_aggregate(
   p_since_days int DEFAULT 30,
   p_classification text DEFAULT NULL
@@ -287,26 +268,198 @@ END;
 $$;
 ```
 
-> **Important:** If you created `match_thoughts` before and semantic search returns errors about `operator does not exist: vector <=> vector`, run this fix:
+> **Tip:** If semantic search later returns `operator does not exist: vector <=> vector`, run:
 > ```sql
 > ALTER FUNCTION match_thoughts(vector, float, int, jsonb)
 >   SET search_path = public, extensions;
 > ```
-> This is needed because Supabase installs pgvector in the `extensions` schema.
 
 ---
 
-## ⚡ Phase 2: Supabase Edge Function
+### Block 2: Entity Extraction Graph
 
-The dashboard talks to a single Edge Function (`rest-api`) for all API calls. The file at `supabase/functions/rest-api/index.ts` in this repo is the **canonical source** — always deploy from there.
+```sql
+-- Entities (canonical graph nodes)
+CREATE TABLE IF NOT EXISTS public.entities (
+  id BIGSERIAL PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  canonical_name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL,
+  aliases TEXT[] NOT NULL DEFAULT '{}',
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (entity_type, normalized_name)
+);
 
-### Routes provided
+-- Entity-to-entity edges
+CREATE TABLE IF NOT EXISTS public.edges (
+  id BIGSERIAL PRIMARY KEY,
+  from_entity_id BIGINT NOT NULL REFERENCES public.entities(id) ON DELETE CASCADE,
+  to_entity_id BIGINT NOT NULL REFERENCES public.entities(id) ON DELETE CASCADE,
+  relation TEXT NOT NULL,
+  support_count INT NOT NULL DEFAULT 1,
+  confidence NUMERIC(3,2),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  valid_from TIMESTAMPTZ,
+  valid_until TIMESTAMPTZ,
+  decay_weight NUMERIC(3,2),
+  UNIQUE (from_entity_id, to_entity_id, relation)
+);
+
+-- Thought-entity links
+CREATE TABLE IF NOT EXISTS public.thought_entities (
+  thought_id UUID NOT NULL REFERENCES public.thoughts(id) ON DELETE CASCADE,
+  entity_id BIGINT NOT NULL REFERENCES public.entities(id) ON DELETE CASCADE,
+  mention_role TEXT NOT NULL DEFAULT 'mentioned',
+  confidence NUMERIC(3,2),
+  source TEXT NOT NULL DEFAULT 'entity_worker',
+  evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (thought_id, entity_id, mention_role)
+);
+
+-- Entity extraction queue
+CREATE TABLE IF NOT EXISTS public.entity_extraction_queue (
+  thought_id UUID PRIMARY KEY REFERENCES public.thoughts(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'complete', 'failed', 'skipped')),
+  attempt_count INT NOT NULL DEFAULT 0,
+  last_error TEXT,
+  queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  processed_at TIMESTAMPTZ,
+  source_fingerprint TEXT,
+  source_updated_at TIMESTAMPTZ,
+  worker_version TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+-- Consolidation log (audit trail for merges)
+CREATE TABLE IF NOT EXISTS public.consolidation_log (
+  id BIGSERIAL PRIMARY KEY,
+  operation TEXT NOT NULL,
+  survivor_id UUID,
+  loser_id UUID,
+  details JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_entities_type ON public.entities(entity_type);
+CREATE INDEX IF NOT EXISTS idx_entities_normalized ON public.entities(normalized_name);
+CREATE INDEX IF NOT EXISTS idx_edges_from ON public.edges(from_entity_id);
+CREATE INDEX IF NOT EXISTS idx_edges_to ON public.edges(to_entity_id);
+CREATE INDEX IF NOT EXISTS idx_thought_entities_entity ON public.thought_entities(entity_id);
+CREATE INDEX IF NOT EXISTS idx_thought_entities_thought ON public.thought_entities(thought_id);
+CREATE INDEX IF NOT EXISTS idx_extraction_queue_status
+  ON public.entity_extraction_queue(status)
+  WHERE status = 'pending';
+
+-- Auto-queue trigger: when a thought is inserted or content changes, queue for extraction
+CREATE OR REPLACE FUNCTION public.queue_entity_extraction()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE v_source_fingerprint TEXT;
+BEGIN
+  IF NEW.metadata->>'generated_by' IS NOT NULL THEN RETURN NEW; END IF;
+  v_source_fingerprint := COALESCE(
+    NEW.content_fingerprint,
+    md5(lower(trim(regexp_replace(NEW.content, '\s+', ' ', 'g'))))
+  );
+  INSERT INTO public.entity_extraction_queue (thought_id, status, source_fingerprint, source_updated_at)
+  VALUES (NEW.id, 'pending', v_source_fingerprint, NEW.updated_at)
+  ON CONFLICT (thought_id) DO UPDATE SET
+    status = 'pending', attempt_count = 0, last_error = NULL, queued_at = now(),
+    source_fingerprint = EXCLUDED.source_fingerprint,
+    source_updated_at = EXCLUDED.source_updated_at
+  WHERE entity_extraction_queue.source_fingerprint IS DISTINCT FROM EXCLUDED.source_fingerprint;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_queue_entity_extraction ON public.thoughts;
+CREATE TRIGGER trg_queue_entity_extraction
+  AFTER INSERT OR UPDATE OF content, metadata ON public.thoughts
+  FOR EACH ROW EXECUTE FUNCTION public.queue_entity_extraction();
+
+-- RLS + Grants
+ALTER TABLE public.entities               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.edges                  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.thought_entities       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.entity_extraction_queue ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.consolidation_log      ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY entities_service_role_all ON public.entities FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY edges_service_role_all ON public.edges FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY thought_entities_service_role_all ON public.thought_entities FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY entity_extraction_queue_service_role_all ON public.entity_extraction_queue FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY consolidation_log_service_role_all ON public.consolidation_log FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+GRANT ALL ON public.entities, public.edges, public.thought_entities,
+             public.entity_extraction_queue, public.consolidation_log TO service_role;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
+
+NOTIFY pgrst, 'reload schema';
+```
+
+> **Backfill existing thoughts** (run once after applying schema to an existing brain):
+> ```sql
+> INSERT INTO public.entity_extraction_queue (thought_id, status, source_fingerprint, source_updated_at)
+> SELECT id, 'pending', content_fingerprint, updated_at
+> FROM public.thoughts
+> WHERE (metadata->>'generated_by') IS NULL
+> ON CONFLICT (thought_id) DO NOTHING;
+> ```
+
+---
+
+### Block 3: Wiki Pages
+
+```sql
+CREATE TABLE IF NOT EXISTS public.wiki_pages (
+  id BIGSERIAL PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL DEFAULT 'entity' CHECK (type IN ('entity', 'topic')),
+  entity_id BIGINT REFERENCES public.entities(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  thought_count INTEGER NOT NULL DEFAULT 0,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  manually_edited BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_type ON public.wiki_pages (type);
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_entity_id ON public.wiki_pages (entity_id);
+
+ALTER TABLE public.wiki_pages ENABLE ROW LEVEL SECURITY;
+CREATE POLICY wiki_pages_service_role_all ON public.wiki_pages FOR ALL TO service_role USING (true) WITH CHECK (true);
+GRANT ALL ON public.wiki_pages TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.wiki_pages_id_seq TO service_role;
+
+NOTIFY pgrst, 'reload schema';
+```
+
+---
+
+## ⚡ Phase 4: Supabase Edge Functions
+
+Two Edge Functions serve the AJO fork. Both are in this repo and must be deployed from the project root.
+
+### Routes provided by `rest-api`
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Health check |
 | GET | `/stats` | Dashboard summary counts |
-| GET | `/thoughts` | Paginated thought list (supports `type`, `status`, `classification` filters) |
+| GET | `/thoughts` | Paginated thought list (type, status, classification filters) |
 | GET | `/search` | Semantic search (falls back to text if embeddings unavailable) |
 | GET | `/duplicates` | Find near-duplicate thoughts |
 | GET/PUT/DELETE | `/thought/:id` | Single thought CRUD |
@@ -316,53 +469,48 @@ The dashboard talks to a single Edge Function (`rest-api`) for all API calls. Th
 | GET | `/ingestion-jobs/:id` | Single job + items |
 | POST | `/ingest` | Extract and commit a block of text as thoughts |
 | POST | `/ingestion-jobs/:id/execute` | Execute a pending job's items |
+| GET | `/wiki-pages` | List all wiki pages (no content, includes entity aliases) |
+| GET | `/wiki-pages/:slug` | Single wiki page with full content |
+| PUT | `/wiki-pages/:slug` | Update wiki page content (sets `manually_edited=true`) |
+| PATCH | `/entities/:id/aliases` | Append an alias to an entity |
+| POST | `/entities/:id/merge` | Merge source entity into target (moves all thoughts + edges) |
 
-### 1. Deploy via CLI (Recommended)
-
-If you have the Supabase CLI installed, run these from the project root:
+### Deploy via CLI
 
 ```powershell
 # 1. Login and link your project
 supabase login
 supabase link --project-ref your-project-ref
 
-# 2. Set Secrets
+# 2. Set secrets
 supabase secrets set BRAIN_KEY="your-api-password"
 supabase secrets set MCP_ACCESS_KEY="your-mcp-access-key"
-# Optional hosted fallback only:
+# Optional hosted embeddings/extraction fallback:
 # supabase secrets set OPENROUTER_API_KEY="your-openrouter-key"
 
 # 3. Deploy both functions
-supabase functions deploy rest-api --no-verify-jwt
-supabase functions deploy open-brain-mcp --no-verify-jwt
+# IMPORTANT: always use --use-api --no-verify-jwt for this fork
+npx.cmd supabase functions deploy rest-api --use-api --no-verify-jwt
+npx.cmd supabase functions deploy open-brain-mcp --use-api --no-verify-jwt
 ```
 
-### 2. Manual Deployment (Fallback)
+> **Why `--use-api --no-verify-jwt`?** The `rest-api` function uses `x-brain-key` header auth instead of Supabase JWT tokens. Without `--no-verify-jwt`, Supabase's JWT middleware intercepts requests before the function code runs and returns 401. `--use-api` forces the CLI to use the Management API instead of Docker for deployment (required on Windows and in CI).
 
-If you prefer the web UI:
-1. Go to Supabase Dashboard → **Edge Functions** → **Create a new function** → name it `rest-api`.
-2. Paste the contents of `supabase/functions/rest-api/index.ts`.
-3. Repeat for `open-brain-mcp` using `supabase/functions/open-brain-mcp/index.ts`.
-
-> **Note:** `BRAIN_KEY` and `MCP_ACCESS_KEY` can be the same value for simplicity, or different if you want separate dashboard/MCP passwords.
-
-### 3. Set Edge Function secrets
+### Set Edge Function secrets
 
 In Supabase Dashboard → **Edge Functions** → **Manage secrets**, add:
 
 | Secret | Value |
 |--------|-------|
-| `BRAIN_KEY` | Your chosen API password (must match `BRAIN_KEY` in dashboard `.env.local`) |
+| `BRAIN_KEY` | Your chosen API password (must match dashboard `.env.local`) |
 | `MCP_ACCESS_KEY` | Your chosen MCP connector password |
-| `OPENROUTER_API_KEY` | Optional hosted fallback for embeddings and metadata extraction |
+| `OPENROUTER_API_KEY` | Optional: hosted embeddings and metadata extraction |
 
-> `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically by Supabase — do not add them manually.
+> `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically — do not add them manually.
 
 ---
 
-## 🌐 Phase 4: Local Environment & Worker
-
-For background classification (Work vs Personal), importance scoring, summaries, and entity graph extraction, you run a local Node.js worker that talks to your local Ollama instance.
+## 🌐 Phase 5: Local Environment & Worker
 
 ### 1. Root `.env` Setup
 
@@ -376,18 +524,11 @@ OLLAMA_URL="http://localhost:11434/api"
 OLLAMA_MODEL="qwen3:30b"
 KANBAN_INITIAL_STATUS="backlog"
 
-# Wiki compiler aliases used by recipes/wiki-compiler
-OPEN_BRAIN_URL="https://your-project-ref.supabase.co"
-OPEN_BRAIN_SERVICE_KEY="your-service-role-key"
-LLM_BASE_URL="http://localhost:11434/v1"
-LLM_MODEL="qwen3:30b"
-LLM_API_KEY="ollama"
-WIKI_ENTITY_EXTRACTION_MODE="local"
-
-# Context definitions for the AI worker
 WORK_CONTEXT_DESC="Professional work, software development, and corporate projects"
 PERSONAL_CONTEXT_DESC="Home life, hobbies, fitness, and family"
 ```
+
+> **Note:** The wiki compiler also uses these env vars via the fallback aliases `OPEN_BRAIN_URL` (= `SUPABASE_URL`) and `OPEN_BRAIN_SERVICE_KEY` (= `SUPABASE_KEY`). The generate-wiki.mjs script handles both names automatically. The `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` env vars are not required — the script detects `OLLAMA_URL` and derives the OpenAI-compatible endpoint automatically.
 
 ### 2. Dashboard `.env.local`
 
@@ -402,7 +543,7 @@ BRAIN_KEY="the-same-password-as-above"
 
 ---
 
-## 🚀 Phase 5: Launching
+## 🚀 Phase 6: Launching
 
 Run the unified start script from the project root. This launches the dashboard and the local background worker simultaneously.
 
@@ -413,60 +554,54 @@ Run the unified start script from the project root. This launches the dashboard 
 *   **Dashboard**: [http://localhost:3010](http://localhost:3010)
 *   **Worker**: Watch the terminal for "Starting Open Brain local worker..."
 
-### Optional: compile the wiki
+### How the integrated workflow runs
 
-The local worker keeps per-thought enrichment and the entity graph warm continuously. The wiki compiler is intentionally separate because it performs batch, cross-thought synthesis, but AJO defaults it to local Ollama through `http://localhost:11434/v1`. Run it manually or on a schedule after the worker has drained the queue:
+1. **Capture stays fast and remote-safe.** `rest-api` and `open-brain-mcp` run as Supabase Edge Functions and handle all read/write from any MCP-connected AI or the dashboard.
+2. **Local worker owns enrichment.** `scripts/local-brain-worker.js` polls `entity_extraction_queue` and drains it with Ollama (`qwen3:30b`). For each thought it: classifies work/personal, scores importance, extracts entities into `entities`/`thought_entities`/`edges`.
+3. **Wiki auto-generates when the queue drains.** When the worker processes new thoughts and the queue reaches zero, it automatically spawns `recipes/entity-wiki/generate-wiki.mjs` for each entity it touched. Pages with `manually_edited=true` are never overwritten.
+4. **Manual wiki run:** To regenerate all pages for entities with 3+ thoughts:
+   ```powershell
+   node recipes/entity-wiki/generate-wiki.mjs --batch
+   ```
+   To regenerate a specific entity by ID:
+   ```powershell
+   node recipes/entity-wiki/generate-wiki.mjs --id 42
+   ```
+5. **Historical thoughts need a one-time backfill** (see Block 2 above). Run the backfill SQL after applying the schema to an existing brain, then leave `start_brain.ps1` running until the queue drains.
 
-```powershell
-node recipes/wiki-compiler/compile-wiki.mjs --edge-limit 10
-```
+### Entity deduplication
 
-Start with a low `--edge-limit` because typed reasoning edges compare pairs of thoughts and can take time on a local model. Add `--skip-edges` when you only want wiki pages and do not want to classify cross-thought relationships in that run.
+The worker prevents duplicate entities in two ways:
+1. **Before insertion**: checks if an existing entity's `aliases` array contains the extracted name — if so, uses the existing entity instead of creating a new one.
+2. **Extraction prompt**: instructs the LLM to always use the most complete canonical form of a name (e.g., "Tom Falconar" not "Tom").
 
-### Current integrated workflow
-
-The AJO fork combines the upstream graph/wiki stack with the existing local worker:
-
-1. **Capture stays fast and remote-safe.** `rest-api` and `open-brain-mcp` run as Supabase Edge Functions. They can use OpenRouter for cheap embeddings and lightweight metadata extraction, but capture still works with graceful fallbacks if OpenRouter is unavailable.
-2. **Local worker owns enrichment.** `scripts/local-brain-worker.js` drains `entity_extraction_queue` with Ollama (`qwen3:30b` by default), preserves manual classification where present, writes summaries/classification/importance, and populates `entities`, `thought_entities`, and entity `edges`.
-3. **Historical thoughts need a one-time catchup queue.** Existing thoughts created before the graph trigger was installed need to be inserted into `entity_extraction_queue` once. The entity-extraction schema contains the backfill SQL at the bottom; run it after applying the schema, then leave `start_brain.ps1` running until the queue drains.
-4. **Wiki compilation runs on demand (auto-trigger coming).** `recipes/wiki-compiler/compile-wiki.mjs --skip-extraction` assumes the local worker has already warmed the graph. It runs typed reasoning edges and generates entity + topic wiki pages. Run manually after the queue drains; a worker-driven auto-trigger (queue drains → compile fires) is the next planned addition.
-5. **Typed reasoning edges are fully local.** `recipes/typed-edge-classifier/classify-edges.mjs` defaults to Ollama's OpenAI-compatible endpoint (`http://localhost:11434/v1`) and `qwen3:30b`. No external API required.
-
-### Next: wiki_pages table + dashboard wiki view
-
-Wiki output currently lands in `compiled-wiki/` as markdown files. The next additions are:
-
-- A `wiki_pages` Supabase table so generated pages live in the database and are queryable
-- A `/wiki` dashboard page to browse entity and topic pages without leaving the dashboard
-- Worker auto-trigger: when the entity extraction queue drains to zero after processing new thoughts, the worker spawns a full wiki compile automatically
+For manual merges of already-created duplicates, use the **Merge** button on any entity's wiki page in the dashboard (or run the SQL from `docs/entity-merge.md` if you prefer).
 
 ---
 
-## 🤖 Phase 6: Connect to your AI
+## 🤖 Phase 7: Connect to Your AI
 
-You can now connect any MCP-compatible AI to your brain. Use your **MCP Connection URL**:
+Use your **MCP Connection URL**:
 `https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=YOUR_MCP_ACCESS_KEY`
 
-### 1. Claude Desktop (Easiest)
-1. Open Claude Desktop → **Settings** → **Connectors**.
-2. Click **Add custom connector**.
-3. Name: `Open Brain`.
-4. URL: Paste your **MCP Connection URL**.
-5. Click **Add**.
+### Claude Desktop
+1. Settings → **Connectors** → **Add custom connector**
+2. Name: `Open Brain` | URL: paste MCP Connection URL | Click **Add**
 
-### 2. ChatGPT (Plus/Pro)
-1. Go to ChatGPT Settings → **Apps & Connectors**.
-2. Click **Create** → Name: `Open Brain`.
-3. URL: Paste your **MCP Connection URL**.
-4. Auth: Select **No Authentication** (it's in the URL).
+### ChatGPT (Plus/Pro)
+1. Settings → **Apps & Connectors** → **Advanced settings** → enable **Developer Mode**
+2. Click **Create** → Name: `Open Brain` → URL: paste MCP Connection URL → Auth: **No Authentication**
 
-### 3. Claude Code / CLI
+### Claude Code / CLI
 ```bash
 claude mcp add --transport http open-brain \
   https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp \
   --header "x-brain-key: your-mcp-access-key"
 ```
+
+### Source identification
+
+The MCP `capture_thought` tool requires clients to pass their own name in the `source` parameter. This is stored as `mcp-{source}` in the database (e.g., `mcp-claude`, `mcp-chatgpt`, `mcp-perplexity`). If a client sends the wrong name (e.g., Perplexity passing `source: "chatgpt"`), you can identify and correct it by filtering thoughts by `source_type` in the dashboard.
 
 ---
 
@@ -474,18 +609,19 @@ claude mcp add --transport http open-brain \
 
 | Component | Location | Source of Truth |
 | :--- | :--- | :--- |
-| **Dashboard** | `dashboards/open-brain-dashboard-next/` | UI & Visual State |
+| **Dashboard** | `dashboards/open-brain-dashboard-next/` | UI + visual state |
 | **REST API** | `supabase/functions/rest-api/index.ts` | All logic for the Dashboard |
-| **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude, ChatGPT, Perplexity, Copilot, etc. |
-| **AI Worker** | `scripts/local-brain-worker.js` | Background classification + entity graph extraction (Ollama) |
-| **Wiki Compiler** | `recipes/wiki-compiler/compile-wiki.mjs` | On-demand compiled wiki generation |
+| **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude, ChatGPT, Perplexity, etc. |
+| **AI Worker** | `scripts/local-brain-worker.js` | Classification + entity graph extraction (Ollama) |
+| **Wiki Compiler** | `recipes/entity-wiki/generate-wiki.mjs` | On-demand and auto-triggered wiki generation |
 
-**Key Divergences in this Fork:**
-*   **Context-Aware**: Every thought is tagged as `work` or `personal`.
-*   **Serial IDs**: The dashboard uses simple integers (1, 2, 3) for display, while the DB uses UUIDs for security. The Edge Function maps these automatically.
-*   **Local Processing**: We use local LLMs (Ollama) for classification and entity graph extraction to save on API costs and maintain privacy for sensitive thoughts.
-*   **Compiled Wiki**: Wiki pages are generated artifacts from SQL + graph tables. They are not the source of truth and should be regenerated rather than manually edited.
+**Key Divergences from Upstream Open Brain:**
+*   **Context-Aware**: Every thought is tagged `work` or `personal`. The dashboard, wiki, and MCP tools all support filtering by context.
+*   **Serial IDs**: Dashboard uses simple integers (1, 2, 3) for display; DB uses UUIDs. The Edge Function maps these automatically.
+*   **Local Processing**: Ollama handles classification, importance scoring, and entity graph extraction — no external API required for core enrichment.
+*   **Entity Graph + Wiki**: Entities, edges, and wiki pages are first-class citizens. The wiki is auto-generated from the entity graph and regenerates automatically when the queue drains.
+*   **Compiled Wiki is regenerable**: `manually_edited=false` wiki pages are always safe to regenerate. Set `manually_edited=true` (via the Edit button) to protect a page from being overwritten.
 
 ---
 
-*Documentation maintained by Open Brain Pro (AJO fork). Last updated May 2026 — graph pipeline, Ollama/qwen3 local processing, and wiki compiler integrated.*
+*AJO fork of Open Brain Pro. Last updated May 2026 — entity merge UI, wiki auto-trigger, alias management, Work/Personal context filter integrated.*
