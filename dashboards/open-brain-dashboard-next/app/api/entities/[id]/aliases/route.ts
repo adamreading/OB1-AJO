@@ -5,7 +5,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL!;
 
 export async function PATCH(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   let apiKey: string;
   try {
@@ -16,8 +16,9 @@ export async function PATCH(
     throw err;
   }
 
+  const { id } = await params;
   const body = await req.json();
-  const res = await fetch(`${API_URL}/entities/${params.id}/aliases`, {
+  const res = await fetch(`${API_URL}/entities/${id}/aliases`, {
     method: "PATCH",
     headers: { "x-brain-key": apiKey, "Content-Type": "application/json" },
     body: JSON.stringify(body),

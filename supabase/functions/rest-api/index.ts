@@ -504,7 +504,7 @@ async function executeJob(jobId: number): Promise<number> {
 app.get("/wiki-pages", async (c) => {
   const { data, error } = await supabase
     .from("wiki_pages")
-    .select("id, slug, type, entity_id, title, generated_at, thought_count, manually_edited, entities(aliases)")
+    .select("id, slug, type, entity_id, title, generated_at, thought_count, manually_edited, metadata, entities(aliases)")
     .order("type", { ascending: true })
     .order("title", { ascending: true });
   if (error) return c.json({ error: error.message }, 500, corsHeaders);

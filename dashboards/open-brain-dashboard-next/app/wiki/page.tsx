@@ -14,7 +14,11 @@ interface WikiPageSummary {
   thought_count: number;
   manually_edited: boolean;
   aliases?: string[];
+  metadata?: Record<string, unknown>;
 }
+
+const WORK_TYPES = new Set(["project", "tool", "organization", "org"]);
+const PERSONAL_TYPES = new Set(["person", "place"]);
 
 interface WikiPageDetail extends WikiPageSummary {
   content: string;
@@ -265,6 +269,7 @@ export default function WikiPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [showAliasModal, setShowAliasModal] = useState(false);
+  const [contextFilter, setContextFilter] = useState<"all" | "work" | "personal">("all");
 
   useEffect(() => {
     setLoading(true);
@@ -344,15 +349,18 @@ export default function WikiPage() {
     );
   }, [selected?.slug]);
 
-  // Filter by search query — matches title or any alias
+  // Filter by search query and context
   const q = search.trim().toLowerCase();
-  const filteredPages = q
-    ? pages.filter(
-        (p) =>
-          p.title.toLowerCase().includes(q) ||
-          (p.aliases ?? []).some((a) => a.toLowerCase().includes(q))
-      )
-    : pages;
+  const filteredPages = pages.filter((p) => {
+    if (q && !p.title.toLowerCase().includes(q) &&
+        !(p.aliases ?? []).some((a) => a.toLowerCase().includes(q))) return false;
+    if (contextFilter !== "all") {
+      const et = (p.metadata?.entity_type as string | undefined) ?? p.type;
+      if (contextFilter === "work" && !WORK_TYPES.has(et)) return false;
+      if (contextFilter === "personal" && !PERSONAL_TYPES.has(et)) return false;
+    }
+    return true;
+  });
 
   const entityPages = filteredPages.filter((p) => p.type === "entity");
   const topicPages = filteredPages.filter((p) => p.type === "topic");
@@ -375,6 +383,25 @@ export default function WikiPage() {
             <p className="text-xs text-text-muted mt-0.5">
               {pages.length} page{pages.length !== 1 ? "s" : ""}
             </p>
+            <div className="flex bg-bg-surface border border-border rounded-lg p-1 mt-2">
+              {(["all", "work", "personal"] as const).map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setContextFilter(c)}
+                  className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                    contextFilter === c
+                      ? c === "work"
+                        ? "bg-work text-white"
+                        : c === "personal"
+                        ? "bg-personal text-white"
+                        : "bg-violet text-white"
+                      : "text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  {c.charAt(0).toUpperCase() + c.slice(1)}
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* Search */}
