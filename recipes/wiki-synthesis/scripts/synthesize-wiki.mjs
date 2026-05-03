@@ -151,6 +151,23 @@ SYNTHESIZERS.autobiography = {
     const outPath = join(outDir, `${slug}.md`);
     writeFileSync(outPath, doc);
     log(`Wrote ${outPath}`);
+
+    // Persist to wiki_pages table for the dashboard
+    if (!args.dryRun) {
+      try {
+        await upsertWikiPage(env, {
+          slug,
+          type: "topic",
+          title: scopeYear ? `Autobiography ${scopeYear}` : "Autobiography",
+          content: doc,
+          thought_count: all.length,
+          generated_at: new Date().toISOString(),
+          metadata: { synthesizer: "autobiography", scope_year: scopeYear ?? null },
+        });
+      } catch (upsertErr) {
+        log(`ERROR: wiki_pages upsert failed: ${upsertErr.message}`);
+      }
+    }
   },
 };
 
@@ -295,6 +312,67 @@ class BrainApi {
       if (rows.length < PAGE_SIZE) break;
     }
     return all;
+  }
+}
+
+// ── wiki_pages DB upsert ─────────────────────────────────────────────────
+
+async function upsertWikiPage(env, pageData) {
+  // pageData: { slug, type, title, content, thought_count, generated_at, metadata }
+  const base = (env.OPEN_BRAIN_URL || "").replace(/\/+$/, "");
+  const key = env.OPEN_BRAIN_SERVICE_KEY;
+  if (!base || !key) return; // env not configured — skip silently
+
+  // Check if the page already exists and was manually edited
+  const checkRes = await fetch(
+    `${base}/rest/v1/wiki_pages?slug=eq.${encodeURIComponent(pageData.slug)}&select=manually_edited`,
+    {
+      headers: {
+        apikey: key,
+        authorization: `Bearer ${key}`,
+        accept: "application/json",
+      },
+    },
+  );
+  if (checkRes.ok) {
+    const rows = await checkRes.json();
+    if (Array.isArray(rows) && rows.length > 0 && rows[0].manually_edited === true) {
+      log(`skip upsert for "${pageData.slug}" — manually_edited=true`);
+      return;
+    }
+  }
+
+  const payload = {
+    slug: pageData.slug,
+    type: pageData.type ?? "topic",
+    entity_id: null,
+    title: pageData.title,
+    content: pageData.content,
+    thought_count: pageData.thought_count ?? 0,
+    generated_at: pageData.generated_at ?? new Date().toISOString(),
+    metadata: pageData.metadata ?? {},
+    manually_edited: false,
+    updated_at: new Date().toISOString(),
+  };
+
+  const upsertRes = await fetch(
+    `${base}/rest/v1/wiki_pages?on_conflict=slug`,
+    {
+      method: "POST",
+      headers: {
+        apikey: key,
+        authorization: `Bearer ${key}`,
+        "content-type": "application/json",
+        prefer: "resolution=merge-duplicates",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!upsertRes.ok) {
+    const text = await upsertRes.text().catch(() => "");
+    log(`ERROR: upsert wiki_pages failed for "${pageData.slug}": ${upsertRes.status} ${text.slice(0, 300)}`);
+  } else {
+    log(`upserted wiki_pages row for "${pageData.slug}"`);
   }
 }
 

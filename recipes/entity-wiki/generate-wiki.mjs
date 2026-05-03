@@ -652,6 +652,69 @@ function writeFile(wiki, entity, sourceCounts, provenance, outDir) {
   return filepath;
 }
 
+// ---------------------------------------------------------------
+// wiki_pages DB upsert — skips rows where manually_edited=true
+// ---------------------------------------------------------------
+
+async function upsertWikiPage(env, pageData) {
+  // pageData: { slug, type, entity_id, title, content, thought_count, generated_at, metadata }
+  const base = String(env.OPEN_BRAIN_URL || "").replace(/\/$/, "");
+  const key = env.OPEN_BRAIN_SERVICE_KEY;
+  if (!base || !key) return; // env not configured — skip silently
+
+  // Check if the page already exists and was manually edited
+  const checkRes = await fetch(
+    `${base}/rest/v1/wiki_pages?slug=eq.${encodeURIComponent(pageData.slug)}&select=manually_edited`,
+    {
+      headers: {
+        apikey: key,
+        authorization: `Bearer ${key}`,
+        accept: "application/json",
+      },
+    },
+  );
+  if (checkRes.ok) {
+    const rows = await checkRes.json();
+    if (Array.isArray(rows) && rows.length > 0 && rows[0].manually_edited === true) {
+      console.log(`[wiki] skip upsert for "${pageData.slug}" — manually_edited=true`);
+      return;
+    }
+  }
+
+  const payload = {
+    slug: pageData.slug,
+    type: pageData.type,
+    entity_id: pageData.entity_id ?? null,
+    title: pageData.title,
+    content: pageData.content,
+    thought_count: pageData.thought_count ?? 0,
+    generated_at: pageData.generated_at ?? new Date().toISOString(),
+    metadata: pageData.metadata ?? {},
+    manually_edited: false,
+    updated_at: new Date().toISOString(),
+  };
+
+  const upsertRes = await fetch(
+    `${base}/rest/v1/wiki_pages?on_conflict=slug`,
+    {
+      method: "POST",
+      headers: {
+        apikey: key,
+        authorization: `Bearer ${key}`,
+        "content-type": "application/json",
+        prefer: "resolution=merge-duplicates",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!upsertRes.ok) {
+    const text = await upsertRes.text();
+    console.error(`[wiki] upsert wiki_pages failed for "${pageData.slug}": ${upsertRes.status} ${text.slice(0, 300)}`);
+  } else {
+    console.log(`[wiki] upserted wiki_pages row for "${pageData.slug}"`);
+  }
+}
+
 async function writeEntityMetadata(sb, entity, wiki, sourceCounts, provenance) {
   const patch = {
     metadata: {
@@ -835,6 +898,25 @@ async function generateForEntity(sb, env, entity, args) {
     const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
     const filepath = writeFile(wiki, entity, sourceCounts, provenance, outDir);
     console.log(`[wiki] wrote file: ${filepath}`);
+    // Also persist to wiki_pages table for the dashboard
+    const slug = slugify(entity.canonical_name, entity.entity_type);
+    try {
+      await upsertWikiPage(env, {
+        slug,
+        type: "entity",
+        entity_id: entity.id,
+        title: entity.canonical_name,
+        content: wiki,
+        thought_count: sourceCounts.linked,
+        generated_at: new Date().toISOString(),
+        metadata: {
+          entity_type: entity.entity_type,
+          semantic_match_count: sourceCounts.semantic,
+        },
+      });
+    } catch (upsertErr) {
+      console.error(`[wiki] wiki_pages upsert error for #${entity.id}: ${upsertErr.message}`);
+    }
     return { filepath };
   }
   if (args.outputMode === "entity-metadata") {

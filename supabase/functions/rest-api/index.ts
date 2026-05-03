@@ -500,6 +500,52 @@ async function executeJob(jobId: number): Promise<number> {
   return added;
 }
 
+// Wiki pages — list (no content field)
+app.get("/wiki-pages", async (c) => {
+  const { data, error } = await supabase
+    .from("wiki_pages")
+    .select("id, slug, type, entity_id, title, generated_at, thought_count, manually_edited")
+    .order("type", { ascending: true })
+    .order("title", { ascending: true });
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  return c.json({ data: data || [] }, 200, corsHeaders);
+});
+
+// Wiki pages — single page with full content
+app.get("/wiki-pages/:slug", async (c) => {
+  const slug = c.req.param("slug");
+  const { data, error } = await supabase
+    .from("wiki_pages")
+    .select("*")
+    .eq("slug", slug)
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  if (!data) return c.json({ error: "Not found" }, 404, corsHeaders);
+  return c.json(data, 200, corsHeaders);
+});
+
+// Wiki pages — update content (sets manually_edited=true)
+app.put("/wiki-pages/:slug", async (c) => {
+  const slug = c.req.param("slug");
+  const body = await c.req.json();
+  if (typeof body.content !== "string" || !body.content.trim()) {
+    return c.json({ error: "content (string) is required" }, 400, corsHeaders);
+  }
+  const { data, error } = await supabase
+    .from("wiki_pages")
+    .update({
+      content: body.content,
+      manually_edited: true,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("slug", slug)
+    .select("id, slug")
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  if (!data) return c.json({ error: "Not found" }, 404, corsHeaders);
+  return c.json({ slug: data.slug, action: "updated", message: "Saved" }, 200, corsHeaders);
+});
+
 // Double Mount — handles both /rest-api/... and /...
 const api = new Hono();
 api.route("/rest-api", app);
