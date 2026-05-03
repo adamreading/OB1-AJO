@@ -256,12 +256,12 @@ function createServer(): McpServer {
     "capture_thought",
     {
       title: "Capture Thought",
-      description: "Save a new thought. IMPORTANT: If you have a long transcript or multiple unrelated ideas, call this tool MULTIPLE TIMES (once per distinct idea). Atomic thoughts ensure 10X better search quality. Do not save giant blocks of text if they can be split. You MUST pass your own client identity in the 'source' parameter (e.g., 'n8n', 'chatgpt').",
+      description: "Save a new thought to the brain. IMPORTANT: Each capture must be ONE atomic idea — 1 to 3 sentences (20–150 words). If you have a transcript, meeting notes, or multiple unrelated ideas, call this tool MULTIPLE TIMES, once per distinct idea. Do NOT save giant blocks of text as a single thought — splitting them ensures 10x better search quality. You MUST declare your own client name in 'source' — use the actual name of the AI or tool calling this (e.g., 'claude', 'chatgpt', 'perplexity', 'copilot', 'n8n'). Never use another client's name.",
       inputSchema: {
-        content: z.string().describe("The atomic thought to capture"),
+        content: z.string().describe("One atomic thought — 1-3 sentences. Do not include multiple unrelated ideas in one capture."),
         classification: z.enum(["work", "personal"]).optional().describe("Work or Personal context"),
         type: z.string().optional().describe("e.g. task, idea, reference"),
-        source: z.string().optional().describe("CRITICAL: You must self-identify here. Enter your client application name (e.g., 'n8n', 'chatgpt', 'openwebui', 'claude')."),
+        source: z.string().optional().describe("REQUIRED: Your actual client name. If you are Claude, pass 'claude'. If ChatGPT, pass 'chatgpt'. If Perplexity, pass 'perplexity'. Use YOUR name — not any other tool's name."),
       },
     },
     async ({ content, classification, type, source }) => {
