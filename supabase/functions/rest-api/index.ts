@@ -500,15 +500,45 @@ async function executeJob(jobId: number): Promise<number> {
   return added;
 }
 
-// Wiki pages — list (no content field)
+// Wiki pages — list (no content field), includes entity aliases for search
 app.get("/wiki-pages", async (c) => {
   const { data, error } = await supabase
     .from("wiki_pages")
-    .select("id, slug, type, entity_id, title, generated_at, thought_count, manually_edited")
+    .select("id, slug, type, entity_id, title, generated_at, thought_count, manually_edited, entities(aliases)")
     .order("type", { ascending: true })
     .order("title", { ascending: true });
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
-  return c.json({ data: data || [] }, 200, corsHeaders);
+  const pages = (data || []).map((p: Record<string, unknown>) => {
+    const ent = p.entities as { aliases?: string[] } | null;
+    return { ...p, aliases: ent?.aliases ?? [], entities: undefined };
+  });
+  return c.json({ data: pages }, 200, corsHeaders);
+});
+
+// Entities — append an alias
+app.patch("/entities/:id/aliases", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json();
+  const alias = typeof body.alias === "string" ? body.alias.trim() : "";
+  if (!alias) return c.json({ error: "alias (string) is required" }, 400, corsHeaders);
+
+  const { data: entity, error: fetchErr } = await supabase
+    .from("entities")
+    .select("aliases")
+    .eq("id", id)
+    .single();
+  if (fetchErr || !entity) return c.json({ error: "Entity not found" }, 404, corsHeaders);
+
+  const current: string[] = entity.aliases ?? [];
+  if (current.includes(alias)) return c.json({ aliases: current }, 200, corsHeaders);
+
+  const updated = [...current, alias];
+  const { error: updateErr } = await supabase
+    .from("entities")
+    .update({ aliases: updated, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  if (updateErr) return c.json({ error: updateErr.message }, 500, corsHeaders);
+  return c.json({ aliases: updated }, 200, corsHeaders);
 });
 
 // Wiki pages — single page with full content
