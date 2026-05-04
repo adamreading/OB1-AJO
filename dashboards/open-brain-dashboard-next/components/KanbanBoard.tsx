@@ -9,8 +9,10 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragOverEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
+import { arrayMove } from "@dnd-kit/sortable";
 import type { Thought } from "@/lib/types";
 import { KANBAN_STATUSES, KANBAN_TYPES } from "@/lib/types";
 import { KanbanColumn } from "@/components/KanbanColumn";
@@ -43,6 +45,8 @@ export function KanbanBoard() {
   const [selectedThought, setSelectedThought] = useState<Thought | null>(null);
   const [activeDragThought, setActiveDragThought] = useState<Thought | null>(null);
   const previousThoughts = useRef<Thought[]>([]);
+  const originalStatus = useRef<string | null>(null);
+  const finalStatus = useRef<string | null>(null);
 
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
@@ -112,38 +116,70 @@ export function KanbanBoard() {
   function handleDragStart(event: DragStartEvent) {
     const thought = thoughts.find((t) => t.id === event.active.id);
     setActiveDragThought(thought ?? null);
+    originalStatus.current = thought?.status ?? null;
+    finalStatus.current = thought?.status ?? null;
+  }
+
+  function handleDragOver(event: DragOverEvent) {
+    const { active, over } = event;
+    if (!over) return;
+
+    const activeId = active.id as number;
+    const overId = over.id;
+    const validStatuses: string[] = [...KANBAN_STATUSES, "archived"];
+
+    setThoughts((prev) => {
+      const activeIndex = prev.findIndex((t) => t.id === activeId);
+      if (activeIndex === -1) return prev;
+      const activeThought = prev[activeIndex];
+      const currentStatus = activeThought.status ?? "backlog";
+
+      if (typeof overId === "string" && validStatuses.includes(overId)) {
+        // Hovering directly over a column (empty space)
+        if (currentStatus === overId) return prev;
+        finalStatus.current = overId;
+        return prev.map((t) => t.id === activeId ? { ...t, status: overId } : t);
+      }
+
+      // Hovering over a card
+      const overCardId = overId as number;
+      if (activeId === overCardId) return prev;
+      const overIndex = prev.findIndex((t) => t.id === overCardId);
+      if (overIndex === -1) return prev;
+      const overThought = prev[overIndex];
+      const overStatus = overThought.status ?? "backlog";
+
+      if (currentStatus === overStatus) {
+        // Same column: reorder in place
+        return arrayMove(prev, activeIndex, overIndex);
+      }
+
+      // Different column: update status and move to position
+      finalStatus.current = overStatus;
+      const withStatus = prev.map((t) =>
+        t.id === activeId ? { ...t, status: overStatus } : t
+      );
+      const newActiveIndex = withStatus.findIndex((t) => t.id === activeId);
+      return arrayMove(withStatus, newActiveIndex, overIndex);
+    });
   }
 
   function handleDragEnd(event: DragEndEvent) {
     setActiveDragThought(null);
-    const { active, over } = event;
-    if (!over) return;
-
+    const { active } = event;
     const thoughtId = active.id as number;
-    const newStatus = over.id as string;
+    const orig = originalStatus.current;
+    const final = finalStatus.current;
+    originalStatus.current = null;
+    finalStatus.current = null;
 
-    // Only accept drops onto valid column targets (not onto other cards)
-    const validStatuses: string[] = [...KANBAN_STATUSES, "archived"];
-    if (!validStatuses.includes(newStatus)) return;
+    if (!orig || !final || orig === final) return;
 
-    // Find which column the thought is currently in
-    const thought = thoughts.find((t) => t.id === thoughtId);
-    if (!thought || thought.status === newStatus) return;
-
-    // Optimistic update
-    previousThoughts.current = [...thoughts];
-    setThoughts((prev) =>
-      prev.map((t) =>
-        t.id === thoughtId
-          ? { ...t, status: newStatus, status_updated_at: new Date().toISOString() }
-          : t
-      )
-    );
-
-    // API call in background
-    apiUpdateKanban(thoughtId, { status: newStatus }).catch(() => {
-      // Revert on failure
-      setThoughts(previousThoughts.current);
+    // Persist status change to API
+    apiUpdateKanban(thoughtId, { status: final }).catch(() => {
+      setThoughts((prev) =>
+        prev.map((t) => t.id === thoughtId ? { ...t, status: orig } : t)
+      );
       setError("Failed to update status. Reverted.");
       setTimeout(() => setError(null), 5000);
     });
@@ -318,7 +354,7 @@ export function KanbanBoard() {
       </div>
 
       {/* Board */}
-      <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+      <DndContext sensors={sensors} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
         <div className="flex gap-2 md:gap-3 overflow-x-auto pb-2 -mx-4 px-4 md:mx-0 md:px-0 md:overflow-x-visible">
           {columns.map((status) => (
             <KanbanColumn

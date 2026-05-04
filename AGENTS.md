@@ -1,6 +1,6 @@
 # AGENTS.md — Agent Instructions for Open Brain
 
-This file helps AI coding tools (Codex, Codex, Cursor, etc.) work effectively in this repo.
+This file helps AI coding tools (Claude Code, Codex, Cursor, etc.) work effectively in this repo.
 
 ## What This Repo Is
 
@@ -47,3 +47,62 @@ Every contribution lives in its own subfolder under the right category and must 
 - `.github/metadata.schema.json` — JSON schema for metadata.json validation
 - `.github/PULL_REQUEST_TEMPLATE.md` — PR description template
 - `LICENSE.md` — FSL-1.1-MIT terms
+
+---
+
+## AJO Fork — Maintainer Notes
+
+This section applies to the AJO maintainer-local layer only. It is not part of the upstream contribution contract.
+
+### Environment Variables
+
+The AJO fork uses different env var names than upstream recipes. Scripts handle both:
+
+| AJO name | Upstream alias | Purpose |
+|----------|---------------|---------|
+| `SUPABASE_URL` | `OPEN_BRAIN_URL` | Supabase project URL |
+| `SUPABASE_KEY` | `OPEN_BRAIN_SERVICE_KEY` | Service role key |
+| `OLLAMA_URL` | — | Ollama base URL (e.g. `http://localhost:11434/api`) |
+| `OLLAMA_MODEL` | `LLM_MODEL` | Model name (e.g. `qwen3:30b`) |
+| `BRAIN_KEY` | — | Dashboard + REST API password |
+
+### Edge Function Deployment
+
+Always deploy with `--use-api --no-verify-jwt`:
+```powershell
+npx.cmd supabase functions deploy rest-api --use-api --no-verify-jwt
+npx.cmd supabase functions deploy open-brain-mcp --use-api --no-verify-jwt
+```
+
+### Maintainer Scripts
+
+| Script | Command | Purpose |
+|--------|---------|---------|
+| Score thoughts | `node --env-file=.env scripts/score-thoughts.mjs` | Heuristic quality scoring (run once after install, then with `--only-default`) |
+| Wiki wipe | `node --env-file=.env scripts/wiki-wipe.mjs` | Clear wiki_pages + entity health report |
+| Batch wiki | `node --env-file=.env recipes/entity-wiki/generate-wiki.mjs --batch` | Regenerate all wiki pages |
+| Autobiography | `node --env-file=.env recipes/wiki-synthesis/scripts/synthesize-wiki.mjs --topic autobiography` | Generate/update personal autobiography wiki page |
+| Reclassify | `node --env-file=.env scripts/reclassify-existing.js` | Re-run Work/Personal classification on existing thoughts |
+
+### Quality Score Behaviour
+
+- `quality_score` defaults to 50 at creation. The extraction worker computes `Math.round(confidence × 70 + 20)` during capture, but existing thoughts need a one-time backfill via `score-thoughts.mjs`.
+- The heuristic scorer uses: content length (base), word count, vocabulary richness, sentence count, URL/caps/encoding penalties, and metadata bonuses (type, importance, topics, entities, summary).
+- The Audit page threshold (default < 30) is configurable in the UI — no code change needed.
+
+### Wiki Pipeline
+
+- `generate-wiki.mjs --batch` always regenerates all pages (the `manually_edited` column is no longer respected by the compiler).
+- Curator notes live in the `notes` column and survive regeneration — the compiler reads them and injects them into the LLM prompt.
+- Citations use integer `serial_id` format `[#42]`. Entity cross-links use `/wiki?slug=person-name` format.
+- After entity merges, wipe and rebuild: `wiki-wipe.mjs` then `generate-wiki.mjs --batch --batch-min-linked 1`.
+
+### Dashboard Proxy Routes (Next.js)
+
+The dashboard proxies to the Edge Function for auth. Key routes added for the wiki:
+- `PATCH /api/wiki/[slug]/notes` → Edge Function `PATCH /wiki-pages/:slug/notes`
+- `PATCH /api/entities/[id]` → Edge Function `PATCH /entities/:id` (rename)
+
+### Gitignored Local Output
+
+`wikis/`, `compiled-wiki/`, and `output/` directories are gitignored — local wiki file output never reaches the remote.

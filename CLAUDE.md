@@ -56,3 +56,28 @@ This repo also has a maintainer-local GSD layer in `.planning/`.
 - Start with `.planning/STATE.md`, then read `.planning/PROJECT.md`, `.planning/ROADMAP.md`, and the relevant `.planning/codebase/*.md` documents.
 - Keep `.planning/` local. It is gitignored intentionally and is not part of the public contribution contract or upstream PR scope.
 - Public contributor rules still come from `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, and the committed repo files.
+
+## AJO Fork — Key Facts for AI Assistants
+
+When working in this repo as the AJO maintainer, be aware:
+
+**Environment variables**: Scripts use `SUPABASE_URL` / `SUPABASE_KEY` (AJO names). Upstream recipes use `OPEN_BRAIN_URL` / `OPEN_BRAIN_SERVICE_KEY`. All AJO scripts handle both via fallback. Always run scripts with `node --env-file=.env`.
+
+**Edge Function deployment**: Always `npx.cmd supabase functions deploy <name> --use-api --no-verify-jwt`. Never omit these flags.
+
+**Thoughts table IDs**: The `id` column is UUID (DB primary key). `serial_id` is an auto-increment integer. The dashboard and all citations use `serial_id`. The Edge Function `mapThought()` exposes `serial_id` as `id` to the dashboard.
+
+**Wiki pipeline**:
+- Compiler (`generate-wiki.mjs`) always regenerates all pages — `manually_edited` is ignored.
+- Curator notes → `wiki_pages.notes` column. Compiler reads this and injects it into the LLM prompt. Never overwritten.
+- Citations format: `[#42]` (integer serial_id). Entity cross-links: `/wiki?slug=entity-slug`.
+- Wiki output files are gitignored (`wikis/`, `compiled-wiki/`, `output/`).
+
+**Quality scoring**: `quality_score` defaults to 50. Run `scripts/score-thoughts.mjs` to backfill heuristic scores. The Audit page threshold is configurable in the UI.
+
+**Kanban**: Uses `@dnd-kit/sortable` with `SortableContext` per column and `onDragOver` in `KanbanBoard` for card-to-card insertion. Status values are: `backlog`, `planning`, `active`, `review`, `done`, `archived`.
+
+**Maintainer scripts** (all in `scripts/`):
+- `score-thoughts.mjs` — heuristic quality scoring backfill
+- `wiki-wipe.mjs` — clear wiki_pages + entity health report
+- `reclassify-existing.js` — re-run Work/Personal classification

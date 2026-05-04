@@ -10,7 +10,7 @@ import type { Thought, BrowseResponse } from "@/lib/types";
 export default function AuditPage() {
   const searchParams = useSearchParams();
   const context = searchParams.get("context");
-  
+
   const [data, setData] = useState<BrowseResponse | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [page, setPage] = useState(1);
@@ -18,14 +18,17 @@ export default function AuditPage() {
   const [showDelete, setShowDelete] = useState(false);
   const [showFinalConfirm, setShowFinalConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [threshold, setThreshold] = useState(30);
+  const [thresholdInput, setThresholdInput] = useState("30");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const url = new URL("/api/audit", window.location.origin);
       url.searchParams.set("page", String(page));
+      url.searchParams.set("threshold", String(threshold));
       if (context) url.searchParams.set("context", context);
-      
+
       const res = await fetch(url.toString());
       if (!res.ok) throw new Error("Failed to load");
       const d = await res.json();
@@ -35,7 +38,7 @@ export default function AuditPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, context]);
+  }, [page, context, threshold]);
 
   useEffect(() => {
     load();
@@ -101,10 +104,41 @@ export default function AuditPage() {
         <div>
           <h1 className="text-2xl font-semibold mb-1">Audit</h1>
           <p className="text-text-secondary text-sm">
-            Review low quality thoughts (score &lt; 30)
+            Review low quality thoughts (score &lt; {threshold})
             {data && ` | ${data.total.toLocaleString()} total`}
           </p>
         </div>
+
+        <div className="flex items-center gap-3 flex-wrap justify-end">
+          <div className="flex items-center gap-2 bg-bg-surface border border-border rounded-lg px-3 py-1.5">
+            <label className="text-xs text-text-muted whitespace-nowrap">Score &lt;</label>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={thresholdInput}
+              onChange={(e) => setThresholdInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const n = parseInt(thresholdInput, 10);
+                  if (!isNaN(n) && n >= 1 && n <= 100) {
+                    setThreshold(n);
+                    setPage(1);
+                  }
+                }
+              }}
+              onBlur={() => {
+                const n = parseInt(thresholdInput, 10);
+                if (!isNaN(n) && n >= 1 && n <= 100) {
+                  setThreshold(n);
+                  setPage(1);
+                } else {
+                  setThresholdInput(String(threshold));
+                }
+              }}
+              className="w-14 bg-transparent text-sm text-text-primary text-center outline-none"
+            />
+          </div>
 
         <div className="flex bg-bg-surface border border-border rounded-lg p-1">
           {[
@@ -135,6 +169,7 @@ export default function AuditPage() {
               </Link>
             );
           })}
+        </div>
         </div>
       </div>
 

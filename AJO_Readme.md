@@ -428,6 +428,7 @@ CREATE TABLE IF NOT EXISTS public.wiki_pages (
   entity_id BIGINT REFERENCES public.entities(id) ON DELETE SET NULL,
   title TEXT NOT NULL,
   content TEXT NOT NULL,
+  notes TEXT DEFAULT NULL,
   generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   thought_count INTEGER NOT NULL DEFAULT 0,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -446,6 +447,12 @@ GRANT USAGE, SELECT ON SEQUENCE public.wiki_pages_id_seq TO service_role;
 
 NOTIFY pgrst, 'reload schema';
 ```
+
+> **If upgrading an existing install**, run this migration to add the `notes` column:
+> ```sql
+> ALTER TABLE public.wiki_pages ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT NULL;
+> NOTIFY pgrst, 'reload schema';
+> ```
 
 ---
 
@@ -471,8 +478,10 @@ Two Edge Functions serve the AJO fork. Both are in this repo and must be deploye
 | POST | `/ingestion-jobs/:id/execute` | Execute a pending job's items |
 | GET | `/wiki-pages` | List all wiki pages (no content, includes entity aliases) |
 | GET | `/wiki-pages/:slug` | Single wiki page with full content |
-| PUT | `/wiki-pages/:slug` | Update wiki page content (sets `manually_edited=true`) |
-| PATCH | `/entities/:id/aliases` | Append an alias to an entity |
+| PUT | `/wiki-pages/:slug` | Update wiki page content |
+| PATCH | `/wiki-pages/:slug/notes` | Update curator notes only (never overwritten by compiler) |
+| PATCH | `/entities/:id` | Rename entity canonical name |
+| PATCH | `/entities/:id/aliases` | Append or remove an alias (`action: "add"` / `action: "remove"`) |
 | POST | `/entities/:id/merge` | Merge source entity into target (moves all thoughts + edges) |
 
 ### Deploy via CLI
@@ -558,16 +567,30 @@ Run the unified start script from the project root. This launches the dashboard 
 
 1. **Capture stays fast and remote-safe.** `rest-api` and `open-brain-mcp` run as Supabase Edge Functions and handle all read/write from any MCP-connected AI or the dashboard.
 2. **Local worker owns enrichment.** `scripts/local-brain-worker.js` polls `entity_extraction_queue` and drains it with Ollama (`qwen3:30b`). For each thought it: classifies work/personal, scores importance, extracts entities into `entities`/`thought_entities`/`edges`.
-3. **Wiki auto-generates when the queue drains.** When the worker processes new thoughts and the queue reaches zero, it automatically spawns `recipes/entity-wiki/generate-wiki.mjs` for each entity it touched. Pages with `manually_edited=true` are never overwritten.
-4. **Manual wiki run:** To regenerate all pages for entities with 3+ thoughts:
+3. **Wiki auto-generates when the queue drains.** When the worker processes new thoughts and the queue reaches zero, it automatically spawns `recipes/entity-wiki/generate-wiki.mjs` for each entity it touched. All pages are always regenerated — curator notes (the `notes` column) are the safe place to add content that survives regeneration, since the compiler reads them and injects them into each page before sending to the LLM.
+4. **Manual wiki run:** To regenerate all pages for entities with 3+ linked thoughts:
    ```powershell
-   node recipes/entity-wiki/generate-wiki.mjs --batch
+   node --env-file=.env recipes/entity-wiki/generate-wiki.mjs --batch
+   ```
+   To include entities with only 1+ thought (catches everything):
+   ```powershell
+   node --env-file=.env recipes/entity-wiki/generate-wiki.mjs --batch --batch-min-linked 1
    ```
    To regenerate a specific entity by ID:
    ```powershell
-   node recipes/entity-wiki/generate-wiki.mjs --id 42
+   node --env-file=.env recipes/entity-wiki/generate-wiki.mjs --id 42
+   ```
+   To generate the personal autobiography wiki page:
+   ```powershell
+   node --env-file=.env recipes/wiki-synthesis/scripts/synthesize-wiki.mjs --topic autobiography
    ```
 5. **Historical thoughts need a one-time backfill** (see Block 2 above). Run the backfill SQL after applying the schema to an existing brain, then leave `start_brain.ps1` running until the queue drains.
+6. **One-time quality score backfill.** All thoughts start at `quality_score = 50` until the extraction worker processes them. To score all existing thoughts using heuristics (content length, vocabulary richness, metadata completeness):
+   ```powershell
+   node --env-file=.env scripts/score-thoughts.mjs --dry-run   # preview first
+   node --env-file=.env scripts/score-thoughts.mjs              # apply
+   ```
+   Run with `--only-default` on subsequent installs to only update thoughts still at the default 50.
 
 ### Entity deduplication
 
@@ -575,7 +598,22 @@ The worker prevents duplicate entities in two ways:
 1. **Before insertion**: checks if an existing entity's `aliases` array contains the extracted name — if so, uses the existing entity instead of creating a new one.
 2. **Extraction prompt**: instructs the LLM to always use the most complete canonical form of a name (e.g., "Tom Falconar" not "Tom").
 
-For manual merges of already-created duplicates, use the **Merge** button on any entity's wiki page in the dashboard (or run the SQL from `docs/entity-merge.md` if you prefer).
+For manual merges of already-created duplicates, use the **Merge** button on any entity's wiki page in the dashboard. After merging, add short-name aliases (e.g., "Tom") so the worker recognises future mentions.
+
+### Wiping and rebuilding wiki pages
+
+After entity merges the wiki_pages table may contain orphaned pages (referencing deleted entities). Wipe and rebuild cleanly:
+
+```powershell
+# Dry-run: reports entity health + orphaned pages, no delete
+node --env-file=.env scripts/wiki-wipe.mjs --dry-run
+
+# Wipe all wiki_pages rows
+node --env-file=.env scripts/wiki-wipe.mjs
+
+# Rebuild from scratch (all entities with 1+ linked thought)
+node --env-file=.env recipes/entity-wiki/generate-wiki.mjs --batch --batch-min-linked 1
+```
 
 ---
 
@@ -607,21 +645,27 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 
 ## 📂 Architecture Reference
 
-| Component | Location | Source of Truth |
+| Component | Location | Purpose |
 | :--- | :--- | :--- |
 | **Dashboard** | `dashboards/open-brain-dashboard-next/` | UI + visual state |
 | **REST API** | `supabase/functions/rest-api/index.ts` | All logic for the Dashboard |
 | **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude, ChatGPT, Perplexity, etc. |
 | **AI Worker** | `scripts/local-brain-worker.js` | Classification + entity graph extraction (Ollama) |
 | **Wiki Compiler** | `recipes/entity-wiki/generate-wiki.mjs` | On-demand and auto-triggered wiki generation |
+| **Wiki Synthesis** | `recipes/wiki-synthesis/scripts/synthesize-wiki.mjs` | Autobiography / topic wiki page generation |
+| **Score Thoughts** | `scripts/score-thoughts.mjs` | Heuristic quality scoring backfill |
+| **Wiki Wipe** | `scripts/wiki-wipe.mjs` | Clear wiki_pages + entity health report |
 
 **Key Divergences from Upstream Open Brain:**
 *   **Context-Aware**: Every thought is tagged `work` or `personal`. The dashboard, wiki, and MCP tools all support filtering by context.
 *   **Serial IDs**: Dashboard uses simple integers (1, 2, 3) for display; DB uses UUIDs. The Edge Function maps these automatically.
 *   **Local Processing**: Ollama handles classification, importance scoring, and entity graph extraction — no external API required for core enrichment.
 *   **Entity Graph + Wiki**: Entities, edges, and wiki pages are first-class citizens. The wiki is auto-generated from the entity graph and regenerates automatically when the queue drains.
-*   **Compiled Wiki is regenerable**: `manually_edited=false` wiki pages are always safe to regenerate. Set `manually_edited=true` (via the Edit button) to protect a page from being overwritten.
+*   **Wiki always regenerates**: All pages are regenerated on every compiler run. Use the `notes` column (editable in the dashboard) for curator content that survives regeneration — the compiler reads it and incorporates it before calling the LLM. The `manually_edited` column still exists in the DB but is no longer used by the compiler.
+*   **Wiki deep-linking**: The wiki page is always at `/wiki`. Entity cross-links use `?slug=` query params (e.g. `/wiki?slug=person-adam-ososki`) and are intercepted client-side. Clicking a link in wiki content navigates to that entity's page without a full reload.
+*   **Heuristic quality scoring**: `quality_score` is populated at creation time (default 50) and can be backfilled with `scripts/score-thoughts.mjs`. The Audit page threshold is configurable in the UI (default < 30).
+*   **Kanban card-to-card drag**: Cards can be dragged between existing cards in any column, not just to empty space. Uses `@dnd-kit/sortable` with per-column `SortableContext`.
 
 ---
 
-*AJO fork of Open Brain Pro. Last updated May 2026 — entity merge UI, wiki auto-trigger, alias management, Work/Personal context filter integrated.*
+*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias UI, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe script.*
