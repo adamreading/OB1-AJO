@@ -563,6 +563,42 @@ app.patch("/entities/:id", async (c) => {
     return c.json({ error: `Invalid entity_type. Must be one of: ${VALID_TYPES.join(", ")}` }, 400, corsHeaders);
   }
 
+  // If reclassifying, check for a duplicate entity with (newType, normalized_name) that has no wiki
+  // page and is therefore invisible in the UI. Absorb it silently before changing the type.
+  if (newType) {
+    const { data: current } = await supabase
+      .from("entities").select("normalized_name").eq("id", id).maybeSingle();
+    if (current) {
+      const { data: dupe } = await supabase
+        .from("entities")
+        .select("id")
+        .eq("entity_type", newType)
+        .eq("normalized_name", current.normalized_name)
+        .neq("id", id)
+        .maybeSingle();
+      if (dupe) {
+        // Absorb the duplicate: move its thought links + edges, then delete it
+        await supabase.from("thought_entities").update({ entity_id: id }).eq("entity_id", dupe.id);
+        const { data: dupeEdges } = await supabase.from("edges").select("id, to_entity_id, relation").eq("from_entity_id", dupe.id);
+        for (const edge of dupeEdges || []) {
+          const { data: dup } = await supabase.from("edges").select("id")
+            .eq("from_entity_id", id).eq("to_entity_id", edge.to_entity_id).eq("relation", edge.relation).maybeSingle();
+          if (!dup) await supabase.from("edges").update({ from_entity_id: id }).eq("id", edge.id);
+          else await supabase.from("edges").delete().eq("id", edge.id);
+        }
+        const { data: dupeEdgesTo } = await supabase.from("edges").select("id, from_entity_id, relation").eq("to_entity_id", dupe.id);
+        for (const edge of dupeEdgesTo || []) {
+          const { data: dup } = await supabase.from("edges").select("id")
+            .eq("from_entity_id", edge.from_entity_id).eq("to_entity_id", id).eq("relation", edge.relation).maybeSingle();
+          if (!dup) await supabase.from("edges").update({ to_entity_id: id }).eq("id", edge.id);
+          else await supabase.from("edges").delete().eq("id", edge.id);
+        }
+        await supabase.from("wiki_pages").delete().eq("entity_id", dupe.id);
+        await supabase.from("entities").delete().eq("id", dupe.id);
+      }
+    }
+  }
+
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (newName) {
     updates.canonical_name = newName;
@@ -573,11 +609,16 @@ app.patch("/entities/:id", async (c) => {
   const { error } = await supabase.from("entities").update(updates).eq("id", id);
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
 
-  // Keep wiki page title in sync when renamed (slug unchanged)
-  if (newName) {
-    await supabase.from("wiki_pages")
-      .update({ title: newName, updated_at: new Date().toISOString() })
-      .eq("entity_id", id);
+  // Keep wiki page title and metadata in sync
+  if (newName || newType) {
+    const { data: wikiPage } = await supabase
+      .from("wiki_pages").select("id, title, metadata").eq("entity_id", id).maybeSingle();
+    if (wikiPage) {
+      const wikiUpdate: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (newName) wikiUpdate.title = newName;
+      if (newType) wikiUpdate.metadata = { ...(wikiPage.metadata as object ?? {}), entity_type: newType };
+      await supabase.from("wiki_pages").update(wikiUpdate).eq("entity_id", id);
+    }
   }
 
   return c.json({ id, ...(newName ? { canonical_name: newName } : {}), ...(newType ? { entity_type: newType } : {}) }, 200, corsHeaders);

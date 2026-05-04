@@ -222,7 +222,9 @@ function EntityTypeSelect({
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+        const msg = (d as { error?: string }).error || `HTTP ${res.status}`;
+        const isDupe = msg.includes("duplicate key") || msg.includes("unique constraint");
+        throw new Error(isDupe ? `A "${newType}" entity with this name already exists — use Merge to combine them` : msg);
       }
       onTypeChanged(newType);
       setPendingType(null);
@@ -254,7 +256,7 @@ function EntityTypeSelect({
         <span className="absolute -right-4 text-[10px] text-text-muted animate-pulse">…</span>
       )}
       {error && (
-        <span className="absolute -right-4 text-[10px] text-danger" title={error}>!</span>
+        <span className="ml-1 text-[10px] text-danger" title={error}>! {error}</span>
       )}
     </div>
   );
