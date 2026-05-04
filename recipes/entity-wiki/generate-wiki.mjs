@@ -219,7 +219,7 @@ async function fetchLinkedThoughts(sb, entityId, limit = 200) {
   // PostgREST embedded resources syntax.
   const query = [
     `entity_id=eq.${entityId}`,
-    `select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts(id,content,metadata,created_at)`,
+    `select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts(id,serial_id,content,metadata,created_at)`,
     `order=created_at.desc`,
     `limit=${limit}`,
   ].join("&");
@@ -228,7 +228,7 @@ async function fetchLinkedThoughts(sb, entityId, limit = 200) {
   return rows
     .filter((r) => r.thoughts)
     .map((r) => ({
-      id: r.thoughts.id,
+      id: r.thoughts.serial_id ?? r.thoughts.id,
       content: r.thoughts.content,
       type: r.thoughts.metadata?.type ?? null,
       topics: r.thoughts.metadata?.topics ?? null,
@@ -457,6 +457,7 @@ const SYSTEM_PROMPT = `You write wiki pages for a personal knowledge graph.
 The subject is a single entity (person, project, topic, organization, tool, or place).
 
 Your response is a wiki article. It begins with the entity's heading. Output ONLY the final markdown.
+NEVER output reasoning, self-corrections, counting, planning, or any meta-commentary. If you need to revise, do it silently. Your entire output is the finished article — nothing else.
 
 Write well-structured markdown with these sections in order:
 # {Entity Name}, ## Summary (2-3 sentences), ## Key Facts (bulleted),
@@ -583,9 +584,27 @@ async function synthesize(env, model, payload) {
   if (!res.ok) throw new Error(`LLM call failed: ${res.status} ${await res.text()}`);
   const body = await res.json();
   const msg = body?.choices?.[0]?.message ?? {};
-  const body_text = (msg.content || msg.reasoning || "").trim();
-  if (!body_text) throw new Error("LLM returned empty wiki");
-  return entityHeading + body_text;
+  const raw_text = (msg.content || msg.reasoning || "").trim();
+  if (!raw_text) throw new Error("LLM returned empty wiki");
+  return entityHeading + cleanWikiOutput(raw_text);
+}
+
+// Strip thinking tokens and self-correction meta-commentary that qwen3 leaks into content.
+function cleanWikiOutput(text) {
+  // Strip <think>...</think> blocks (qwen3 extended thinking)
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  // Strip lines that are LLM meta-commentary / self-correction
+  const metaLineRe = /^(Wait[,. ]|Okay[,. ]|Alright[,. ]|Let me |I need to |I('ll|'ve| will| see| have| should)|Note:|Actually[,. ]|Hmm[,. ]|Now[,. ]I|Right[,. ]|Final |OK[,. ])/i;
+  const lines = text.split("\n");
+  const clean = [];
+  for (const line of lines) {
+    if (metaLineRe.test(line.trim())) continue;
+    clean.push(line);
+  }
+  text = clean.join("\n");
+  // Collapse runs of 3+ blank lines down to 2
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  return text;
 }
 
 // ---------------------------------------------------------------
@@ -862,7 +881,7 @@ async function generateForEntity(sb, env, entity, args) {
   // Build a name→wiki-url map for related entities so the LLM can link them
   const relatedWikiLinks = {};
   for (const [, info] of nameMap) {
-    relatedWikiLinks[info.name] = `/wiki/${slugify(info.name, info.type)}`;
+    relatedWikiLinks[info.name] = `/wiki?slug=${slugify(info.name, info.type)}`;
   }
 
   // 3. Semantic expansion (opt-in — avoids forcing an embedding provider)

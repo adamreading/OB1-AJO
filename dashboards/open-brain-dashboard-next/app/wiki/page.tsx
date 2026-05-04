@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -96,7 +97,9 @@ function MarkdownContent({ content }: { content: string }) {
           u.startsWith("/") || u.startsWith("https://") || u.startsWith("http://")
             ? u
             : "#";
-        return `<a href="${safe}" class="text-violet hover:underline">${t}</a>`;
+        // Wiki cross-links open in the same SPA; thought links navigate normally
+        const extra = u.startsWith("/wiki?slug=") ? ' data-wiki-slug="true"' : '';
+        return `<a href="${safe}"${extra} class="text-violet hover:underline">${t}</a>`;
       })
       // Thought citation links [#NNN] (integer IDs, new format)
       .replace(/\[#(\d+)\]/g, '<a href="/thoughts/$1" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#$1]</a>')
@@ -522,6 +525,8 @@ function MergeModal({
 // ── Main component ─────────────────────────────────────────────────────────
 
 export default function WikiPage() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
   const [pages, setPages] = useState<WikiPageSummary[]>([]);
   const [selected, setSelected] = useState<WikiPageDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -552,10 +557,21 @@ export default function WikiPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Auto-select entry from ?slug= query param (used by wiki cross-links)
+  const slugParam = searchParams.get("slug");
+  useEffect(() => {
+    if (slugParam && pages.length > 0 && (!selected || selected.slug !== slugParam)) {
+      const match = pages.find((p) => p.slug === slugParam);
+      if (match) loadDetail(match.slug);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slugParam, pages]);
+
   const loadDetail = useCallback((slug: string) => {
     setDetailLoading(true);
     setEditingNotes(false);
     setNotesError(null);
+    router.replace(`/wiki?slug=${encodeURIComponent(slug)}`, { scroll: false });
     fetch(`/api/wiki/${encodeURIComponent(slug)}`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -568,7 +584,7 @@ export default function WikiPage() {
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setDetailLoading(false));
-  }, [pages]);
+  }, [pages, router]);
 
   const handleSaveNotes = useCallback(async () => {
     if (!selected) return;
