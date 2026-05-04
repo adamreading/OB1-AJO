@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useState, useEffect, useCallback, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -524,9 +524,8 @@ function MergeModal({
 
 // ── Main component ─────────────────────────────────────────────────────────
 
-export default function WikiPage() {
+function WikiPageInner() {
   const searchParams = useSearchParams();
-  const router = useRouter();
   const [pages, setPages] = useState<WikiPageSummary[]>([]);
   const [selected, setSelected] = useState<WikiPageDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -571,7 +570,7 @@ export default function WikiPage() {
     setDetailLoading(true);
     setEditingNotes(false);
     setNotesError(null);
-    router.replace(`/wiki?slug=${encodeURIComponent(slug)}`, { scroll: false });
+    window.history.replaceState(null, "", `/wiki?slug=${encodeURIComponent(slug)}`);
     fetch(`/api/wiki/${encodeURIComponent(slug)}`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -584,7 +583,7 @@ export default function WikiPage() {
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setDetailLoading(false));
-  }, [pages, router]);
+  }, [pages]);
 
   const handleSaveNotes = useCallback(async () => {
     if (!selected) return;
@@ -958,6 +957,14 @@ export default function WikiPage() {
         </div>
       </div>
     </>
+  );
+}
+
+export default function WikiPage() {
+  return (
+    <Suspense fallback={null}>
+      <WikiPageInner />
+    </Suspense>
   );
 }
 
