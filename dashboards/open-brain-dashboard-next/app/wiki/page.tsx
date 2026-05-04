@@ -200,11 +200,18 @@ function EntityTypeSelect({
 }) {
   const currentType =
     (page.metadata?.entity_type as string | undefined) ?? page.type;
+  // Local optimistic value so the select doesn't snap back during async save
+  const [pendingType, setPendingType] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const displayType = pendingType ?? currentType;
+  const colorClass =
+    TYPE_BADGE_COLORS[displayType] ?? TYPE_BADGE_COLORS["entity"];
+
   const handleChange = async (newType: string) => {
     if (!page.entity_id || newType === currentType) return;
+    setPendingType(newType);
     setSaving(true);
     setError(null);
     try {
@@ -218,20 +225,19 @@ function EntityTypeSelect({
         throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
       }
       onTypeChanged(newType);
+      setPendingType(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
+      setPendingType(null);
     } finally {
       setSaving(false);
     }
   };
 
-  const colorClass =
-    TYPE_BADGE_COLORS[currentType] ?? TYPE_BADGE_COLORS["entity"];
-
   return (
     <div className="relative inline-flex items-center">
       <select
-        value={currentType}
+        value={displayType}
         onChange={(e) => handleChange(e.target.value)}
         disabled={saving || !page.entity_id}
         title={error ?? "Change entity type"}
@@ -246,6 +252,9 @@ function EntityTypeSelect({
       <span className="pointer-events-none absolute right-1 text-[8px] opacity-60">▾</span>
       {saving && (
         <span className="absolute -right-4 text-[10px] text-text-muted animate-pulse">…</span>
+      )}
+      {error && (
+        <span className="absolute -right-4 text-[10px] text-danger" title={error}>!</span>
       )}
     </div>
   );
@@ -952,7 +961,7 @@ function WikiPageInner() {
                       {selected.title}
                     </h2>
                     {selected.entity_id ? (
-                      <EntityTypeSelect page={selected} onTypeChanged={handleTypeChanged} />
+                      <EntityTypeSelect key={selected.slug} page={selected} onTypeChanged={handleTypeChanged} />
                     ) : (
                       <TypeBadge page={selected} />
                     )}
