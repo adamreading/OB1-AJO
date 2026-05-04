@@ -464,7 +464,7 @@ Write well-structured markdown with these sections in order:
 ## Timeline (chronological, most recent first, max 8 items),
 ## Relationships, ## Open Questions (3-5 genuine gaps).
 
-Ground every claim in the input snippets. Cite thought ids in square brackets like [#id].
+Ground every claim in the input snippets. Cite thought ids as [#42] (hash + integer, e.g. [#7], [#142]). Always include the # — never write [42] without it. Citations go inline after the claim, not as standalone list items.
 Skip sections with no material rather than filling with generic text.
 
 CURATOR NOTES: If the STRUCTURE block contains a "curator_notes" field, treat it as
@@ -481,7 +481,7 @@ force links; only link names that appear naturally in your prose.
 For the Relationships section specifically:
 organize connections by relation type using \`### {relation_type}\` subheadings
 (e.g. ### supports, ### depends_on, ### member_of, ### works_on).
-Under each subheading, list entities with support counts (use wiki links if available).
+Under each subheading, list entities with support counts in parentheses — e.g. "- [Tom Falconar](/wiki?slug=person-tom-falconar) (3)". Always use parentheses () for counts, never square brackets [].
 Order subheadings by total count desc.
 If typed_edges_by_relation is empty, omit the Relationships section entirely.
 Do not render a co-mention subsection; co_occurs_with edges are excluded upstream.
