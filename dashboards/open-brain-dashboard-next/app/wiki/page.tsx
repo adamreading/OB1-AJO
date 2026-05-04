@@ -17,8 +17,22 @@ interface WikiPageSummary {
   metadata?: Record<string, unknown>;
 }
 
-const WORK_TYPES = new Set(["project", "tool", "organization", "org"]);
-const PERSONAL_TYPES = new Set(["person", "place"]);
+const ENTITY_TYPE_FILTERS = [
+  { value: "all",          label: "All" },
+  { value: "person",       label: "Person" },
+  { value: "organization", label: "Org" },
+  { value: "project",      label: "Project" },
+  { value: "tool",         label: "Tool" },
+  { value: "place",        label: "Place" },
+  { value: "topic",        label: "Topic" },
+] as const;
+
+type EntityTypeFilter = typeof ENTITY_TYPE_FILTERS[number]["value"];
+
+function getEntityType(p: WikiPageSummary): string {
+  const et = (p.metadata?.entity_type as string | undefined) ?? p.type;
+  return et === "org" ? "organization" : et;
+}
 
 interface WikiPageDetail extends WikiPageSummary {
   content: string;
@@ -173,6 +187,68 @@ function MarkdownContent({ content, onWikiLink }: { content: string; onWikiLink?
   }
 
   return <div className="wiki-content" onClick={handleClick}>{elements}</div>;
+}
+
+// ── Entity Type Select ────────────────────────────────────────────────────
+
+function EntityTypeSelect({
+  page,
+  onTypeChanged,
+}: {
+  page: WikiPageDetail;
+  onTypeChanged: (newType: string) => void;
+}) {
+  const currentType =
+    (page.metadata?.entity_type as string | undefined) ?? page.type;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleChange = async (newType: string) => {
+    if (!page.entity_id || newType === currentType) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/entities/${page.entity_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entity_type: newType }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      onTypeChanged(newType);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const colorClass =
+    TYPE_BADGE_COLORS[currentType] ?? TYPE_BADGE_COLORS["entity"];
+
+  return (
+    <div className="relative inline-flex items-center">
+      <select
+        value={currentType}
+        onChange={(e) => handleChange(e.target.value)}
+        disabled={saving || !page.entity_id}
+        title={error ?? "Change entity type"}
+        className={`appearance-none inline-flex items-center pl-1.5 pr-5 py-0.5 rounded text-[10px] font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-violet disabled:opacity-60 ${colorClass}`}
+      >
+        {ENTITY_TYPE_FILTERS.filter((f) => f.value !== "all").map((f) => (
+          <option key={f.value} value={f.value}>
+            {f.label}
+          </option>
+        ))}
+      </select>
+      <span className="pointer-events-none absolute right-1 text-[8px] opacity-60">▾</span>
+      {saving && (
+        <span className="absolute -right-4 text-[10px] text-text-muted animate-pulse">…</span>
+      )}
+    </div>
+  );
 }
 
 // ── Alias Modal ────────────────────────────────────────────────────────────
@@ -546,11 +622,13 @@ function WikiPageInner() {
   const [showAliasModal, setShowAliasModal] = useState(false);
   const [showMergeModal, setShowMergeModal] = useState(false);
   const [showRenameModal, setShowRenameModal] = useState(false);
-  const [contextFilter, setContextFilter] = useState<"all" | "work" | "personal">("all");
+  const [typeFilter, setTypeFilter] = useState<EntityTypeFilter>("all");
   const [editingNotes, setEditingNotes] = useState(false);
   const [notesContent, setNotesContent] = useState("");
   const [savingNotes, setSavingNotes] = useState(false);
   const [notesError, setNotesError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -666,15 +744,45 @@ function WikiPageInner() {
     setSelected((prev) => (prev ? { ...prev, title: newName } : prev));
   }, [selected?.slug]);
 
+  const handleTypeChanged = useCallback((newType: string) => {
+    setSelected((prev) =>
+      prev ? { ...prev, metadata: { ...prev.metadata, entity_type: newType } } : prev
+    );
+    setPages((prev) =>
+      prev.map((p) =>
+        p.slug === selected?.slug
+          ? { ...p, metadata: { ...(p.metadata ?? {}), entity_type: newType } }
+          : p
+      )
+    );
+  }, [selected?.slug]);
+
+  const handleDeleteEntity = useCallback(async () => {
+    if (!selected?.entity_id) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/entities/${selected.entity_id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      setPages((prev) => prev.filter((p) => p.slug !== selected.slug));
+      setSelected(null);
+      setConfirmDelete(false);
+      window.history.replaceState(null, "", "/wiki");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+      setConfirmDelete(false);
+    } finally {
+      setDeleting(false);
+    }
+  }, [selected]);
+
   const q = search.trim().toLowerCase();
   const filteredPages = pages.filter((p) => {
     if (q && !p.title.toLowerCase().includes(q) &&
         !(p.aliases ?? []).some((a) => a.toLowerCase().includes(q))) return false;
-    if (contextFilter !== "all") {
-      const et = (p.metadata?.entity_type as string | undefined) ?? p.type;
-      if (contextFilter === "work" && !WORK_TYPES.has(et)) return false;
-      if (contextFilter === "personal" && !PERSONAL_TYPES.has(et)) return false;
-    }
+    if (typeFilter !== "all" && getEntityType(p) !== typeFilter) return false;
     return true;
   });
 
@@ -717,22 +825,18 @@ function WikiPageInner() {
             <p className="text-xs text-text-muted mt-0.5">
               {pages.length} page{pages.length !== 1 ? "s" : ""}
             </p>
-            <div className="flex bg-bg-surface border border-border rounded-lg p-1 mt-2">
-              {(["all", "work", "personal"] as const).map((c) => (
+            <div className="flex flex-wrap gap-1 mt-2">
+              {ENTITY_TYPE_FILTERS.map((f) => (
                 <button
-                  key={c}
-                  onClick={() => setContextFilter(c)}
-                  className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-                    contextFilter === c
-                      ? c === "work"
-                        ? "bg-work text-white"
-                        : c === "personal"
-                        ? "bg-personal text-white"
-                        : "bg-violet text-white"
-                      : "text-text-muted hover:text-text-secondary"
+                  key={f.value}
+                  onClick={() => setTypeFilter(f.value)}
+                  className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-all ${
+                    typeFilter === f.value
+                      ? "bg-violet text-white"
+                      : "bg-bg-surface border border-border text-text-muted hover:text-text-secondary"
                   }`}
                 >
-                  {c.charAt(0).toUpperCase() + c.slice(1)}
+                  {f.label}
                 </button>
               ))}
             </div>
@@ -847,7 +951,11 @@ function WikiPageInner() {
                     <h2 className="text-xl font-bold text-text-primary truncate">
                       {selected.title}
                     </h2>
-                    <TypeBadge page={selected} />
+                    {selected.entity_id ? (
+                      <EntityTypeSelect page={selected} onTypeChanged={handleTypeChanged} />
+                    ) : (
+                      <TypeBadge page={selected} />
+                    )}
                   </div>
                   <div className="flex items-center gap-2 mt-1 flex-wrap">
                     <p className="text-xs text-text-muted">
@@ -894,6 +1002,31 @@ function WikiPageInner() {
                       >
                         Merge
                       </button>
+                      {confirmDelete ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={handleDeleteEntity}
+                            disabled={deleting}
+                            className="px-3 py-1.5 text-sm bg-danger text-white rounded-lg hover:bg-danger/90 transition-colors disabled:opacity-50"
+                          >
+                            {deleting ? "Deleting…" : "Confirm delete"}
+                          </button>
+                          <button
+                            onClick={() => setConfirmDelete(false)}
+                            className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDelete(true)}
+                          title="Delete entity and wiki page"
+                          className="px-3 py-1.5 text-sm bg-bg-elevated border border-danger/30 rounded-lg text-danger/70 hover:text-danger hover:border-danger/60 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      )}
                     </>
                   )}
                 </div>

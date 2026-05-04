@@ -547,26 +547,54 @@ app.patch("/entities/:id/aliases", async (c) => {
   return c.json({ aliases: updated }, 200, corsHeaders);
 });
 
-// Entities — rename (updates canonical_name + wiki page title; slug preserved)
+// Entities — rename and/or reclassify (slug preserved to keep existing links)
 app.patch("/entities/:id", async (c) => {
   const id = Number(c.req.param("id"));
   const body = await c.req.json();
   const newName = typeof body.canonical_name === "string" ? body.canonical_name.trim() : null;
-  if (!newName) return c.json({ error: "canonical_name (string) is required" }, 400, corsHeaders);
+  const newType = typeof body.entity_type === "string" ? body.entity_type.trim() : null;
 
-  const normalized = newName.toLowerCase().trim().replace(/\s+/g, " ");
-  const { error } = await supabase
-    .from("entities")
-    .update({ canonical_name: newName, normalized_name: normalized, updated_at: new Date().toISOString() })
-    .eq("id", id);
+  if (!newName && !newType) {
+    return c.json({ error: "canonical_name or entity_type is required" }, 400, corsHeaders);
+  }
+
+  const VALID_TYPES = ["person", "organization", "org", "project", "tool", "place", "topic", "entity"];
+  if (newType && !VALID_TYPES.includes(newType)) {
+    return c.json({ error: `Invalid entity_type. Must be one of: ${VALID_TYPES.join(", ")}` }, 400, corsHeaders);
+  }
+
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (newName) {
+    updates.canonical_name = newName;
+    updates.normalized_name = newName.toLowerCase().trim().replace(/\s+/g, " ");
+  }
+  if (newType) updates.entity_type = newType;
+
+  const { error } = await supabase.from("entities").update(updates).eq("id", id);
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
 
-  // Keep wiki page title in sync (slug is unchanged to preserve existing links)
-  await supabase.from("wiki_pages")
-    .update({ title: newName, updated_at: new Date().toISOString() })
-    .eq("entity_id", id);
+  // Keep wiki page title in sync when renamed (slug unchanged)
+  if (newName) {
+    await supabase.from("wiki_pages")
+      .update({ title: newName, updated_at: new Date().toISOString() })
+      .eq("entity_id", id);
+  }
 
-  return c.json({ id, canonical_name: newName }, 200, corsHeaders);
+  return c.json({ id, ...(newName ? { canonical_name: newName } : {}), ...(newType ? { entity_type: newType } : {}) }, 200, corsHeaders);
+});
+
+// Entities — delete (wiki_pages deleted explicitly; thought_entities + edges cascade)
+app.delete("/entities/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!id || isNaN(id)) return c.json({ error: "Valid entity id required" }, 400, corsHeaders);
+
+  // wiki_pages FK is SET NULL so it won't cascade — delete it first
+  await supabase.from("wiki_pages").delete().eq("entity_id", id);
+
+  const { error } = await supabase.from("entities").delete().eq("id", id);
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+
+  return c.json({ deleted: true, id }, 200, corsHeaders);
 });
 
 // Wiki pages — update curator notes only (never overwritten by auto-regeneration)
