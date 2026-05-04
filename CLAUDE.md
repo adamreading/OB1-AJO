@@ -72,6 +72,9 @@ When working in this repo as the AJO maintainer, be aware:
 - Curator notes → `wiki_pages.notes` column. Compiler reads this and injects it into the LLM prompt. Never overwritten.
 - Citations format: `[#42]` (integer serial_id). Entity cross-links: `/wiki?slug=entity-slug`.
 - Wiki output files are gitignored (`wikis/`, `compiled-wiki/`, `output/`).
+- Wiki sidebar filter is by entity type (All / Person / Org / Project / Tool / Place / Topic).
+- Entity detail header: Rename, Aliases, Merge, Type dropdown (writes `entity_type` to DB), Delete (two-step confirm; removes entity + wiki page).
+- `DELETE /entities/:id` — deletes wiki_pages row explicitly (FK is SET NULL), then entity (thought_entities + edges cascade).
 
 **Quality scoring**: `quality_score` defaults to 50. Run `scripts/score-thoughts.mjs` to backfill heuristic scores. The Audit page threshold is configurable in the UI.
 

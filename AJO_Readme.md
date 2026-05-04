@@ -480,9 +480,10 @@ Two Edge Functions serve the AJO fork. Both are in this repo and must be deploye
 | GET | `/wiki-pages/:slug` | Single wiki page with full content |
 | PUT | `/wiki-pages/:slug` | Update wiki page content |
 | PATCH | `/wiki-pages/:slug/notes` | Update curator notes only (never overwritten by compiler) |
-| PATCH | `/entities/:id` | Rename entity canonical name |
+| PATCH | `/entities/:id` | Rename entity (`canonical_name`) and/or reclassify (`entity_type`) |
 | PATCH | `/entities/:id/aliases` | Append or remove an alias (`action: "add"` / `action: "remove"`) |
 | POST | `/entities/:id/merge` | Merge source entity into target (moves all thoughts + edges) |
+| DELETE | `/entities/:id` | Delete entity + wiki page (thought_entities and edges cascade) |
 
 ### Deploy via CLI
 
@@ -663,9 +664,10 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 *   **Entity Graph + Wiki**: Entities, edges, and wiki pages are first-class citizens. The wiki is auto-generated from the entity graph and regenerates automatically when the queue drains.
 *   **Wiki always regenerates**: All pages are regenerated on every compiler run. Use the `notes` column (editable in the dashboard) for curator content that survives regeneration — the compiler reads it and incorporates it before calling the LLM. The `manually_edited` column still exists in the DB but is no longer used by the compiler.
 *   **Wiki deep-linking**: The wiki page is always at `/wiki`. Entity cross-links use `?slug=` query params (e.g. `/wiki?slug=person-adam-ososki`) and are intercepted client-side. Clicking a link in wiki content navigates to that entity's page without a full reload.
+*   **Wiki entity management**: The detail header has inline controls for Rename, Aliases (add/remove), Merge, entity Type (inline dropdown that writes to `entities.entity_type` immediately), and Delete (two-step confirm; removes entity + wiki page from DB). The sidebar filter is by entity type (All / Person / Org / Project / Tool / Place / Topic), not Work/Personal.
 *   **Heuristic quality scoring**: `quality_score` is populated at creation time (default 50) and can be backfilled with `scripts/score-thoughts.mjs`. The Audit page threshold is configurable in the UI (default < 30).
 *   **Kanban card-to-card drag**: Cards can be dragged between existing cards in any column, not just to empty space. Uses `@dnd-kit/sortable` with per-column `SortableContext`.
 
 ---
 
-*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias UI, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe script.*
+*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts.*
