@@ -201,19 +201,21 @@ async function main() {
   }
 
   const fileEnv = readEnvLocal();
+  const raw = { ...fileEnv, ...process.env };
+  // Normalise Ollama base URL: strip trailing /api before appending /v1
+  const ollamaBase = raw.OLLAMA_URL
+    ? raw.OLLAMA_URL.replace(/\/api\/?$/, "") + "/v1"
+    : "http://localhost:11434/v1";
   const env = {
-    OPEN_BRAIN_URL: fileEnv.OPEN_BRAIN_URL || process.env.OPEN_BRAIN_URL,
+    OPEN_BRAIN_URL: raw.OPEN_BRAIN_URL || raw.SUPABASE_URL,
     OPEN_BRAIN_SERVICE_KEY:
-      fileEnv.OPEN_BRAIN_SERVICE_KEY || process.env.OPEN_BRAIN_SERVICE_KEY,
-    LLM_BASE_URL:
-      fileEnv.LLM_BASE_URL || process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1",
-    LLM_API_KEY: fileEnv.LLM_API_KEY || process.env.LLM_API_KEY,
-    LLM_MODEL:
-      fileEnv.LLM_MODEL || process.env.LLM_MODEL || "anthropic/claude-haiku-4-5",
-    SUBJECT_NAME: fileEnv.SUBJECT_NAME || process.env.SUBJECT_NAME,
-    SOURCE_TYPE_FILTER:
-      fileEnv.SOURCE_TYPE_FILTER || process.env.SOURCE_TYPE_FILTER,
-    WIKI_OUTPUT_DIR: fileEnv.WIKI_OUTPUT_DIR || process.env.WIKI_OUTPUT_DIR,
+      raw.OPEN_BRAIN_SERVICE_KEY || raw.SUPABASE_KEY || raw.SUPABASE_SERVICE_ROLE_KEY,
+    LLM_BASE_URL: raw.LLM_BASE_URL || ollamaBase,
+    LLM_API_KEY: raw.LLM_API_KEY || (raw.OLLAMA_URL ? "ollama" : undefined),
+    LLM_MODEL: raw.LLM_MODEL || raw.OLLAMA_MODEL || "anthropic/claude-haiku-4-5",
+    SUBJECT_NAME: raw.SUBJECT_NAME,
+    SOURCE_TYPE_FILTER: raw.SOURCE_TYPE_FILTER,
+    WIKI_OUTPUT_DIR: raw.WIKI_OUTPUT_DIR,
   };
 
   if (!env.OPEN_BRAIN_URL) fail("OPEN_BRAIN_URL missing (set in .env.local).");
