@@ -71,7 +71,7 @@ function TypeBadge({ page }: { page: WikiPageSummary }) {
   );
 }
 
-function MarkdownContent({ content }: { content: string }) {
+function MarkdownContent({ content, onWikiLink }: { content: string; onWikiLink?: (slug: string) => void }) {
   const lines = content.split("\n");
   const elements: React.ReactNode[] = [];
   let listItems: string[] = [];
@@ -101,8 +101,8 @@ function MarkdownContent({ content }: { content: string }) {
         const extra = u.startsWith("/wiki?slug=") ? ' data-wiki-slug="true"' : '';
         return `<a href="${safe}"${extra} class="text-violet hover:underline">${t}</a>`;
       })
-      // Thought citation links [#NNN] (integer IDs, new format)
-      .replace(/\[#(\d+)\]/g, '<a href="/thoughts/$1" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#$1]</a>')
+      // Thought citation links [#NNN] or [NNN] (integer IDs)
+      .replace(/\[#?(\d+)\]/g, '<a href="/thoughts/$1" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#$1]</a>')
       // Legacy UUID citations [xxxxxxxx-xxxx-...] — styled but not linked (rebuild will replace with integer format)
       .replace(/\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/gi, '<span class="text-text-muted text-xs font-mono">[$1]</span>')
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
@@ -161,7 +161,18 @@ function MarkdownContent({ content }: { content: string }) {
   }
   flushList();
 
-  return <div className="wiki-content">{elements}</div>;
+  function handleClick(e: React.MouseEvent<HTMLDivElement>) {
+    const a = (e.target as HTMLElement).closest("a");
+    if (!a) return;
+    const href = a.getAttribute("href") || "";
+    if (href.startsWith("/wiki?slug=")) {
+      e.preventDefault();
+      const slug = new URLSearchParams(href.slice("/wiki?".length)).get("slug");
+      if (slug && onWikiLink) onWikiLink(slug);
+    }
+  }
+
+  return <div className="wiki-content" onClick={handleClick}>{elements}</div>;
 }
 
 // ── Alias Modal ────────────────────────────────────────────────────────────
@@ -890,7 +901,7 @@ function WikiPageInner() {
 
               {/* Content area */}
               <div className="flex-1 overflow-y-auto px-6 py-4">
-                <MarkdownContent content={selected.content} />
+                <MarkdownContent content={selected.content} onWikiLink={loadDetail} />
 
                 {/* Curator notes section */}
                 <div className="mt-6 border-t border-border pt-4">
