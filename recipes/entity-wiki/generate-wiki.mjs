@@ -384,7 +384,7 @@ async function semanticExpand(sb, env, entity) {
 // LLM synthesis (provider-agnostic Chat Completions)
 // ---------------------------------------------------------------
 
-function buildSynthesisInput(entity, linked, semantic, nameMap, maxLinked, maxSemantic) {
+function buildSynthesisInput(entity, linked, semantic, nameMap, relatedWikiLinks, maxLinked, maxSemantic) {
   // Prepare snippets: truncate long content, cap counts, prefer typed mentions.
   const linkedSnippets = (linked || []).slice(0, maxLinked).map((t) => ({
     id: t.id,
@@ -435,7 +435,7 @@ function buildSynthesisInput(entity, linked, semantic, nameMap, maxLinked, maxSe
     typedByRelation[rel] = typedByRelation[rel].slice(0, 12);
   }
 
-  return {
+  const result = {
     entity: `${entity.canonical_name} (${entity.entity_type})`,
     entity_metadata: entity.metadata || {},
     typed_edges_by_relation: typedByRelation,
@@ -446,6 +446,11 @@ function buildSynthesisInput(entity, linked, semantic, nameMap, maxLinked, maxSe
       semantic_ids: semanticSnippets.map((s) => s.id),
     },
   };
+  if (entity.__notes) result.curator_notes = entity.__notes;
+  if (relatedWikiLinks && Object.keys(relatedWikiLinks).length > 0) {
+    result.related_wiki_links = relatedWikiLinks;
+  }
+  return result;
 }
 
 const SYSTEM_PROMPT = `You write wiki pages for a personal knowledge graph.
@@ -461,10 +466,21 @@ Write well-structured markdown with these sections in order:
 Ground every claim in the input snippets. Cite thought ids in square brackets like [#id].
 Skip sections with no material rather than filling with generic text.
 
+CURATOR NOTES: If the STRUCTURE block contains a "curator_notes" field, treat it as
+TRUSTED corrections from the knowledge owner. It takes priority over conflicting
+information in the thought snippets. Incorporate corrections naturally — do not
+quote or repeat the notes verbatim; just write the corrected article.
+
+WIKI LINKS: If the STRUCTURE block contains "related_wiki_links" (a map of entity name
+to URL path), format those entity names as markdown links when you mention them naturally
+in the article. Example: if related_wiki_links shows {"Tom Falconar": "/wiki/person-tom-falconar"},
+write [Tom Falconar](/wiki/person-tom-falconar) on first mention per section. Do not
+force links; only link names that appear naturally in your prose.
+
 For the Relationships section specifically:
 organize connections by relation type using \`### {relation_type}\` subheadings
 (e.g. ### supports, ### depends_on, ### member_of, ### works_on).
-Under each subheading, list entities with support counts.
+Under each subheading, list entities with support counts (use wiki links if available).
 Order subheadings by total count desc.
 If typed_edges_by_relation is empty, omit the Relationships section entirely.
 Do not render a co-mention subsection; co_occurs_with edges are excluded upstream.
@@ -539,6 +555,8 @@ async function synthesize(env, model, payload) {
     entity_metadata: payload.entity_metadata,
     typed_edges_by_relation: payload.typed_edges_by_relation,
     provenance: payload.provenance,
+    ...(payload.curator_notes ? { curator_notes: payload.curator_notes } : {}),
+    ...(payload.related_wiki_links ? { related_wiki_links: payload.related_wiki_links } : {}),
   };
   const userContent =
     `Produce the wiki page now.\n\n` +
@@ -662,25 +680,6 @@ async function upsertWikiPage(env, pageData) {
   const key = env.OPEN_BRAIN_SERVICE_KEY || env.SUPABASE_KEY;
   if (!base || !key) return; // env not configured — skip silently
 
-  // Check if the page already exists and was manually edited
-  const checkRes = await fetch(
-    `${base}/rest/v1/wiki_pages?slug=eq.${encodeURIComponent(pageData.slug)}&select=manually_edited`,
-    {
-      headers: {
-        apikey: key,
-        authorization: `Bearer ${key}`,
-        accept: "application/json",
-      },
-    },
-  );
-  if (checkRes.ok) {
-    const rows = await checkRes.json();
-    if (Array.isArray(rows) && rows.length > 0 && rows[0].manually_edited === true) {
-      console.log(`[wiki] skip upsert for "${pageData.slug}" — manually_edited=true`);
-      return;
-    }
-  }
-
   const payload = {
     slug: pageData.slug,
     type: pageData.type,
@@ -690,7 +689,6 @@ async function upsertWikiPage(env, pageData) {
     thought_count: pageData.thought_count ?? 0,
     generated_at: pageData.generated_at ?? new Date().toISOString(),
     metadata: pageData.metadata ?? {},
-    manually_edited: false,
     updated_at: new Date().toISOString(),
   };
 
@@ -852,6 +850,21 @@ async function generateForEntity(sb, env, entity, args) {
   entity.__edges_out = eOut;
   entity.__edges_in = eIn;
 
+  // Fetch existing curator notes so the LLM can incorporate corrections
+  const slug = slugify(entity.canonical_name, entity.entity_type);
+  try {
+    const existing = await sb.get("wiki_pages", `slug=eq.${encodeURIComponent(slug)}&select=notes`);
+    entity.__notes = (existing && existing.length > 0 && existing[0].notes) ? existing[0].notes : null;
+  } catch {
+    entity.__notes = null;
+  }
+
+  // Build a name→wiki-url map for related entities so the LLM can link them
+  const relatedWikiLinks = {};
+  for (const [, info] of nameMap) {
+    relatedWikiLinks[info.name] = `/wiki/${slugify(info.name, info.type)}`;
+  }
+
   // 3. Semantic expansion (opt-in — avoids forcing an embedding provider)
   let semantic = [];
   if (args.semanticExpand) {
@@ -879,6 +892,7 @@ async function generateForEntity(sb, env, entity, args) {
     linked,
     semantic,
     nameMap,
+    relatedWikiLinks,
     args.maxLinked,
     args.maxSemantic,
   );

@@ -515,7 +515,7 @@ app.get("/wiki-pages", async (c) => {
   return c.json({ data: pages }, 200, corsHeaders);
 });
 
-// Entities — append an alias
+// Entities — add or remove an alias
 app.patch("/entities/:id/aliases", async (c) => {
   const id = Number(c.req.param("id"));
   const body = await c.req.json();
@@ -530,15 +530,61 @@ app.patch("/entities/:id/aliases", async (c) => {
   if (fetchErr || !entity) return c.json({ error: "Entity not found" }, 404, corsHeaders);
 
   const current: string[] = entity.aliases ?? [];
-  if (current.includes(alias)) return c.json({ aliases: current }, 200, corsHeaders);
 
-  const updated = [...current, alias];
+  let updated: string[];
+  if (body.action === "remove") {
+    updated = current.filter((a: string) => a !== alias);
+  } else {
+    if (current.includes(alias)) return c.json({ aliases: current }, 200, corsHeaders);
+    updated = [...current, alias];
+  }
+
   const { error: updateErr } = await supabase
     .from("entities")
     .update({ aliases: updated, updated_at: new Date().toISOString() })
     .eq("id", id);
   if (updateErr) return c.json({ error: updateErr.message }, 500, corsHeaders);
   return c.json({ aliases: updated }, 200, corsHeaders);
+});
+
+// Entities — rename (updates canonical_name + wiki page title; slug preserved)
+app.patch("/entities/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json();
+  const newName = typeof body.canonical_name === "string" ? body.canonical_name.trim() : null;
+  if (!newName) return c.json({ error: "canonical_name (string) is required" }, 400, corsHeaders);
+
+  const normalized = newName.toLowerCase().trim().replace(/\s+/g, " ");
+  const { error } = await supabase
+    .from("entities")
+    .update({ canonical_name: newName, normalized_name: normalized, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+
+  // Keep wiki page title in sync (slug is unchanged to preserve existing links)
+  await supabase.from("wiki_pages")
+    .update({ title: newName, updated_at: new Date().toISOString() })
+    .eq("entity_id", id);
+
+  return c.json({ id, canonical_name: newName }, 200, corsHeaders);
+});
+
+// Wiki pages — update curator notes only (never overwritten by auto-regeneration)
+app.patch("/wiki-pages/:slug/notes", async (c) => {
+  const slug = c.req.param("slug");
+  const body = await c.req.json();
+  if (typeof body.notes !== "string") {
+    return c.json({ error: "notes (string) is required" }, 400, corsHeaders);
+  }
+  const { data, error } = await supabase
+    .from("wiki_pages")
+    .update({ notes: body.notes || null, updated_at: new Date().toISOString() })
+    .eq("slug", slug)
+    .select("id, slug")
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  if (!data) return c.json({ error: "Not found" }, 404, corsHeaders);
+  return c.json({ slug: data.slug, action: "notes_updated" }, 200, corsHeaders);
 });
 
 // Wiki pages — single page with full content

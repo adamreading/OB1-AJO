@@ -25,3 +25,7 @@ sync-log.json
 
 # Build artifacts
 deno.lock
+
+# Local wiki output — never commit generated wiki files
+wikis/
+compiled-wiki/

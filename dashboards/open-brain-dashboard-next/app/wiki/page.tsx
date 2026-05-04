@@ -12,7 +12,6 @@ interface WikiPageSummary {
   title: string;
   generated_at: string;
   thought_count: number;
-  manually_edited: boolean;
   aliases?: string[];
   metadata?: Record<string, unknown>;
 }
@@ -22,6 +21,7 @@ const PERSONAL_TYPES = new Set(["person", "place"]);
 
 interface WikiPageDetail extends WikiPageSummary {
   content: string;
+  notes?: string | null;
   metadata: Record<string, unknown>;
   updated_at: string;
   created_at: string;
@@ -90,6 +90,16 @@ function MarkdownContent({ content }: { content: string }) {
 
   function inlineFormat(text: string): string {
     return text
+      // Markdown links [text](url) — relative paths and https/http only
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => {
+        const safe =
+          u.startsWith("/") || u.startsWith("https://") || u.startsWith("http://")
+            ? u
+            : "#";
+        return `<a href="${safe}" class="text-violet hover:underline">${t}</a>`;
+      })
+      // Thought citation links [#NNN]
+      .replace(/\[#(\d+)\]/g, '<a href="/thoughts/$1" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#$1]</a>')
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
       .replace(/\*(.+?)\*/g, "<em>$1</em>")
       .replace(/`(.+?)`/g, "<code class=\"bg-bg-elevated px-1 rounded text-xs\">$1</code>");
@@ -155,14 +165,17 @@ function AliasModal({
   page,
   onClose,
   onAliasAdded,
+  onAliasRemoved,
 }: {
   page: WikiPageDetail;
   onClose: () => void;
   onAliasAdded: (alias: string) => void;
+  onAliasRemoved: (alias: string) => void;
 }) {
   const [aliases, setAliases] = useState<string[]>(page.aliases ?? []);
   const [input, setInput] = useState("");
   const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -196,6 +209,30 @@ function AliasModal({
     }
   }, [input, aliases, page.entity_id, onAliasAdded]);
 
+  const handleRemove = useCallback(async (alias: string) => {
+    if (!page.entity_id) return;
+    setRemoving(alias);
+    setError(null);
+    try {
+      const res = await fetch(`/api/entities/${page.entity_id}/aliases`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alias, action: "remove" }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      const { aliases: updated } = await res.json() as { aliases: string[] };
+      setAliases(updated);
+      onAliasRemoved(alias);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to remove alias");
+    } finally {
+      setRemoving(null);
+    }
+  }, [page.entity_id, onAliasRemoved]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
@@ -218,9 +255,17 @@ function AliasModal({
             {aliases.map((a) => (
               <span
                 key={a}
-                className="inline-flex items-center px-2 py-0.5 rounded-full bg-bg-elevated border border-border text-xs text-text-secondary"
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-elevated border border-border text-xs text-text-secondary"
               >
                 {a}
+                <button
+                  onClick={() => handleRemove(a)}
+                  disabled={removing === a}
+                  className="text-text-muted hover:text-danger transition-colors leading-none ml-0.5 disabled:opacity-50"
+                  title={`Remove "${a}"`}
+                >
+                  {removing === a ? "…" : "×"}
+                </button>
               </span>
             ))}
           </div>
@@ -246,6 +291,97 @@ function AliasModal({
             className="px-3 py-1.5 text-sm bg-violet text-white rounded-lg hover:bg-violet/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? "…" : "Add"}
+          </button>
+        </div>
+
+        {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Rename Modal ───────────────────────────────────────────────────────────
+
+function RenameModal({
+  page,
+  onClose,
+  onRenamed,
+}: {
+  page: WikiPageDetail;
+  onClose: () => void;
+  onRenamed: (newName: string) => void;
+}) {
+  const [name, setName] = useState(page.title);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const handleRename = useCallback(async () => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === page.title) { onClose(); return; }
+    if (!page.entity_id) { setError("No entity linked to this page"); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/entities/${page.entity_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ canonical_name: trimmed }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      onRenamed(trimmed);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Rename failed");
+    } finally {
+      setSaving(false);
+    }
+  }, [name, page.title, page.entity_id, onClose, onRenamed]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="bg-bg-surface border border-border rounded-xl shadow-xl w-full max-w-sm mx-4 p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-text-primary">Rename entity</h3>
+          <button onClick={onClose} className="text-text-muted hover:text-text-secondary transition-colors text-lg leading-none">×</button>
+        </div>
+
+        <input
+          ref={inputRef}
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleRename(); if (e.key === "Escape") onClose(); }}
+          className="w-full bg-bg-elevated border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-violet mb-3"
+        />
+
+        <p className="text-xs text-text-muted mb-4">
+          The wiki page title updates immediately. Content regenerates on the next compile run.
+        </p>
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleRename}
+            disabled={saving || !name.trim() || name.trim() === page.title}
+            className="px-3 py-1.5 text-sm bg-violet text-white rounded-lg hover:bg-violet/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {saving ? "Renaming…" : "Rename"}
           </button>
         </div>
 
@@ -389,14 +525,15 @@ export default function WikiPage() {
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [editContent, setEditContent] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [showAliasModal, setShowAliasModal] = useState(false);
   const [showMergeModal, setShowMergeModal] = useState(false);
+  const [showRenameModal, setShowRenameModal] = useState(false);
   const [contextFilter, setContextFilter] = useState<"all" | "work" | "personal">("all");
+  const [editingNotes, setEditingNotes] = useState(false);
+  const [notesContent, setNotesContent] = useState("");
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [notesError, setNotesError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -415,52 +552,44 @@ export default function WikiPage() {
 
   const loadDetail = useCallback((slug: string) => {
     setDetailLoading(true);
-    setEditing(false);
-    setSaveError(null);
+    setEditingNotes(false);
+    setNotesError(null);
     fetch(`/api/wiki/${encodeURIComponent(slug)}`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
       .then((d: WikiPageDetail) => {
-        // Carry aliases from the list (detail endpoint doesn't return them)
         const listEntry = pages.find((p) => p.slug === slug);
         setSelected({ ...d, aliases: listEntry?.aliases ?? [] });
-        setEditContent(d.content);
+        setNotesContent(d.notes ?? "");
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setDetailLoading(false));
   }, [pages]);
 
-  const handleSave = useCallback(async () => {
+  const handleSaveNotes = useCallback(async () => {
     if (!selected) return;
-    setSaving(true);
-    setSaveError(null);
+    setSavingNotes(true);
+    setNotesError(null);
     try {
-      const res = await fetch(`/api/wiki/${encodeURIComponent(selected.slug)}`, {
-        method: "PUT",
+      const res = await fetch(`/api/wiki/${encodeURIComponent(selected.slug)}/notes`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: editContent }),
+        body: JSON.stringify({ notes: notesContent }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
       }
-      setSelected((prev) =>
-        prev ? { ...prev, content: editContent, manually_edited: true } : prev
-      );
-      setPages((prev) =>
-        prev.map((p) =>
-          p.slug === selected.slug ? { ...p, manually_edited: true } : p
-        )
-      );
-      setEditing(false);
+      setSelected((prev) => prev ? { ...prev, notes: notesContent || null } : prev);
+      setEditingNotes(false);
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : "Save failed");
+      setNotesError(e instanceof Error ? e.message : "Save failed");
     } finally {
-      setSaving(false);
+      setSavingNotes(false);
     }
-  }, [selected, editContent]);
+  }, [selected, notesContent]);
 
   const handleMerged = useCallback((targetSlug: string) => {
     setShowMergeModal(false);
@@ -476,7 +605,6 @@ export default function WikiPage() {
   }, [loadDetail]);
 
   const handleAliasAdded = useCallback((alias: string) => {
-    // Keep list aliases in sync so search works immediately
     setPages((prev) =>
       prev.map((p) =>
         p.slug === selected?.slug
@@ -489,7 +617,27 @@ export default function WikiPage() {
     );
   }, [selected?.slug]);
 
-  // Filter by search query and context
+  const handleAliasRemoved = useCallback((alias: string) => {
+    setPages((prev) =>
+      prev.map((p) =>
+        p.slug === selected?.slug
+          ? { ...p, aliases: (p.aliases ?? []).filter((a) => a !== alias) }
+          : p
+      )
+    );
+    setSelected((prev) =>
+      prev ? { ...prev, aliases: (prev.aliases ?? []).filter((a) => a !== alias) } : prev
+    );
+  }, [selected?.slug]);
+
+  const handleRenamed = useCallback((newName: string) => {
+    setShowRenameModal(false);
+    setPages((prev) =>
+      prev.map((p) => (p.slug === selected?.slug ? { ...p, title: newName } : p))
+    );
+    setSelected((prev) => (prev ? { ...prev, title: newName } : prev));
+  }, [selected?.slug]);
+
   const q = search.trim().toLowerCase();
   const filteredPages = pages.filter((p) => {
     if (q && !p.title.toLowerCase().includes(q) &&
@@ -512,6 +660,7 @@ export default function WikiPage() {
           page={selected}
           onClose={() => setShowAliasModal(false)}
           onAliasAdded={handleAliasAdded}
+          onAliasRemoved={handleAliasRemoved}
         />
       )}
 
@@ -521,6 +670,14 @@ export default function WikiPage() {
           pages={pages}
           onClose={() => setShowMergeModal(false)}
           onMerged={handleMerged}
+        />
+      )}
+
+      {showRenameModal && selected && (
+        <RenameModal
+          page={selected}
+          onClose={() => setShowRenameModal(false)}
+          onRenamed={handleRenamed}
         />
       )}
 
@@ -663,11 +820,6 @@ export default function WikiPage() {
                       {selected.title}
                     </h2>
                     <TypeBadge page={selected} />
-                    {selected.manually_edited && (
-                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">
-                        edited
-                      </span>
-                    )}
                   </div>
                   <div className="flex items-center gap-2 mt-1 flex-wrap">
                     <p className="text-xs text-text-muted">
@@ -694,6 +846,13 @@ export default function WikiPage() {
                   {selected.entity_id && (
                     <>
                       <button
+                        onClick={() => setShowRenameModal(true)}
+                        title="Rename entity"
+                        className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+                      >
+                        Rename
+                      </button>
+                      <button
                         onClick={() => setShowAliasModal(true)}
                         title="Manage aliases"
                         className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
@@ -709,58 +868,72 @@ export default function WikiPage() {
                       </button>
                     </>
                   )}
-                  {editing ? (
-                    <>
-                      <button
-                        onClick={() => {
-                          setEditing(false);
-                          setEditContent(selected.content);
-                          setSaveError(null);
-                        }}
-                        className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={handleSave}
-                        disabled={saving}
-                        className="px-3 py-1.5 text-sm bg-violet text-white rounded-lg hover:bg-violet/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {saving ? "Saving…" : "Save"}
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      onClick={() => {
-                        setEditContent(selected.content);
-                        setEditing(true);
-                      }}
-                      className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
-                    >
-                      Edit
-                    </button>
-                  )}
                 </div>
               </div>
 
-              {saveError && (
-                <div className="px-6 py-2 bg-danger/10 border-b border-danger/20 text-sm text-danger">
-                  {saveError}
-                </div>
-              )}
-
               {/* Content area */}
               <div className="flex-1 overflow-y-auto px-6 py-4">
-                {editing ? (
-                  <textarea
-                    value={editContent}
-                    onChange={(e) => setEditContent(e.target.value)}
-                    className="w-full h-full min-h-[400px] bg-bg-elevated border border-border rounded-lg p-4 text-sm text-text-primary font-mono resize-none focus:outline-none focus:ring-1 focus:ring-violet"
-                    spellCheck={false}
-                  />
-                ) : (
-                  <MarkdownContent content={selected.content} />
-                )}
+                <MarkdownContent content={selected.content} />
+
+                {/* Curator notes section */}
+                <div className="mt-6 border-t border-border pt-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+                      Curator Notes
+                    </span>
+                    {!editingNotes && (
+                      <button
+                        onClick={() => {
+                          setNotesContent(selected.notes ?? "");
+                          setNotesError(null);
+                          setEditingNotes(true);
+                        }}
+                        className="text-xs text-text-muted hover:text-text-secondary transition-colors"
+                      >
+                        {selected.notes ? "Edit" : "Add note"}
+                      </button>
+                    )}
+                  </div>
+
+                  {editingNotes ? (
+                    <>
+                      <textarea
+                        value={notesContent}
+                        onChange={(e) => setNotesContent(e.target.value)}
+                        placeholder="Add corrections, context, or reminders for the wiki compiler…"
+                        rows={4}
+                        className="w-full bg-bg-elevated border border-border rounded-lg p-3 text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:ring-1 focus:ring-violet"
+                        autoFocus
+                      />
+                      {notesError && (
+                        <p className="mt-1 text-xs text-danger">{notesError}</p>
+                      )}
+                      <div className="flex justify-end gap-2 mt-2">
+                        <button
+                          onClick={() => { setEditingNotes(false); setNotesError(null); }}
+                          className="px-3 py-1.5 text-xs bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={handleSaveNotes}
+                          disabled={savingNotes}
+                          className="px-3 py-1.5 text-xs bg-violet text-white rounded-lg hover:bg-violet/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {savingNotes ? "Saving…" : "Save"}
+                        </button>
+                      </div>
+                    </>
+                  ) : selected.notes ? (
+                    <p className="text-sm text-text-secondary whitespace-pre-wrap leading-relaxed">
+                      {selected.notes}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-text-muted italic">
+                      No curator notes — add context, corrections, or reminders that the wiki compiler will incorporate on next regeneration.
+                    </p>
+                  )}
+                </div>
               </div>
             </>
           )}
@@ -797,12 +970,7 @@ function WikiListItem({
         >
           {page.title}
         </span>
-        <div className="flex items-center gap-1 shrink-0">
-          {page.manually_edited && (
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Manually edited" />
-          )}
-          <TypeBadge page={page} />
-        </div>
+        <TypeBadge page={page} />
       </div>
       <p className="text-xs text-text-muted mt-0.5">
         {page.thought_count} thought{page.thought_count !== 1 ? "s" : ""}
