@@ -228,7 +228,7 @@ async function fetchLinkedThoughts(sb, entityId, limit = 200) {
   return rows
     .filter((r) => r.thoughts)
     .map((r) => ({
-      id: r.thought_id,
+      id: r.thoughts.id,
       content: r.thoughts.content,
       type: r.thoughts.metadata?.type ?? null,
       topics: r.thoughts.metadata?.topics ?? null,

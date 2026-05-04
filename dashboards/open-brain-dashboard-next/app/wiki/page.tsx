@@ -98,8 +98,10 @@ function MarkdownContent({ content }: { content: string }) {
             : "#";
         return `<a href="${safe}" class="text-violet hover:underline">${t}</a>`;
       })
-      // Thought citation links [#NNN]
+      // Thought citation links [#NNN] (integer IDs, new format)
       .replace(/\[#(\d+)\]/g, '<a href="/thoughts/$1" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#$1]</a>')
+      // Legacy UUID citations [xxxxxxxx-xxxx-...] — styled but not linked (rebuild will replace with integer format)
+      .replace(/\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/gi, '<span class="text-text-muted text-xs font-mono">[$1]</span>')
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
       .replace(/\*(.+?)\*/g, "<em>$1</em>")
       .replace(/`(.+?)`/g, "<code class=\"bg-bg-elevated px-1 rounded text-xs\">$1</code>");
