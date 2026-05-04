@@ -103,7 +103,7 @@ export function KanbanBoard() {
       if (groups[thoughtStatus]) {
         groups[thoughtStatus].push(t);
       } else {
-        groups["new"].push(t);
+        groups["backlog"].push(t);
       }
     }
     return groups;
@@ -121,6 +121,10 @@ export function KanbanBoard() {
 
     const thoughtId = active.id as number;
     const newStatus = over.id as string;
+
+    // Only accept drops onto valid column targets (not onto other cards)
+    const validStatuses: string[] = [...KANBAN_STATUSES, "archived"];
+    if (!validStatuses.includes(newStatus)) return;
 
     // Find which column the thought is currently in
     const thought = thoughts.find((t) => t.id === thoughtId);
