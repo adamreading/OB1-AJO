@@ -3,7 +3,8 @@ import { requireSession, AuthError } from "@/lib/auth";
 import { updateThought } from "@/lib/api";
 
 const VALID_STATUSES = [
-  "new",
+  "backlog",
+  "new",      // legacy alias for backlog
   "planning",
   "active",
   "review",
