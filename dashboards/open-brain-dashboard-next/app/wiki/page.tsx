@@ -101,8 +101,8 @@ function MarkdownContent({ content, onWikiLink }: { content: string; onWikiLink?
         const extra = u.startsWith("/wiki?slug=") ? ' data-wiki-slug="true"' : '';
         return `<a href="${safe}"${extra} class="text-violet hover:underline">${t}</a>`;
       })
-      // Thought citation links [#NNN] (integer IDs — # required to avoid false positives)
-      .replace(/\[#(\d+)\]/g, '<a href="/thoughts/$1" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#$1]</a>')
+      // Thought citation links [#NNN] or [NNN] — support counts use (N) so [N] is safe to match
+      .replace(/\[#?(\d+)\]/g, '<a href="/thoughts/$1" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#$1]</a>')
       // Legacy UUID citations [xxxxxxxx-xxxx-...] — styled but not linked (rebuild will replace with integer format)
       .replace(/\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/gi, '<span class="text-text-muted text-xs font-mono">[$1]</span>')
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
