@@ -585,6 +585,185 @@ function createServer(): McpServer {
     }
   );
 
+  // Tool 11: Search Wiki
+  server.registerTool(
+    "search_wiki",
+    {
+      title: "Search Wiki",
+      description: "Search the entity wiki by name. Returns matching pages with slug, type, and thought count. Use the slug with read_wiki_page to get the full article.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        query: z.string().describe("Entity name or topic to search for"),
+        limit: z.number().optional().default(10),
+      },
+    },
+    async ({ query, limit }) => {
+      try {
+        const { data, error } = await supabase
+          .from("wiki_pages")
+          .select("slug, title, type, entity_id, thought_count, metadata, entities(aliases)")
+          .ilike("title", `%${query}%`)
+          .order("thought_count", { ascending: false })
+          .limit(limit);
+
+        if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+
+        // Also search aliases for any pages not already matched
+        const matchedSlugs = new Set((data || []).map((p: any) => p.slug));
+        const { data: allPages } = await supabase
+          .from("wiki_pages")
+          .select("slug, title, type, entity_id, thought_count, metadata, entities(aliases)")
+          .order("thought_count", { ascending: false });
+
+        const aliasMatches = (allPages || []).filter((p: any) => {
+          if (matchedSlugs.has(p.slug)) return false;
+          const aliases: string[] = (p.entities as any)?.aliases ?? [];
+          return aliases.some((a: string) => a.toLowerCase().includes(query.toLowerCase()));
+        }).slice(0, limit - (data || []).length);
+
+        const results = [...(data || []), ...aliasMatches].map((p: any) => {
+          const entityType = (p.metadata?.entity_type as string) ?? p.type;
+          const aliases: string[] = (p.entities as any)?.aliases ?? [];
+          const aliasNote = aliases.length ? ` (also: ${aliases.join(", ")})` : "";
+          return `slug: ${p.slug}\ntitle: ${p.title}${aliasNote}\ntype: ${entityType}\nthoughts: ${p.thought_count}`;
+        });
+
+        if (!results.length) return { content: [{ type: "text" as const, text: `No wiki pages found matching "${query}".` }] };
+        return { content: [{ type: "text" as const, text: `Found ${results.length} wiki page(s):\n\n${results.join("\n\n")}` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 12: Read Wiki Page
+  server.registerTool(
+    "read_wiki_page",
+    {
+      title: "Read Wiki Page",
+      description: "Read the full content of a wiki article by slug. Returns the article, curator notes, and lists of linked entities and cited thought IDs so you can navigate or look up references.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        slug: z.string().describe("The wiki page slug (from search_wiki results)"),
+      },
+    },
+    async ({ slug }) => {
+      try {
+        const { data, error } = await supabase
+          .from("wiki_pages")
+          .select("slug, title, type, entity_id, thought_count, metadata, content, notes, generated_at")
+          .eq("slug", slug)
+          .maybeSingle();
+
+        if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+        if (!data) return { content: [{ type: "text" as const, text: `No wiki page found with slug "${slug}".` }], isError: true };
+
+        const p = data as any;
+
+        // Extract cited thought serial IDs from [#NNN] or [NNN] patterns
+        const citedIds: number[] = [];
+        const citationRegex = /\[#?(\d+)\]/g;
+        let m;
+        while ((m = citationRegex.exec(p.content)) !== null) {
+          const n = parseInt(m[1], 10);
+          if (!citedIds.includes(n)) citedIds.push(n);
+        }
+
+        // Extract linked entity slugs from /wiki?slug=X patterns
+        const linkedSlugs: string[] = [];
+        const linkRegex = /\/wiki\?slug=([a-z0-9-]+)/g;
+        while ((m = linkRegex.exec(p.content)) !== null) {
+          if (!linkedSlugs.includes(m[1])) linkedSlugs.push(m[1]);
+        }
+
+        // Resolve linked slugs to titles
+        let linkedEntities: { slug: string; title: string }[] = [];
+        if (linkedSlugs.length) {
+          const { data: linked } = await supabase
+            .from("wiki_pages")
+            .select("slug, title")
+            .in("slug", linkedSlugs);
+          linkedEntities = (linked || []) as { slug: string; title: string }[];
+        }
+
+        const entityType = (p.metadata?.entity_type as string) ?? p.type;
+        const header = [
+          `# ${p.title}`,
+          `type: ${entityType} | thoughts: ${p.thought_count} | generated: ${p.generated_at?.slice(0, 10)}`,
+          citedIds.length ? `cited_thought_ids: [${citedIds.join(", ")}]  ← use fetch tool to read any of these` : "",
+          linkedEntities.length ? `linked_entities:\n${linkedEntities.map(e => `  - ${e.title} (slug: ${e.slug})`).join("\n")}` : "",
+          p.notes ? `\n> Curator note: ${p.notes}` : "",
+          "",
+        ].filter(Boolean).join("\n");
+
+        return { content: [{ type: "text" as const, text: `${header}\n${p.content}` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 13: Get Entity Connections
+  server.registerTool(
+    "get_entity_connections",
+    {
+      title: "Get Entity Connections",
+      description: "Get all entities connected to a wiki entity via the knowledge graph edges. Shows relation type, direction, and confidence. Use slugs to navigate to connected wiki pages with read_wiki_page.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        slug: z.string().describe("The wiki page slug of the entity to get connections for"),
+      },
+    },
+    async ({ slug }) => {
+      try {
+        const { data: page, error: pageErr } = await supabase
+          .from("wiki_pages")
+          .select("entity_id, title")
+          .eq("slug", slug)
+          .maybeSingle();
+
+        if (pageErr) return { content: [{ type: "text" as const, text: `Error: ${pageErr.message}` }], isError: true };
+        if (!page || !(page as any).entity_id) return { content: [{ type: "text" as const, text: `No entity found for slug "${slug}".` }] };
+
+        const entityId = (page as any).entity_id as number;
+
+        const { data: edges, error: edgeErr } = await supabase
+          .from("edges")
+          .select("from_entity_id, to_entity_id, relation, confidence, support_count")
+          .or(`from_entity_id.eq.${entityId},to_entity_id.eq.${entityId}`)
+          .order("support_count", { ascending: false });
+
+        if (edgeErr) return { content: [{ type: "text" as const, text: `Error: ${edgeErr.message}` }], isError: true };
+        if (!edges?.length) return { content: [{ type: "text" as const, text: `No connections found for "${(page as any).title}".` }] };
+
+        // Collect connected entity IDs and resolve their wiki pages in one query
+        const connectedIds = [...new Set(edges.map((e: any) =>
+          e.from_entity_id === entityId ? e.to_entity_id : e.from_entity_id
+        ))];
+
+        const { data: connectedPages } = await supabase
+          .from("wiki_pages")
+          .select("slug, title, entity_id")
+          .in("entity_id", connectedIds);
+
+        const pageByEntityId = new Map((connectedPages || []).map((p: any) => [p.entity_id, p]));
+
+        const lines = edges.map((e: any) => {
+          const otherId = e.from_entity_id === entityId ? e.to_entity_id : e.from_entity_id;
+          const direction = e.from_entity_id === entityId ? "→" : "←";
+          const other = pageByEntityId.get(otherId) as any;
+          const otherLabel = other ? `${other.title} (slug: ${other.slug})` : `entity #${otherId} (no wiki page)`;
+          const conf = e.confidence ? ` [${(e.confidence * 100).toFixed(0)}%]` : "";
+          return `${direction} ${e.relation}${conf} × ${e.support_count}: ${otherLabel}`;
+        });
+
+        return { content: [{ type: "text" as const, text: `Connections for "${(page as any).title}":\n\n${lines.join("\n")}` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   return server;
 }
 
