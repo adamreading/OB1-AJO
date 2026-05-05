@@ -4,6 +4,8 @@
 
 <h1 align="center">Open Brain</h1>
 
+> **Running the AJO fork?** The upstream setup guide won't cover your install. Use **[AJO_Readme.md](./AJO_Readme.md)** instead — it covers the full AJO schema, both Edge Functions, the local worker, wiki pipeline, and dashboard.
+
 The infrastructure layer for your thinking. One database, one AI gateway, one chat channel. Any AI you use can plug in. No middleware, no SaaS chains, no Zapier.
 
 This isn't a notes app. It's a database with vector search and an open protocol — built so that every AI tool you use shares the same persistent memory of you. Claude, ChatGPT, Cursor, Claude Code, whatever ships next month. One brain. All of them.

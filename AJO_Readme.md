@@ -515,6 +515,7 @@ In Supabase Dashboard → **Edge Functions** → **Manage secrets**, add:
 | `BRAIN_KEY` | Your chosen API password (must match dashboard `.env.local`) |
 | `MCP_ACCESS_KEY` | Your chosen MCP connector password |
 | `OPENROUTER_API_KEY` | Optional: hosted embeddings and metadata extraction |
+| `OPEN_BRAIN_CITATION_BASE_URL` | Optional: base URL for thought citation links in MCP results (default: `https://openbrain.local/thoughts`) |
 
 > `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically — do not add them manually.
 
@@ -631,6 +632,8 @@ Use your **MCP Connection URL**:
 1. Settings → **Apps & Connectors** → **Advanced settings** → enable **Developer Mode**
 2. Click **Create** → Name: `Open Brain` → URL: paste MCP Connection URL → Auth: **No Authentication**
 
+> **Note:** ChatGPT's standard connector surfaces `search_thoughts`, `list_thoughts`, `thought_stats`, and `capture_thought`. ChatGPT's "company knowledge" and "deep research" connector modes look for tools named exactly `search` and `fetch` — the MCP server exposes these as read-only aliases so both modes work from the same URL.
+
 ### Claude Code / CLI
 ```bash
 claude mcp add --transport http open-brain \
@@ -670,4 +673,4 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 
 ---
 
-*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts.*
+*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools.*
