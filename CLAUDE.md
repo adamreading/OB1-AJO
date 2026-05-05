@@ -84,3 +84,14 @@ When working in this repo as the AJO maintainer, be aware:
 - `score-thoughts.mjs` — heuristic quality scoring backfill
 - `wiki-wipe.mjs` — clear wiki_pages + entity health report
 - `reclassify-existing.js` — re-run Work/Personal classification
+
+**Upstream sync — MANDATORY PROCESS**:
+The AJO fork tracks `upstream https://github.com/NateBJones-Projects/OB1`. Never manually port upstream changes — always use git properly:
+1. `git fetch upstream` — pull latest upstream commits
+2. `git log HEAD..upstream/main --oneline` — see what's new
+3. Assess each upstream commit: cherry-pick what applies, skip what doesn't (e.g. K8s files, upstream-only docs)
+4. For cherry-picks: `git cherry-pick <hash>` (records provenance automatically)
+5. For changes already manually applied: `git merge --no-ff -s ours upstream/main -m "[sync] Record upstream merge to <hash> (changes applied in <our-commit>)"`
+6. Verify clean with `git log HEAD..upstream/main --oneline` — should be empty
+
+**Never port upstream changes by reading the diff and rewriting them manually** without first doing `git fetch upstream`. The session summary may not preserve the fact that the upstream remote exists — always check `git remote -v` before doing any upstream work.
