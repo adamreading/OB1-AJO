@@ -38,8 +38,20 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const VALID_TYPES = new Set(["idea", "task", "meeting", "reference", "journal", "decision", "lesson", "observation"]);
 const VALID_CONTEXTS = new Set(["work", "personal"]);
 const VALID_ENTITY_TYPES = new Set(["person", "project", "topic", "tool", "organization", "place"]);
-const VALID_RELATIONS = new Set(["works_on", "uses", "related_to", "member_of", "located_in", "co_occurs_with"]);
-const SYMMETRIC_RELATIONS = new Set(["co_occurs_with", "related_to"]);
+const VALID_RELATIONS = new Set([
+  "works_on",          // person|org → project|task
+  "uses",              // person|org → tool|technology
+  "uses_tool",         // person → tool (alias kept for back-compat)
+  "collaborates_with", // person ↔ person (symmetric)
+  "integrates_with",   // tool ↔ tool (symmetric)
+  "alternative_to",    // tool|project ↔ tool|project (symmetric)
+  "evaluates",         // person → tool|project|idea
+  "member_of",         // person → organization (NOT person → place)
+  "located_in",        // org|place → place
+  "related_to",        // topic ↔ topic weak fallback only
+  "co_occurs_with",    // low-confidence proximity-only (symmetric)
+]);
+const SYMMETRIC_RELATIONS = new Set(["co_occurs_with", "related_to", "collaborates_with", "integrates_with", "alternative_to"]);
 
 let graphAvailable = null;
 
@@ -127,15 +139,33 @@ Return this exact JSON shape:
     {"name": "specific name", "type": "person|project|topic|tool|organization|place", "confidence": 0.0}
   ],
   "relationships": [
-    {"from": "entity_name", "to": "entity_name", "relation": "works_on|uses|related_to|member_of|located_in|co_occurs_with", "confidence": 0.0}
+    {"from": "entity_name", "to": "entity_name", "relation": "relation_name", "confidence": 0.0}
   ]
 }
 
-Rules:
+Entity rules:
 - importance is an integer from 1 to 5.
 - Extract only concrete, recognizable entities. Use "PostgreSQL", not "database".
 - Always use the most complete canonical form of a name. Use "Tom Falconar" not "Tom". Use "Adam Ososki" not "Adam".
 - Omit entities and relationships below 0.5 confidence.
+
+Relationship relation values — pick the MOST SPECIFIC match:
+- works_on       → person or org actively building/owning a project or task
+- uses           → person or org using a tool or technology
+- collaborates_with → two people working together (symmetric)
+- integrates_with → two tools that connect to each other (symmetric)
+- alternative_to → two tools/projects that can substitute for each other (symmetric)
+- evaluates      → person assessing or reviewing a tool, project, or idea
+- member_of      → person belonging to an organization (NOT a place)
+- located_in     → organization or place within a geographic place
+- related_to     → weak link between two topics only; do NOT use for person↔tool or person↔project
+- co_occurs_with → use ONLY when the text merely mentions two things together without stating any relationship; confidence must be ≤ 0.6
+
+Critical relationship rules:
+- Only create a directional edge (works_on, uses, evaluates, member_of, located_in) when the source text EXPLICITLY states the subject→relation→object. Do NOT infer from co-occurrence alone.
+- Do NOT use member_of for person→place. Use located_in for org→place.
+- Do NOT use related_to as a catch-all. If no specific relation fits and the entities are not both topics, use co_occurs_with.
+- Minimum confidence for directional edges: 0.65. Below that, downgrade to co_occurs_with or omit.
 - Relationship endpoints must exactly match returned entity names.
 - If there are no useful entities or relationships, return empty arrays.
 - Do not include markdown, comments, or extra keys.`;
@@ -181,15 +211,19 @@ function normalizeAnalysis(raw, existingThought) {
         .filter((entity) => entity.name && VALID_ENTITY_TYPES.has(entity.type) && entity.confidence >= 0.5)
     : [];
 
+  const RELATION_ALIASES = { uses_tool: "uses" };
   const entityNames = new Set(entities.map((entity) => normalizeName(entity.name)));
   const relationships = Array.isArray(raw.relationships)
     ? raw.relationships
-        .map((rel) => ({
-          from: sanitizeEntityName(rel?.from),
-          to: sanitizeEntityName(rel?.to),
-          relation: String(rel?.relation || "").trim().toLowerCase(),
-          confidence: asNumber(rel?.confidence, 0.5, 0, 1),
-        }))
+        .map((rel) => {
+          const rawRelation = String(rel?.relation || "").trim().toLowerCase();
+          return {
+            from: sanitizeEntityName(rel?.from),
+            to: sanitizeEntityName(rel?.to),
+            relation: RELATION_ALIASES[rawRelation] ?? rawRelation,
+            confidence: asNumber(rel?.confidence, 0.5, 0, 1),
+          };
+        })
         .filter((rel) =>
           rel.from &&
           rel.to &&
