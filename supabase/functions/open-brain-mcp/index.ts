@@ -14,6 +14,19 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+const CITATION_BASE_URL =
+  Deno.env.get("OPEN_BRAIN_CITATION_BASE_URL") || "https://openbrain.local/thoughts";
+
+function thoughtTitle(content: string, createdAt?: string): string {
+  const firstLine = content.replace(/\s+/g, " ").trim().slice(0, 80);
+  const datePrefix = createdAt ? new Date(createdAt).toLocaleDateString() : "Open Brain";
+  return firstLine ? `${datePrefix} - ${firstLine}` : `${datePrefix} thought`;
+}
+
+function thoughtUrl(serialId: number | string): string {
+  return `${CITATION_BASE_URL.replace(/\/$/, "")}/${serialId}`;
+}
+
 async function getEmbedding(text: string): Promise<number[] | null> {
   if (!OPENROUTER_API_KEY) return null;
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
@@ -92,6 +105,77 @@ function createServer(): McpServer {
     version: "1.3.0",
   });
 
+  // ChatGPT compatibility aliases — restricted ChatGPT connectors look for exact `search` / `fetch` shapes
+  server.registerTool(
+    "search",
+    {
+      title: "Search Open Brain",
+      description: "Search Open Brain memories by meaning. Read-only compatibility tool for ChatGPT.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        query: z.string().describe("The search query to run against Open Brain thoughts"),
+      },
+    },
+    async ({ query }) => {
+      try {
+        const qEmb = await getEmbedding(query);
+        if (!qEmb) return { content: [{ type: "text" as const, text: "Embedding unavailable." }], isError: true };
+        const { data, error } = await supabase.rpc("match_thoughts", {
+          query_embedding: qEmb,
+          match_threshold: 0.5,
+          match_count: 10,
+        });
+        if (error) return { content: [{ type: "text" as const, text: `Search error: ${error.message}` }], isError: true };
+        const results = ((data || []) as any[]).map((t) => ({
+          id: String(t.serial_id || t.id),
+          title: thoughtTitle(t.content, t.created_at),
+          url: thoughtUrl(t.serial_id || t.id),
+        }));
+        return { content: [{ type: "text" as const, text: JSON.stringify({ results }) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "fetch",
+    {
+      title: "Fetch Open Brain Thought",
+      description: "Fetch one Open Brain thought by serial ID after using search. Read-only compatibility tool for ChatGPT.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        id: z.string().describe("The thought serial ID returned by the search tool"),
+      },
+    },
+    async ({ id }) => {
+      try {
+        const filter = /^\d+$/.test(id) ? { serial_id: parseInt(id, 10) } : { id };
+        const { data, error } = await supabase
+          .from("thoughts")
+          .select("serial_id, id, content, metadata, created_at, updated_at")
+          .match(filter)
+          .single();
+        if (error) return { content: [{ type: "text" as const, text: `Fetch error: ${error.message}` }], isError: true };
+        const t = data as any;
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              id: String(t.serial_id),
+              title: thoughtTitle(t.content, t.created_at),
+              text: t.content,
+              url: thoughtUrl(t.serial_id),
+              metadata: { ...t.metadata, created_at: t.created_at, updated_at: t.updated_at },
+            }),
+          }],
+        };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 1: Semantic Search
   server.registerTool(
     "search_thoughts",
@@ -99,6 +183,7 @@ function createServer(): McpServer {
       title: "Search Thoughts",
       description:
         "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea. Respects Work/Personal context. Returns source so you can see where each memory came from.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         query: z.string().describe("What to search for"),
         classification: z.enum(["work", "personal"]).optional().describe("Filter by 'work' or 'personal' context (Strict: hiding nulls if set)"),
@@ -177,6 +262,7 @@ function createServer(): McpServer {
     {
       title: "List Recent Thoughts",
       description: "List recently captured thoughts. Supports filtering by context, type, and source. Always shows source so you know where each memory came from.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         limit: z.number().optional().default(10),
         classification: z.enum(["work", "personal"]).optional().describe("Filter: 'work' or 'personal'"),
@@ -227,6 +313,7 @@ function createServer(): McpServer {
     {
       title: "Thought Statistics",
       description: "Get summary stats. Can be filtered by context.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         classification: z.enum(["work", "personal"]).optional(),
       },
@@ -256,6 +343,7 @@ function createServer(): McpServer {
     "capture_thought",
     {
       title: "Capture Thought",
+      annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
       description: "Save a new thought to the brain. IMPORTANT: Each capture must be ONE atomic idea — aim for 300–500 words of rich context per thought. If you have a transcript, meeting notes, or multiple unrelated ideas, call this tool MULTIPLE TIMES, once per distinct idea. Do NOT save giant blocks of text covering multiple topics as a single thought — splitting them ensures 10x better search quality. You MUST declare your own client name in 'source' — use the actual name of the AI or tool calling this (e.g., 'claude', 'chatgpt', 'perplexity', 'copilot', 'n8n'). Never use another client's name.",
       inputSchema: {
         content: z.string().describe("One atomic thought — around 300–500 words of context. One topic only; use multiple captures for multiple ideas."),
@@ -298,6 +386,7 @@ function createServer(): McpServer {
     {
       title: "Update Thought",
       description: "Update content and optionally move context. Archives old version. Use the serial number shown in search results (e.g. '132'), not a UUID.",
+      annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
       inputSchema: {
         id: z.string().describe("UUID or Serial ID (as string)"),
         content: z.string(),
@@ -345,6 +434,7 @@ function createServer(): McpServer {
     {
       title: "Distill Transcript",
       description: "Analyze a long transcript or text block and break it down into separate, atomic thoughts for capture. Returns suggestions; use capture_thought to save them.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         text: z.string().describe("The raw text to split"),
         classification: z.enum(["work", "personal"]).optional().describe("Assign context to all distilled thoughts"),
@@ -388,6 +478,7 @@ function createServer(): McpServer {
     {
       title: "Delete Thought",
       description: "Permanently delete a thought by UUID or Serial ID.",
+      annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false },
       inputSchema: {
         id: z.string().describe("UUID or Serial ID"),
       },
@@ -410,6 +501,7 @@ function createServer(): McpServer {
     {
       title: "Find Duplicates",
       description: "Identify semantically similar thoughts that might be duplicates.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         classification: z.enum(["work", "personal"]).optional(),
         threshold: z.number().optional().default(0.85),
@@ -432,6 +524,7 @@ function createServer(): McpServer {
     {
       title: "Add Reflection",
       description: "Save an AI-generated realization or reflection about a specific thought.",
+      annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
       inputSchema: {
         thought_id: z.string().describe("The ID of the thought to reflect on"),
         reflection: z.string().describe("The insight or realization to save"),
@@ -457,6 +550,7 @@ function createServer(): McpServer {
     {
       title: "Fieldy Review",
       description: "Fetch recent memories captured by Fieldy (source: mcp-fieldy-auto or mcp-fieldy-pending) for daily review. Returns serial ID, content, classification, and timestamp so a reviewer can check for errors, wrong attribution, or missing context.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         since_hours: z.number().optional().default(24).describe("How many hours back to look (default 24)"),
         limit: z.number().optional().default(50),
@@ -496,7 +590,7 @@ function createServer(): McpServer {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, accept, mcp-session-id",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
