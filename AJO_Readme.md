@@ -659,12 +659,14 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 | **Wiki Synthesis** | `recipes/wiki-synthesis/scripts/synthesize-wiki.mjs` | Autobiography / topic wiki page generation |
 | **Score Thoughts** | `scripts/score-thoughts.mjs` | Heuristic quality scoring backfill |
 | **Wiki Wipe** | `scripts/wiki-wipe.mjs` | Clear wiki_pages + entity health report |
+| **Persona Synthesis** | `scripts/synthesize-persona.mjs` | Generate conceptual `topic-adam-*` wiki pages from semantic clusters (requires `OPENROUTER_API_KEY` + Ollama) |
 
 **Key Divergences from Upstream Open Brain:**
 *   **Context-Aware**: Every thought is tagged `work` or `personal`. The dashboard, wiki, and MCP tools all support filtering by context.
 *   **Serial IDs**: Dashboard uses simple integers (1, 2, 3) for display; DB uses UUIDs. The Edge Function maps these automatically.
 *   **Local Processing**: Ollama handles classification, importance scoring, and entity graph extraction — no external API required for core enrichment.
 *   **Entity Graph + Wiki**: Entities, edges, and wiki pages are first-class citizens. The wiki is auto-generated from the entity graph and regenerates automatically when the queue drains.
+*   **Edge relation vocabulary**: The worker uses a typed relation vocabulary (`works_on`, `uses`, `collaborates_with`, `integrates_with`, `alternative_to`, `evaluates`, `member_of`, `located_in`, `related_to`, `co_occurs_with`). Directional edges require explicit textual evidence (min confidence 0.65). Co-occurrence without stated relationship produces `co_occurs_with` only. Symmetric relations are canonicalized by entity ID ordering to prevent duplicates.
 *   **Wiki always regenerates**: All pages are regenerated on every compiler run. Use the `notes` column (editable in the dashboard) for curator content that survives regeneration — the compiler reads it and incorporates it before calling the LLM. The `manually_edited` column still exists in the DB but is no longer used by the compiler.
 *   **Wiki deep-linking**: The wiki page is always at `/wiki`. Entity cross-links use `?slug=` query params (e.g. `/wiki?slug=person-adam-ososki`) and are intercepted client-side. Clicking a link in wiki content navigates to that entity's page without a full reload.
 *   **Wiki entity management**: The detail header has inline controls for Rename, Aliases (add/remove), Merge, entity Type (inline dropdown that writes to `entities.entity_type` immediately), and Delete (two-step confirm; removes entity + wiki page from DB). The sidebar filter is by entity type (All / Person / Org / Project / Tool / Place / Topic), not Work/Personal.
@@ -673,4 +675,4 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 
 ---
 
-*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools.*
+*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools, wiki MCP tools (search_wiki/read_wiki_page/get_entity_connections), improved edge extraction (typed relation vocabulary + entity-type constraints), persona synthesis script.*

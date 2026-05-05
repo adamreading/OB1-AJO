@@ -84,6 +84,7 @@ When working in this repo as the AJO maintainer, be aware:
 - `score-thoughts.mjs` — heuristic quality scoring backfill
 - `wiki-wipe.mjs` — clear wiki_pages + entity health report
 - `reclassify-existing.js` — re-run Work/Personal classification
+- `synthesize-persona.mjs` — generate conceptual `topic-adam-*` wiki pages from semantic clusters; requires `OPENROUTER_API_KEY` + Ollama running. CLI: `node --env-file=.env scripts/synthesize-persona.mjs [--list|--lens <name>|--dry-run]`
 
 **Upstream sync — MANDATORY PROCESS**:
 The AJO fork tracks `upstream https://github.com/NateBJones-Projects/OB1`. Never manually port upstream changes — always use git properly:
