@@ -17,6 +17,20 @@ interface ActionThought {
   importance: number;
 }
 
+// Local representation — items can be dismissed without a full reload
+interface LocalItem {
+  text: string;
+  index: number;
+  state: "idle" | "working" | "done" | "promoted" | "error";
+  promotedId?: number;
+  errorMsg?: string;
+}
+
+interface LocalThought {
+  thought: ActionThought;
+  items: LocalItem[];
+}
+
 const WINDOW_OPTIONS = [
   { label: "24h", value: 24 },
   { label: "3 days", value: 72 },
@@ -25,8 +39,19 @@ const WINDOW_OPTIONS = [
   { label: "1 month", value: 720 },
 ];
 
+function buildLocal(thoughts: ActionThought[]): LocalThought[] {
+  return thoughts.map((t) => ({
+    thought: t,
+    items: (t.metadata.action_items ?? []).map((text, index) => ({
+      text,
+      index,
+      state: "idle" as const,
+    })),
+  }));
+}
+
 export default function ActionsPage() {
-  const [thoughts, setThoughts] = useState<ActionThought[]>([]);
+  const [locals, setLocals] = useState<LocalThought[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [context, setContext] = useState<"" | "work" | "personal">("");
@@ -41,7 +66,7 @@ export default function ActionsPage() {
       const res = await fetch(`/api/actions?${params}`);
       if (!res.ok) throw new Error("Failed to load");
       const d = await res.json();
-      setThoughts(d.thoughts || []);
+      setLocals(buildLocal(d.thoughts || []));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Load failed");
     } finally {
@@ -53,8 +78,59 @@ export default function ActionsPage() {
     load();
   }, [load]);
 
-  const totalItems = thoughts.reduce(
-    (n, t) => n + (t.metadata.action_items?.length ?? 0),
+  function setItemState(thoughtId: number, itemIndex: number, patch: Partial<LocalItem>) {
+    setLocals((prev) =>
+      prev.map((lt) =>
+        lt.thought.serial_id !== thoughtId
+          ? lt
+          : {
+              ...lt,
+              items: lt.items.map((item) =>
+                item.index === itemIndex ? { ...item, ...patch } : item
+              ),
+            }
+      )
+    );
+  }
+
+  async function handleAction(
+    thought: ActionThought,
+    item: LocalItem,
+    action: "done" | "promote"
+  ) {
+    setItemState(thought.serial_id, item.index, { state: "working" });
+    try {
+      const res = await fetch(`/api/actions/${thought.serial_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, item_index: item.index }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || res.statusText);
+      }
+      const d = await res.json();
+      setItemState(thought.serial_id, item.index, {
+        state: action === "done" ? "done" : "promoted",
+        promotedId: d.promoted_id ?? undefined,
+      });
+    } catch (err) {
+      setItemState(thought.serial_id, item.index, {
+        state: "error",
+        errorMsg: err instanceof Error ? err.message : "Failed",
+      });
+    }
+  }
+
+  const activeLocals = locals.filter((lt) =>
+    lt.items.some((i) => i.state === "idle" || i.state === "working" || i.state === "error")
+  );
+  const totalActive = activeLocals.reduce(
+    (n, lt) => n + lt.items.filter((i) => i.state === "idle" || i.state === "working").length,
+    0
+  );
+  const totalDone = locals.reduce(
+    (n, lt) => n + lt.items.filter((i) => i.state === "done" || i.state === "promoted").length,
     0
   );
 
@@ -64,13 +140,14 @@ export default function ActionsPage() {
         <div>
           <h1 className="text-2xl font-semibold mb-1">Action Items</h1>
           <p className="text-text-secondary text-sm">
-            Tasks and follow-ups automatically extracted from your captures
+            Tasks and follow-ups automatically extracted from your captures. Dismiss them or promote to Kanban.
           </p>
         </div>
         {!loading && (
-          <span className="text-sm text-text-muted pt-1">
-            {totalItems} items across {thoughts.length} thoughts
-          </span>
+          <div className="text-right text-xs text-text-muted pt-1 space-y-0.5">
+            <div>{totalActive} pending</div>
+            {totalDone > 0 && <div className="text-emerald-400">{totalDone} handled this session</div>}
+          </div>
         )}
       </div>
 
@@ -118,62 +195,114 @@ export default function ActionsPage() {
 
       {loading ? (
         <div className="text-text-muted text-sm py-8 text-center">Loading…</div>
-      ) : thoughts.length === 0 ? (
+      ) : activeLocals.length === 0 && totalDone === 0 ? (
         <div className="text-text-muted text-sm py-12 text-center">
           No action items found in this window. Items are extracted automatically from every capture.
         </div>
       ) : (
-        <div className="space-y-3">
-          {thoughts.map((t) => {
-            const items = t.metadata.action_items ?? [];
-            const label = t.metadata.classification;
-            const date = t.created_at.slice(0, 10);
-            return (
-              <div
-                key={t.serial_id}
-                className="bg-bg-surface border border-border rounded-lg p-4 space-y-2"
-              >
-                <div className="flex items-center gap-2 text-xs text-text-muted">
-                  <Link
-                    href={`/thoughts/${t.serial_id}`}
-                    className="font-mono text-violet hover:underline"
-                  >
-                    #{t.serial_id}
-                  </Link>
-                  {label && (
-                    <span
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                        label === "work"
-                          ? "bg-blue-500/10 text-blue-400"
-                          : "bg-emerald-500/10 text-emerald-400"
-                      }`}
+        <>
+          {activeLocals.length === 0 && totalDone > 0 && (
+            <div className="text-emerald-400 text-sm py-6 text-center">
+              All caught up — {totalDone} item{totalDone > 1 ? "s" : ""} handled this session.
+            </div>
+          )}
+
+          <div className="space-y-3">
+            {activeLocals.map((lt) => {
+              const { thought, items } = lt;
+              const label = thought.metadata.classification;
+              const date = thought.created_at.slice(0, 10);
+              const visibleItems = items.filter(
+                (i) => i.state !== "done" && i.state !== "promoted"
+              );
+
+              return (
+                <div
+                  key={thought.serial_id}
+                  className="bg-bg-surface border border-border rounded-lg p-4 space-y-3"
+                >
+                  <div className="flex items-center gap-2 text-xs text-text-muted">
+                    <Link
+                      href={`/thoughts/${thought.serial_id}`}
+                      className="font-mono text-violet hover:underline"
                     >
-                      {label.toUpperCase()}
-                    </span>
-                  )}
-                  <span>{date}</span>
-                  {t.source_type && (
-                    <span className="text-text-muted/70">{t.source_type}</span>
-                  )}
-                </div>
-                <p className="text-text-secondary text-sm line-clamp-2">
-                  {t.content.slice(0, 120)}
-                  {t.content.length > 120 ? "…" : ""}
-                </p>
-                <ul className="space-y-1 pt-1">
-                  {items.map((item, i) => (
-                    <li key={i} className="flex items-start gap-2 text-sm">
-                      <span className="mt-0.5 w-4 h-4 shrink-0 rounded border border-border flex items-center justify-center">
-                        <span className="w-2 h-2 rounded-sm" />
+                      #{thought.serial_id}
+                    </Link>
+                    {label && (
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                          label === "work"
+                            ? "bg-blue-500/10 text-blue-400"
+                            : "bg-emerald-500/10 text-emerald-400"
+                        }`}
+                      >
+                        {label.toUpperCase()}
                       </span>
-                      <span className="text-text-primary">{item}</span>
-                    </li>
+                    )}
+                    <span>{date}</span>
+                    {thought.source_type && (
+                      <span className="text-text-muted/70">{thought.source_type}</span>
+                    )}
+                  </div>
+
+                  <p className="text-text-secondary text-sm line-clamp-2">
+                    {thought.content.slice(0, 150)}
+                    {thought.content.length > 150 ? "…" : ""}
+                  </p>
+
+                  <ul className="space-y-2">
+                    {visibleItems.map((item) => (
+                      <li key={item.index} className="flex items-start gap-2.5">
+                        <span className="mt-0.5 w-4 h-4 shrink-0 rounded border border-border" />
+                        <span className="flex-1 text-sm text-text-primary">{item.text}</span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {item.state === "error" && (
+                            <span
+                              className="text-[10px] text-danger mr-1"
+                              title={item.errorMsg}
+                            >
+                              error
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            disabled={item.state === "working"}
+                            onClick={() => handleAction(thought, item, "done")}
+                            className="px-2 py-0.5 text-xs rounded border border-border text-text-muted hover:text-text-primary hover:border-emerald-500/40 hover:text-emerald-400 transition-colors disabled:opacity-40"
+                            title="Mark as done — removes from this thought"
+                          >
+                            {item.state === "working" ? "…" : "Done"}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={item.state === "working"}
+                            onClick={() => handleAction(thought, item, "promote")}
+                            className="px-2 py-0.5 text-xs rounded border border-border text-text-muted hover:text-violet hover:border-violet/40 transition-colors disabled:opacity-40"
+                            title="Add to Kanban as a task in backlog"
+                          >
+                            {item.state === "working" ? "…" : "→ Kanban"}
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+
+                  {/* Show promoted items with link */}
+                  {items.filter((i) => i.state === "promoted").map((item) => (
+                    <div key={`p-${item.index}`} className="text-xs text-violet/70 flex items-center gap-1.5 line-through">
+                      <span>{item.text}</span>
+                      {item.promotedId && (
+                        <Link href="/kanban" className="no-underline text-violet hover:underline ml-1">
+                          → on Kanban
+                        </Link>
+                      )}
+                    </div>
                   ))}
-                </ul>
-              </div>
-            );
-          })}
-        </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );
