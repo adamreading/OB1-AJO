@@ -476,6 +476,7 @@ Two Edge Functions serve the AJO fork. Both are in this repo and must be deploye
 | GET | `/ingestion-jobs/:id` | Single job + items |
 | POST | `/ingest` | Extract and commit a block of text as thoughts |
 | POST | `/ingestion-jobs/:id/execute` | Execute a pending job's items |
+| GET | `/action-items` | Thoughts with non-empty `metadata.action_items`; supports `classification`, `since_hours`, `limit` |
 | GET | `/wiki-pages` | List all wiki pages (no content, includes entity aliases) |
 | GET | `/wiki-pages/:slug` | Single wiki page with full content |
 | PUT | `/wiki-pages/:slug` | Update wiki page content |
@@ -645,6 +646,30 @@ claude mcp add --transport http open-brain \
 
 The MCP `capture_thought` tool requires clients to pass their own name in the `source` parameter. This is stored as `mcp-{source}` in the database (e.g., `mcp-claude`, `mcp-chatgpt`, `mcp-perplexity`). If a client sends the wrong name (e.g., Perplexity passing `source: "chatgpt"`), you can identify and correct it by filtering thoughts by `source_type` in the dashboard.
 
+### MCP Tool Reference (v1.4.0)
+
+| Tool | Read-only | Description |
+|------|-----------|-------------|
+| `search_thoughts` | ✓ | Semantic search; optional `classification`, `source`, `threshold` filters |
+| `list_thoughts` | ✓ | Recent thoughts; optional `classification`, `type`, `source`, `since_hours` filters |
+| `thought_stats` | ✓ | Summary counts for last 30 days |
+| `capture_thought` | — | Save one atomic thought; `source` param required (use your client name) |
+| `update_thought` | — | Update content/context; archives old version |
+| `delete_thought` | — | Permanently delete a thought by serial ID or UUID |
+| `distill_transcript` | ✓ | Split a long text block into atomic thought suggestions |
+| `find_duplicates` | ✓ | Find semantically near-duplicate thought pairs |
+| `add_reflection` | — | Save an AI-generated insight on a specific thought |
+| `capture_review` | ✓ | List recent auto-captured memories (Fieldy, Plaud, etc.) for review; optional `source` filter |
+| `search_wiki` | ✓ | Find wiki entity pages by name or alias |
+| `read_wiki_page` | ✓ | Full wiki article by slug; returns cited thought IDs and linked entity slugs |
+| `get_entity_connections` | ✓ | Knowledge graph edges for an entity (relation, direction, confidence) |
+| `get_context_brief` | ✓ | Session-start briefing: active Kanban, recent captures, entities, action items, wiki. `scope` + `hours` params |
+| `resume` | ✓ | "Where was I?" — last 6 captures, active Kanban, 24h action items, top entity focus |
+| `list_action_items` | ✓ | All extracted action items across thoughts; `classification` + `since_hours` filters |
+| `search` / `fetch` | ✓ | ChatGPT deep-research aliases for `search_thoughts` / single thought fetch |
+
+> **Start any new AI session with `get_context_brief`.** Any AI client that calls it gets the same live briefing from the database — no copy-paste between sessions.
+
 ---
 
 ## 📂 Architecture Reference
@@ -672,7 +697,10 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 *   **Wiki entity management**: The detail header has inline controls for Rename, Aliases (add/remove), Merge, entity Type (inline dropdown that writes to `entities.entity_type` immediately), and Delete (two-step confirm; removes entity + wiki page from DB). The sidebar filter is by entity type (All / Person / Org / Project / Tool / Place / Topic), not Work/Personal.
 *   **Heuristic quality scoring**: `quality_score` is populated at creation time (default 50) and can be backfilled with `scripts/score-thoughts.mjs`. The Audit page threshold is configurable in the UI (default < 30).
 *   **Kanban card-to-card drag**: Cards can be dragged between existing cards in any column, not just to empty space. Uses `@dnd-kit/sortable` with per-column `SortableContext`.
+*   **Action Items pipeline**: The enrichment worker extracts `action_items` from every thought into metadata. The `/actions` dashboard page surfaces these as a triage inbox — each item can be dismissed (Done) or promoted to a Kanban task (→ Kanban, which creates a `type=task, status=backlog` thought). Action items are the discovery layer; Kanban is the execution layer. Also available via the `list_action_items` MCP tool.
+*   **Session context sharing**: `get_context_brief` and `resume` MCP tools let any AI client (Claude, ChatGPT, Perplexity) pull a live briefing from the database at session start, solving the cross-AI context copy-paste problem without any sync infrastructure.
+*   **Source-agnostic capture review**: `capture_review` MCP tool (replaces `fieldy_review`) lists recent auto-captured memories from any device — Fieldy, Plaud, or future auto-capture sources. Filter by source or see all.
 
 ---
 
-*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools, wiki MCP tools (search_wiki/read_wiki_page/get_entity_connections), improved edge extraction (typed relation vocabulary + entity-type constraints), persona synthesis script.*
+*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools, wiki MCP tools (search_wiki/read_wiki_page/get_entity_connections), improved edge extraction (typed relation vocabulary + entity-type constraints), persona synthesis script, MCP v1.4.0 (get_context_brief/resume/list_action_items/capture_review), Actions dashboard page with Done + Promote to Kanban triage.*
