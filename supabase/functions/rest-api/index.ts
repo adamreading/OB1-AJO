@@ -219,6 +219,36 @@ app.get("/search", async (c) => {
   }
 });
 
+// Action items — thoughts with non-empty metadata.action_items
+app.get("/action-items", async (c) => {
+  const classification = c.req.query("classification");
+  const sinceHours = Number(c.req.query("since_hours") ?? 168);
+  const limit = Number(c.req.query("limit") ?? 50);
+  const since = new Date(Date.now() - sinceHours * 60 * 60 * 1000).toISOString();
+
+  try {
+    let q = supabase
+      .from("thoughts")
+      .select("serial_id, content, type, metadata, source_type, created_at, importance")
+      .gte("created_at", since)
+      .not("metadata->action_items", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (classification) q = q.filter("metadata->>classification", "eq", classification);
+
+    const { data, error } = await q;
+    if (error) return c.json({ error: error.message }, 500, corsHeaders);
+
+    const withActions = (data || []).filter((t: any) =>
+      Array.isArray(t.metadata?.action_items) && t.metadata.action_items.length > 0
+    );
+
+    return c.json({ thoughts: withActions, total: withActions.length, since_hours: sinceHours }, 200, corsHeaders);
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500, corsHeaders);
+  }
+});
+
 // Duplicates
 app.get("/duplicates", async (c) => {
   const threshold = Number(c.req.query("threshold") ?? 0.85);

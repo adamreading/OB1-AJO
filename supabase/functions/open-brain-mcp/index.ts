@@ -102,7 +102,7 @@ function distillHeuristic(text: string): Array<{ content: string; type: string }
 function createServer(): McpServer {
   const server = new McpServer({
     name: "open-brain",
-    version: "1.3.0",
+    version: "1.4.0",
   });
 
   // ChatGPT compatibility aliases — restricted ChatGPT connectors look for exact `search` / `fetch` shapes
@@ -544,43 +544,53 @@ function createServer(): McpServer {
     }
   );
 
-  // Tool 10: Fieldy Review — list recent Fieldy-captured memories for daily review
+  // Tool 10: Capture Review — list recent auto-captured memories for daily review (source-agnostic, replaces fieldy_review)
   server.registerTool(
-    "fieldy_review",
+    "capture_review",
     {
-      title: "Fieldy Review",
-      description: "Fetch recent memories captured by Fieldy (source: mcp-fieldy-auto or mcp-fieldy-pending) for daily review. Returns serial ID, content, classification, and timestamp so a reviewer can check for errors, wrong attribution, or missing context.",
+      title: "Capture Review",
+      description: "Fetch recently auto-captured memories for daily review. By default shows all known auto-capture sources (Fieldy, Plaud). Pass a specific source to focus on one device. Returns serial ID, content, classification, and timestamp so you can check for errors, wrong attribution, or missing context.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         since_hours: z.number().optional().default(24).describe("How many hours back to look (default 24)"),
         limit: z.number().optional().default(50),
+        source: z.string().optional().describe("Filter to a specific source e.g. 'mcp-plaud', 'mcp-fieldy-auto'. Omit to see all auto-capture sources."),
       },
     },
-    async ({ since_hours, limit }) => {
+    async ({ since_hours, limit, source }) => {
+      const AUTO_CAPTURE_SOURCES = ["mcp-fieldy-auto", "mcp-fieldy-pending", "mcp-plaud"];
       try {
         const since = new Date(Date.now() - since_hours * 60 * 60 * 1000).toISOString();
 
-        const { data, error } = await supabase
+        let q = supabase
           .from("thoughts")
           .select("serial_id, content, metadata, source_type, created_at")
-          .in("source_type", ["mcp-fieldy-auto", "mcp-fieldy-pending"])
           .gte("created_at", since)
           .order("created_at", { ascending: false })
           .limit(limit);
 
-        if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
-        if (!data?.length) return { content: [{ type: "text", text: `No Fieldy memories found in the last ${since_hours} hours.` }] };
+        if (source) {
+          q = q.eq("source_type", source);
+        } else {
+          q = q.in("source_type", AUTO_CAPTURE_SOURCES);
+        }
+
+        const { data, error } = await q;
+        if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+
+        const sourceLabel = source || "auto-capture";
+        if (!data?.length) return { content: [{ type: "text" as const, text: `No ${sourceLabel} memories found in the last ${since_hours} hours.` }] };
 
         const results = data.map((t: any) => {
           const m = t.metadata || {};
           const label = m.classification ? `[${m.classification.toUpperCase()}] ` : "";
-          const src = t.source_type === "mcp-fieldy-pending" ? " ⚠️ PENDING" : "";
-          return `#${t.serial_id} ${label}(${t.created_at.split("T")[0]}) ${t.source_type}${src}\n${t.content}`;
+          const isPending = t.source_type === "mcp-fieldy-pending" ? " ⚠️ PENDING" : "";
+          return `#${t.serial_id} ${label}(${t.created_at.split("T")[0]}) ${t.source_type}${isPending}\n${t.content}`;
         });
 
-        return { content: [{ type: "text", text: `${data.length} Fieldy memories from the last ${since_hours}h:\n\n${results.join("\n\n")}` }] };
+        return { content: [{ type: "text" as const, text: `${data.length} auto-captured memories from the last ${since_hours}h:\n\n${results.join("\n\n")}` }] };
       } catch (err: unknown) {
-        return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
       }
     }
   );
@@ -764,6 +774,286 @@ function createServer(): McpServer {
     }
   );
 
+  // Tool 14: Get Context Brief — structured session-start briefing for any AI client
+  server.registerTool(
+    "get_context_brief",
+    {
+      title: "Get Context Brief",
+      description: "Generate a structured briefing for starting a new session. Returns active Kanban items, recent captures, entities mentioned recently, open action items, and recently updated wiki pages. Call this at the start of any session to get shared context without copy-pasting between AI clients.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        scope: z.enum(["work", "personal", "all"]).optional().default("all").describe("Filter by context scope"),
+        hours: z.number().optional().default(48).describe("How many hours back to look for recent activity"),
+      },
+    },
+    async ({ scope, hours }) => {
+      try {
+        const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+        const classification = scope === "all" ? undefined : scope;
+
+        // Active/planning Kanban items
+        let kanbanQ = supabase
+          .from("thoughts")
+          .select("serial_id, content, type, status, metadata, importance")
+          .in("status", ["active", "planning"])
+          .in("type", ["task", "idea"])
+          .order("importance", { ascending: false })
+          .limit(15);
+        if (classification) kanbanQ = kanbanQ.filter("metadata->>classification", "eq", classification);
+
+        // Recent captures
+        let recentQ = supabase
+          .from("thoughts")
+          .select("serial_id, id, content, metadata, source_type, created_at")
+          .gte("created_at", since)
+          .order("created_at", { ascending: false })
+          .limit(8);
+        if (classification) recentQ = recentQ.filter("metadata->>classification", "eq", classification);
+
+        // Open action items
+        let actionQ = supabase
+          .from("thoughts")
+          .select("serial_id, content, metadata, created_at")
+          .gte("created_at", since)
+          .not("metadata->action_items", "is", null)
+          .order("created_at", { ascending: false })
+          .limit(20);
+        if (classification) actionQ = actionQ.filter("metadata->>classification", "eq", classification);
+
+        const [kanbanRes, recentRes, actionRes, wikiRes] = await Promise.all([
+          kanbanQ,
+          recentQ,
+          actionQ,
+          supabase.from("wiki_pages").select("slug, title, type, thought_count, generated_at").order("generated_at", { ascending: false }).limit(4),
+        ]);
+
+        // Entity mentions from recent thoughts (two-step: IDs then join)
+        const recentUuids = (recentRes.data || []).map((t: any) => t.id).filter(Boolean);
+        const mentionMap = new Map<number, { name: string; type: string; count: number }>();
+        if (recentUuids.length) {
+          const { data: mentions } = await supabase
+            .from("thought_entities")
+            .select("entity_id, entities(canonical_name, entity_type)")
+            .in("thought_id", recentUuids);
+          for (const m of mentions || []) {
+            const e = (m as any).entities;
+            if (!e) continue;
+            const existing = mentionMap.get((m as any).entity_id) ?? { name: e.canonical_name, type: e.entity_type, count: 0 };
+            mentionMap.set((m as any).entity_id, { ...existing, count: existing.count + 1 });
+          }
+        }
+        const topEntities = [...mentionMap.values()].sort((a, b) => b.count - a.count).slice(0, 6);
+
+        // Action items extraction
+        const allActions: { item: string; thoughtId: number; date: string }[] = [];
+        for (const t of actionRes.data || []) {
+          const items = (t as any).metadata?.action_items;
+          if (Array.isArray(items) && items.length) {
+            items.forEach((item: string) => allActions.push({ item, thoughtId: (t as any).serial_id, date: (t as any).created_at.slice(0, 10) }));
+          }
+        }
+
+        const lines: string[] = [`## Context Brief — ${scope === "all" ? "All" : scope.charAt(0).toUpperCase() + scope.slice(1)} | Last ${hours}h\n`];
+
+        lines.push("### Active & In-Planning");
+        const kanbanItems = kanbanRes.data || [];
+        if (kanbanItems.length) {
+          const byStatus: Record<string, any[]> = { active: [], planning: [] };
+          kanbanItems.forEach((t: any) => { if (t.status in byStatus) byStatus[t.status].push(t); });
+          if (byStatus.active.length) {
+            lines.push("**Active:**");
+            byStatus.active.forEach((t: any) => lines.push(`  - #${t.serial_id} [${t.type}] ${t.content.slice(0, 100)}`));
+          }
+          if (byStatus.planning.length) {
+            lines.push("**Planning:**");
+            byStatus.planning.forEach((t: any) => lines.push(`  - #${t.serial_id} [${t.type}] ${t.content.slice(0, 100)}`));
+          }
+        } else {
+          lines.push("  (no active or planning items)");
+        }
+
+        lines.push(`\n### Recent Captures (last ${hours}h)`);
+        if (recentRes.data?.length) {
+          recentRes.data.forEach((t: any) => {
+            const label = t.metadata?.classification ? `[${t.metadata.classification.toUpperCase()}] ` : "";
+            const src = t.source_type ? ` (${t.source_type})` : "";
+            lines.push(`  #${t.serial_id} ${label}${t.created_at.slice(0, 10)}${src}: ${t.content.slice(0, 100)}`);
+          });
+        } else {
+          lines.push("  (nothing captured in this window)");
+        }
+
+        if (topEntities.length) {
+          lines.push(`\n### Entities Mentioned (last ${hours}h)`);
+          topEntities.forEach(e => lines.push(`  - ${e.name} [${e.type}] × ${e.count}`));
+        }
+
+        if (allActions.length) {
+          lines.push("\n### Open Action Items");
+          allActions.slice(0, 10).forEach(a => lines.push(`  - ${a.item} (from #${a.thoughtId}, ${a.date})`));
+          if (allActions.length > 10) lines.push(`  … and ${allActions.length - 10} more`);
+        }
+
+        if (wikiRes.data?.length) {
+          lines.push("\n### Recently Updated Wiki");
+          wikiRes.data.forEach((p: any) => lines.push(`  - ${p.title} [${p.type}] — ${p.thought_count} thoughts (slug: ${p.slug})`));
+        }
+
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 15: Resume — low-friction "where was I?" for mid-session context recovery
+  server.registerTool(
+    "resume",
+    {
+      title: "Resume — Where Was I?",
+      description: "Quick context recovery for returning to work after an interruption. Shows the last 6 captures, active Kanban items, open action items from the last 24 hours, and what entity you were most focused on. Use any time you've lost your thread.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+        const [lastRes, kanbanRes, actionRes] = await Promise.all([
+          supabase.from("thoughts")
+            .select("serial_id, id, content, metadata, source_type, created_at")
+            .order("created_at", { ascending: false })
+            .limit(6),
+          supabase.from("thoughts")
+            .select("serial_id, content, type, status, metadata, importance")
+            .in("status", ["active", "planning"])
+            .in("type", ["task", "idea"])
+            .order("importance", { ascending: false })
+            .limit(10),
+          supabase.from("thoughts")
+            .select("serial_id, metadata, created_at")
+            .gte("created_at", since24h)
+            .not("metadata->action_items", "is", null)
+            .order("created_at", { ascending: false })
+            .limit(15),
+        ]);
+
+        // Top entity from last 6 thoughts
+        const recentIds = (lastRes.data || []).map((t: any) => t.id).filter(Boolean);
+        let topEntityLabel = "";
+        if (recentIds.length) {
+          const { data: mentions } = await supabase
+            .from("thought_entities")
+            .select("entity_id, entities(canonical_name)")
+            .in("thought_id", recentIds);
+          const counts = new Map<number, { name: string; count: number }>();
+          for (const m of mentions || []) {
+            const name = (m as any).entities?.canonical_name;
+            if (!name) continue;
+            const existing = counts.get((m as any).entity_id) ?? { name, count: 0 };
+            counts.set((m as any).entity_id, { ...existing, count: existing.count + 1 });
+          }
+          const top = [...counts.values()].sort((a, b) => b.count - a.count)[0];
+          if (top) topEntityLabel = `${top.name} (×${top.count})`;
+        }
+
+        const lines: string[] = ["## Resume — Where Were You?\n"];
+
+        lines.push("### Last 6 Captures");
+        if (lastRes.data?.length) {
+          lastRes.data.forEach((t: any) => {
+            const label = t.metadata?.classification ? `[${t.metadata.classification.toUpperCase()}] ` : "";
+            const src = t.source_type ? ` (${t.source_type})` : "";
+            lines.push(`  #${t.serial_id} ${label}${t.created_at.slice(0, 10)}${src}: ${t.content.slice(0, 120)}`);
+          });
+        } else {
+          lines.push("  (no recent captures)");
+        }
+
+        lines.push("\n### Active & Planning");
+        if (kanbanRes.data?.length) {
+          kanbanRes.data.forEach((t: any) => lines.push(`  [${t.status.toUpperCase()}] #${t.serial_id} ${t.content.slice(0, 100)}`));
+        } else {
+          lines.push("  (nothing active or in planning)");
+        }
+
+        const actions: string[] = [];
+        for (const t of actionRes.data || []) {
+          const items = (t as any).metadata?.action_items;
+          if (Array.isArray(items)) items.forEach((i: string) => actions.push(`  - ${i} (from #${(t as any).serial_id})`));
+        }
+        if (actions.length) {
+          lines.push("\n### Open Action Items (last 24h)");
+          actions.slice(0, 8).forEach(a => lines.push(a));
+          if (actions.length > 8) lines.push(`  … and ${actions.length - 8} more`);
+        }
+
+        if (topEntityLabel) lines.push(`\n### Recent Entity Focus\n  ${topEntityLabel}`);
+
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 16: List Action Items — surface all extracted action items from thought metadata
+  server.registerTool(
+    "list_action_items",
+    {
+      title: "List Action Items",
+      description: "Surface all action items automatically extracted from thought metadata. These are pulled from every capture — meetings, transcripts, notes. Use this to see what tasks and follow-ups have accumulated across your brain without having to remember to check.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        classification: z.enum(["work", "personal"]).optional().describe("Filter by work or personal context"),
+        since_hours: z.number().optional().default(168).describe("How many hours back to look (default 168 = 1 week)"),
+        limit: z.number().optional().default(30),
+      },
+    },
+    async ({ classification, since_hours, limit }) => {
+      try {
+        const since = new Date(Date.now() - since_hours * 60 * 60 * 1000).toISOString();
+
+        let q = supabase
+          .from("thoughts")
+          .select("serial_id, content, metadata, source_type, created_at")
+          .gte("created_at", since)
+          .not("metadata->action_items", "is", null)
+          .order("created_at", { ascending: false })
+          .limit(limit);
+        if (classification) q = q.filter("metadata->>classification", "eq", classification);
+
+        const { data, error } = await q;
+        if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+
+        const withActions = (data || []).filter((t: any) =>
+          Array.isArray(t.metadata?.action_items) && t.metadata.action_items.length > 0
+        );
+
+        if (!withActions.length) {
+          return { content: [{ type: "text" as const, text: `No action items found in the last ${since_hours}h.` }] };
+        }
+
+        const lines: string[] = [`## Action Items — last ${since_hours}h${classification ? ` [${classification.toUpperCase()}]` : ""}\n`];
+        withActions.forEach((t: any) => {
+          const label = t.metadata?.classification ? `[${t.metadata.classification.toUpperCase()}] ` : "";
+          const src = t.source_type ? ` (${t.source_type})` : "";
+          lines.push(`**#${t.serial_id}** ${label}${t.created_at.slice(0, 10)}${src}`);
+          lines.push(`  > ${t.content.slice(0, 80)}…`);
+          t.metadata.action_items.forEach((item: string) => lines.push(`  - [ ] ${item}`));
+          lines.push("");
+        });
+
+        const total = withActions.reduce((n: number, t: any) => n + t.metadata.action_items.length, 0);
+        lines.push(`_${total} action items from ${withActions.length} thoughts_`);
+
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   return server;
 }
 
@@ -796,7 +1086,7 @@ app.all("*", async (c) => {
     return c.json({
       status: "ok",
       name: "open-brain",
-      version: "1.3.0",
+      version: "1.4.0",
       capabilities: { tools: true, resources: false, prompts: false }
     }, 200, corsHeaders);
   }
