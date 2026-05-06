@@ -37,6 +37,7 @@ const WINDOW_OPTIONS = [
   { label: "1 week", value: 168 },
   { label: "2 weeks", value: 336 },
   { label: "1 month", value: 720 },
+  { label: "All time", value: 0 },
 ];
 
 function buildLocal(thoughts: ActionThought[]): LocalThought[] {
@@ -61,7 +62,8 @@ export default function ActionsPage() {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ since_hours: String(sinceHours) });
+      const params = new URLSearchParams();
+      if (sinceHours > 0) params.set("since_hours", String(sinceHours));
       if (context) params.set("classification", context);
       const res = await fetch(`/api/actions?${params}`);
       if (!res.ok) throw new Error("Failed to load");
@@ -103,7 +105,7 @@ export default function ActionsPage() {
       const res = await fetch(`/api/actions/${thought.serial_id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, item_index: item.index }),
+        body: JSON.stringify({ action, item_text: item.text }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -257,11 +259,8 @@ export default function ActionsPage() {
                         <span className="flex-1 text-sm text-text-primary">{item.text}</span>
                         <div className="flex items-center gap-1 shrink-0">
                           {item.state === "error" && (
-                            <span
-                              className="text-[10px] text-danger mr-1"
-                              title={item.errorMsg}
-                            >
-                              error
+                            <span className="text-[10px] text-danger mr-1 max-w-[180px] truncate" title={item.errorMsg}>
+                              {item.errorMsg || "error"}
                             </span>
                           )}
                           <button

@@ -15,9 +15,10 @@ export async function GET(request: NextRequest) {
 
   const sp = request.nextUrl.searchParams;
   const classification = sp.get("classification") || undefined;
-  const sinceHours = sp.get("since_hours") || "168";
+  const sinceHoursRaw = sp.get("since_hours");
 
-  const params = new URLSearchParams({ since_hours: sinceHours, limit: "100" });
+  const params = new URLSearchParams({ limit: "200" });
+  if (sinceHoursRaw && sinceHoursRaw !== "0") params.set("since_hours", sinceHoursRaw);
   if (classification) params.set("classification", classification);
 
   try {

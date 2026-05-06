@@ -222,18 +222,21 @@ app.get("/search", async (c) => {
 // Action items — thoughts with non-empty metadata.action_items
 app.get("/action-items", async (c) => {
   const classification = c.req.query("classification");
-  const sinceHours = Number(c.req.query("since_hours") ?? 168);
+  const sinceHoursRaw = c.req.query("since_hours");
+  const sinceHours = sinceHoursRaw ? Number(sinceHoursRaw) : 0;
   const limit = Number(c.req.query("limit") ?? 50);
-  const since = new Date(Date.now() - sinceHours * 60 * 60 * 1000).toISOString();
 
   try {
     let q = supabase
       .from("thoughts")
       .select("serial_id, content, type, metadata, source_type, created_at, importance")
-      .gte("created_at", since)
       .not("metadata->action_items", "is", null)
       .order("created_at", { ascending: false })
       .limit(limit);
+    if (sinceHours > 0) {
+      const since = new Date(Date.now() - sinceHours * 60 * 60 * 1000).toISOString();
+      q = q.gte("created_at", since);
+    }
     if (classification) q = q.filter("metadata->>classification", "eq", classification);
 
     const { data, error } = await q;

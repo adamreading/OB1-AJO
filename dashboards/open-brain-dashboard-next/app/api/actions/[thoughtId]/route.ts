@@ -36,7 +36,7 @@ async function restPost(apiKey: string, path: string, body: unknown) {
 }
 
 // PATCH /api/actions/[thoughtId]
-// Body: { action: "done" | "promote", item_index: number }
+// Body: { action: "done" | "promote", item_text: string }
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ thoughtId: string }> }
@@ -52,9 +52,9 @@ export async function PATCH(
 
   const { thoughtId } = await params;
   const body = await request.json();
-  const { action, item_index } = body as { action: "done" | "promote"; item_index: number };
+  const { action, item_text } = body as { action: "done" | "promote"; item_text: string };
 
-  if (!["done", "promote"].includes(action) || typeof item_index !== "number") {
+  if (!["done", "promote"].includes(action) || typeof item_text !== "string") {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
@@ -63,12 +63,14 @@ export async function PATCH(
     const thought = await restGet(apiKey, `/thought/${thoughtId}`);
     const currentItems: string[] = thought.metadata?.action_items ?? [];
 
-    if (item_index < 0 || item_index >= currentItems.length) {
-      return NextResponse.json({ error: "Item index out of range" }, { status: 400 });
+    // Match by text — immune to index-shifting when multiple items are dismissed
+    if (!currentItems.includes(item_text)) {
+      // Already removed (e.g. double-click) — treat as success
+      return NextResponse.json({ action, removed_item: item_text, remaining: currentItems.length });
     }
 
-    const itemText = currentItems[item_index];
-    const updatedItems = currentItems.filter((_: string, i: number) => i !== item_index);
+    const itemText = item_text;
+    const updatedItems = currentItems.filter((t: string) => t !== item_text);
 
     let promotedId: number | null = null;
 
