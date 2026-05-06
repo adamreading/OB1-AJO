@@ -39,7 +39,7 @@ async function restPost(apiKey: string, path: string, body: unknown) {
 // Body: { action: "done" | "promote", item_index: number }
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { thoughtId: string } }
+  { params }: { params: Promise<{ thoughtId: string }> }
 ) {
   let apiKey: string;
   try {
@@ -50,7 +50,7 @@ export async function PATCH(
     throw err;
   }
 
-  const thoughtId = params.thoughtId;
+  const { thoughtId } = await params;
   const body = await request.json();
   const { action, item_index } = body as { action: "done" | "promote"; item_index: number };
 
