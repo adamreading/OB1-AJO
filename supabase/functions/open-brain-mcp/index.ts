@@ -1068,6 +1068,15 @@ const app = new Hono();
 // CORS preflight
 app.options("*", (c) => c.text("ok", 200, corsHeaders));
 
+// OAuth discovery routes — mcp-remote probes these before falling back to key auth.
+// Must be registered before app.all("*") so they return 404 (not 401).
+app.get("/.well-known/oauth-authorization-server", (c) =>
+  c.json({ error: "not_supported" }, 404, corsHeaders)
+);
+app.post("/oauth/register", (c) =>
+  c.json({ error: "not_supported" }, 404, corsHeaders)
+);
+
 app.all("*", async (c) => {
   // 1. Auth check
   const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
