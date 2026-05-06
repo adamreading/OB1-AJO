@@ -13,6 +13,7 @@ const nav = [
   { href: "/kanban", label: "Workflow", icon: KanbanIcon },
   { href: "/search", label: "Search", icon: SearchIcon },
   { href: "/actions", label: "Actions", icon: ActionsIcon },
+  { href: "/review", label: "Review", icon: ReviewIcon },
   { href: "/audit", label: "Audit", icon: AuditIcon },
   { href: "/duplicates", label: "Duplicates", icon: DuplicatesIcon },
   { href: "/ingest", label: "Add", icon: AddIcon },
@@ -171,6 +172,15 @@ function ActionsIcon({ active }: { active: boolean }) {
       <path d="M2 4.5h14M2 9h14M2 13.5h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
       <circle cx="14.5" cy="13.5" r="2.5" stroke="currentColor" strokeWidth="1.5" />
       <path d="M13.5 13.5l.7.7 1.3-1.3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ReviewIcon({ active }: { active: boolean }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" className={active ? "text-violet" : "text-text-muted"}>
+      <rect x="2" y="2" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M5 9l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

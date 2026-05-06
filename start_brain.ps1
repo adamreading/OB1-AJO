@@ -27,10 +27,22 @@ Write-Host "Starting Local Brain Worker (classification + entity graph extractio
 $WorkerPath = Join-Path $ProjectRoot "scripts\local-brain-worker.js"
 Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$ProjectRoot'; node --env-file=.env '$WorkerPath'"
 
+# 4. Start Plaud Webhook Handler
+Write-Host "Starting Plaud Webhook Handler (port 4001)..." -ForegroundColor Cyan
+$WebhookPath = Join-Path $ProjectRoot "scripts\plaud-webhook.js"
+Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$ProjectRoot'; node --env-file=.env '$WebhookPath'"
+
+# 5. Start Applaud (Plaud sync + webhook trigger)
+Write-Host "Starting Applaud (Plaud recorder sync)..." -ForegroundColor Cyan
+$ApplaudPath = "C:\Users\JoannaThompson\projects\applaud"
+Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$ApplaudPath'; pnpm start"
+
 Write-Host ""
 Write-Host "Everything is starting up!" -ForegroundColor Green
 Write-Host "------------------------------------------------"
-Write-Host "Dashboard:  http://localhost:3010"
-Write-Host "AI Worker:  Running in background window"
+Write-Host "Dashboard:    http://localhost:3010"
+Write-Host "Applaud UI:   http://127.0.0.1:44471"
+Write-Host "AI Worker:    Running in background window"
+Write-Host "Plaud Webhook: http://127.0.0.1:4001/webhook"
 Write-Host "------------------------------------------------"
-Write-Host "Close this window to keep the other two running."
+Write-Host "Close this window to keep the others running."

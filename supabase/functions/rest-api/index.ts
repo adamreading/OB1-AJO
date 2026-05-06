@@ -134,6 +134,8 @@ app.get("/thoughts", async (c) => {
   const qualityScoreMax = c.req.query("quality_score_max");
   const importanceMin = c.req.query("importance_min");
   const status = c.req.query("status");
+  const reviewStatus = c.req.query("review_status");
+  const sourceType = c.req.query("source_type");
 
   let query = supabase
     .from("thoughts")
@@ -149,6 +151,10 @@ app.get("/thoughts", async (c) => {
   if (classification) {
     query = query.filter("metadata->>classification", "eq", classification);
   }
+  if (reviewStatus) {
+    query = query.filter("metadata->>review_status", "eq", reviewStatus);
+  }
+  if (sourceType) query = query.eq("source_type", sourceType);
 
   const { data, error, count } = await query;
   if (error) return c.json({ error: error.message }, 500);
@@ -398,6 +404,143 @@ app.post("/capture", async (c) => {
     content_fingerprint: fp,
     message: "Thought captured",
   }, 201, corsHeaders);
+});
+
+// Capture-pending — ingest from Plaud without queueing for processing (waits for review)
+app.post("/capture-pending", async (c) => {
+  const { content, source_type, ollama_decision, update_target_id, original_content } = await c.req.json();
+  if (!content?.trim()) return c.json({ error: "content is required" }, 400);
+
+  const trimmed = content.trim();
+  const fp = await fingerprint(trimmed);
+
+  const { data: existing } = await supabase
+    .from("thoughts")
+    .select("serial_id, type")
+    .eq("metadata->>content_fingerprint", fp)
+    .maybeSingle();
+
+  if (existing) {
+    return c.json({
+      thought_id: existing.serial_id,
+      action: "duplicate",
+      message: "Already in brain",
+    }, 200, corsHeaders);
+  }
+
+  const meta: Record<string, unknown> = {
+    content_fingerprint: fp,
+    review_status: "pending_review",
+  };
+  if (ollama_decision) meta.ollama_decision = ollama_decision;
+  if (update_target_id != null) meta.update_target_id = update_target_id;
+  if (original_content) meta.original_content = original_content;
+
+  const { data: inserted, error } = await supabase
+    .from("thoughts")
+    .insert({
+      content: trimmed,
+      type: "observation",
+      status: null,
+      importance: 3,
+      quality_score: 50,
+      classification: "personal",
+      source_type: source_type || "plaud",
+      content_fingerprint: fp,
+      metadata: meta,
+    })
+    .select("id, serial_id, type")
+    .single();
+
+  if (error) return c.json({ error: error.message }, 500);
+
+  return c.json({
+    thought_id: inserted.serial_id,
+    action: "pending",
+    message: "Thought queued for review",
+  }, 201, corsHeaders);
+});
+
+// Review — approve a batch of pending thoughts
+// For UPDATE decisions: applies merged content to the target thought + deletes pending
+// For NEW decisions: queues the thought for entity extraction + clears review_status
+app.post("/review/approve", async (c) => {
+  const { ids } = await c.req.json();
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return c.json({ error: "ids array is required" }, 400);
+  }
+
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const serialId of ids) {
+    const { data: thought, error: fetchErr } = await supabase
+      .from("thoughts")
+      .select("*")
+      .eq("serial_id", serialId)
+      .maybeSingle();
+
+    if (fetchErr || !thought) {
+      results.push({ id: serialId, action: "error", message: "Not found" });
+      continue;
+    }
+
+    const meta = (thought.metadata ?? {}) as Record<string, unknown>;
+    const decision = meta.ollama_decision as string | undefined;
+    const targetSerialId = meta.update_target_id as number | undefined;
+
+    if (decision === "UPDATE" && targetSerialId) {
+      // Apply merged content to the original thought, re-queue it, delete pending
+      const { error: updateErr } = await supabase
+        .from("thoughts")
+        .update({ content: thought.content, updated_at: new Date().toISOString() })
+        .eq("serial_id", targetSerialId);
+
+      if (updateErr) {
+        results.push({ id: serialId, action: "error", message: updateErr.message });
+        continue;
+      }
+
+      const { data: targetRow } = await supabase
+        .from("thoughts")
+        .select("id")
+        .eq("serial_id", targetSerialId)
+        .maybeSingle();
+
+      if (targetRow) {
+        await supabase.from("entity_extraction_queue")
+          .upsert({ thought_id: targetRow.id }, { onConflict: "thought_id", ignoreDuplicates: false });
+        getEmbedding(thought.content).then(emb => {
+          if (emb) supabase.from("thoughts").update({ embedding: emb }).eq("serial_id", targetSerialId);
+        });
+      }
+
+      await supabase.from("thoughts").delete().eq("serial_id", serialId);
+      results.push({ id: serialId, action: "update_applied", target_id: targetSerialId });
+
+    } else {
+      // Mark approved + queue for entity extraction + trigger embedding
+      const cleanMeta: Record<string, unknown> = { ...meta };
+      cleanMeta.review_status = "approved";
+      delete cleanMeta.ollama_decision;
+      delete cleanMeta.update_target_id;
+      delete cleanMeta.original_content;
+
+      await supabase.from("thoughts")
+        .update({ metadata: cleanMeta })
+        .eq("serial_id", serialId);
+
+      await supabase.from("entity_extraction_queue")
+        .upsert({ thought_id: thought.id }, { onConflict: "thought_id", ignoreDuplicates: true });
+
+      getEmbedding(thought.content).then(emb => {
+        if (emb) supabase.from("thoughts").update({ embedding: emb }).eq("id", thought.id);
+      });
+
+      results.push({ id: serialId, action: "approved" });
+    }
+  }
+
+  return c.json({ results }, 200, corsHeaders);
 });
 
 // Ingestion jobs — list
