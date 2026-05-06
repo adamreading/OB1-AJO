@@ -556,7 +556,16 @@ function MergeModal({
       noWiki: true,
     }));
 
-  const candidates = [...wikiCandidates, ...orphanCandidates].filter(
+  // Deduplicate by lowercase title: orphan entries (direct from entities table,
+  // guaranteed live) take precedence over wiki entries (wiki_pages.entity_id
+  // can be stale if the entity was merged/deleted after the page was compiled).
+  const byTitle = new Map<string, MergeCandidate>();
+  for (const c of [...orphanCandidates, ...wikiCandidates]) {
+    const key = c.title.toLowerCase();
+    if (!byTitle.has(key)) byTitle.set(key, c);
+  }
+
+  const candidates = Array.from(byTitle.values()).filter(
     (c) =>
       search === "" ||
       c.title.toLowerCase().includes(search.toLowerCase()) ||

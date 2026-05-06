@@ -768,13 +768,13 @@ app.post("/entities/:id/merge", async (c) => {
     return c.json({ error: "Valid target_id (different from source) required" }, 400, corsHeaders);
   }
 
-  const { data: source, error: srcErr } = await supabase
-    .from("entities").select("canonical_name, aliases").eq("id", sourceId).single();
-  if (srcErr || !source) return c.json({ error: "Source entity not found" }, 404, corsHeaders);
+  const { data: source } = await supabase
+    .from("entities").select("canonical_name, aliases").eq("id", sourceId).maybeSingle();
+  if (!source) return c.json({ error: "Source entity not found" }, 404, corsHeaders);
 
-  const { data: target, error: tgtErr } = await supabase
-    .from("entities").select("canonical_name, aliases").eq("id", targetId).single();
-  if (tgtErr || !target) return c.json({ error: "Target entity not found" }, 404, corsHeaders);
+  const { data: target } = await supabase
+    .from("entities").select("canonical_name, aliases").eq("id", targetId).maybeSingle();
+  if (!target) return c.json({ error: `Target entity not found (id=${targetId}). It may have been previously deleted — refresh the wiki and try again.` }, 404, corsHeaders);
 
   // Re-assign thought_entities
   await supabase.from("thought_entities").update({ entity_id: targetId }).eq("entity_id", sourceId);
