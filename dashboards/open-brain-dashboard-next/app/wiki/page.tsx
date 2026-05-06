@@ -517,11 +517,13 @@ function MergeModal({
   pages,
   onClose,
   onMerged,
+  mode = "merge",
 }: {
   source: WikiPageDetail;
   pages: WikiPageSummary[];
   onClose: () => void;
   onMerged: (targetSlug?: string) => void;
+  mode?: "merge" | "absorb";
 }) {
   const [search, setSearch] = useState("");
   const [target, setTarget] = useState<MergeCandidate | null>(null);
@@ -577,16 +579,21 @@ function MergeModal({
     setMerging(true);
     setError(null);
     try {
-      const res = await fetch(`/api/entities/${source.entity_id}/merge`, {
+      // absorb: picked entity (target) is deleted, source wiki page survives
+      // merge:  source wiki page is deleted, picked entity (target) survives
+      const deleteId = mode === "absorb" ? target.entity_id : source.entity_id;
+      const survivingId = mode === "absorb" ? source.entity_id : target.entity_id;
+      const survivingSlug = mode === "absorb" ? source.slug : target.slug;
+      const res = await fetch(`/api/entities/${deleteId}/merge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_id: target.entity_id }),
+        body: JSON.stringify({ target_id: survivingId }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
       }
-      onMerged(target.slug);
+      onMerged(survivingSlug);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Merge failed");
     } finally {
@@ -602,7 +609,9 @@ function MergeModal({
       >
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-text-primary">
-            Merge &ldquo;{source.title}&rdquo; into&hellip;
+            {mode === "absorb"
+              ? <>Absorb a duplicate into &ldquo;{source.title}&rdquo;&hellip;</>
+              : <>Merge &ldquo;{source.title}&rdquo; into&hellip;</>}
           </h3>
           <button onClick={onClose} className="text-text-muted hover:text-text-secondary transition-colors text-lg leading-none">
             ×
@@ -610,7 +619,9 @@ function MergeModal({
         </div>
 
         <p className="text-xs text-text-muted mb-3">
-          All thoughts, edges, and aliases move to the target. The source entity is permanently deleted.
+          {mode === "absorb"
+            ? "Pick a duplicate entity — its thoughts, edges, and aliases move here and it is permanently deleted."
+            : "All thoughts, edges, and aliases move to the target. The source entity is permanently deleted."}
         </p>
 
         <input
@@ -648,7 +659,9 @@ function MergeModal({
 
         {target && (
           <p className="text-xs text-amber-400 mb-3">
-            ⚠ &ldquo;{source.title}&rdquo; will be deleted. Everything moves to &ldquo;{target.title}&rdquo;.
+            {mode === "absorb"
+              ? <>⚠ &ldquo;{target.title}&rdquo; will be deleted. Everything moves to &ldquo;{source.title}&rdquo;.</>
+              : <>⚠ &ldquo;{source.title}&rdquo; will be deleted. Everything moves to &ldquo;{target.title}&rdquo;.</>}
           </p>
         )}
 
@@ -664,7 +677,11 @@ function MergeModal({
             disabled={!target || merging}
             className="px-3 py-1.5 text-sm bg-danger text-white rounded-lg hover:bg-danger/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {merging ? "Merging…" : target ? `Merge into ${target.title}` : "Select a target first"}
+            {merging
+              ? "Merging…"
+              : target
+                ? mode === "absorb" ? `Absorb "${target.title}" here` : `Merge into ${target.title}`
+                : "Select a duplicate first"}
           </button>
         </div>
 
@@ -686,6 +703,7 @@ function WikiPageInner() {
   const [search, setSearch] = useState("");
   const [showAliasModal, setShowAliasModal] = useState(false);
   const [showMergeModal, setShowMergeModal] = useState(false);
+  const [showAbsorbModal, setShowAbsorbModal] = useState(false);
   const [showRenameModal, setShowRenameModal] = useState(false);
   const [typeFilter, setTypeFilter] = useState<EntityTypeFilter>("all");
   const [editingNotes, setEditingNotes] = useState(false);
@@ -871,6 +889,16 @@ function WikiPageInner() {
           source={selected}
           pages={pages}
           onClose={() => setShowMergeModal(false)}
+          onMerged={handleMerged}
+        />
+      )}
+
+      {showAbsorbModal && selected && (
+        <MergeModal
+          source={selected}
+          pages={pages}
+          mode="absorb"
+          onClose={() => setShowAbsorbModal(false)}
           onMerged={handleMerged}
         />
       )}
@@ -1062,8 +1090,15 @@ function WikiPageInner() {
                         Aliases {(selected.aliases ?? []).length > 0 ? `(${selected.aliases!.length})` : ""}
                       </button>
                       <button
+                        onClick={() => setShowAbsorbModal(true)}
+                        title="Absorb a duplicate into this entity — the duplicate is deleted, its data moves here"
+                        className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+                      >
+                        Absorb
+                      </button>
+                      <button
                         onClick={() => setShowMergeModal(true)}
-                        title="Merge into another entity"
+                        title="Merge this entity into another — this entity is deleted"
                         className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
                       >
                         Merge
