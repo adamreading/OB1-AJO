@@ -646,24 +646,36 @@ function buildFrontmatter(entity, sourceCounts, provenance) {
 //   1. Try the base slug first. If the file doesn't exist, use it.
 //   2. If it exists, peek at its `entity_id:` frontmatter line. If it belongs
 //      to this entity, overwrite (idempotent re-run).
-//   3. Otherwise another entity owns the base path — append `-1`, `-2`, ...
-//      until we find a free path (or one that already belongs to us).
+//   3. If the file's entity_id is not in knownEntityIds (i.e. was deleted or
+//      merged), the file is orphaned — treat as ownerless and overwrite.
+//   4. Otherwise another active entity owns the base path — append `-1`, `-2`…
 // Logs a warning on every collision so users see when their entities are
 // colliding and can pick better canonical names.
-function resolveOutputPath(outDir, baseSlug, entity) {
+function resolveOutputPath(outDir, baseSlug, entity, knownEntityIds = new Set()) {
   const tryPath = (suffix) => path.join(outDir, `${baseSlug}${suffix}.md`);
   const ownedBy = (p) => {
     try {
       const head = fs.readFileSync(p, "utf8").slice(0, 2048);
       const match = head.match(/^entity_id:\s*(\S+)/m);
-      return match ? String(match[1]) === String(entity.id) : false;
+      if (!match) return false;
+      const fileId = Number(match[1]);
+      if (fileId === entity.id) return true;
+      // File belongs to a different entity. If knownEntityIds is populated and
+      // that entity is no longer in the DB (deleted/merged), reclaim the file.
+      if (knownEntityIds.size > 0 && !knownEntityIds.has(fileId)) {
+        console.log(
+          `[wiki] reclaiming "${path.basename(p)}" — entity #${fileId} was deleted or merged`,
+        );
+        return true;
+      }
+      return false;
     } catch {
       return false;
     }
   };
   let candidate = tryPath("");
   if (!fs.existsSync(candidate) || ownedBy(candidate)) return candidate;
-  // Collision with a different entity — warn and pick a numeric suffix.
+  // Collision with a different active entity — warn and pick a numeric suffix.
   for (let i = 1; i < 1000; i++) {
     candidate = tryPath(`-${i}`);
     if (!fs.existsSync(candidate) || ownedBy(candidate)) {
@@ -681,10 +693,10 @@ function resolveOutputPath(outDir, baseSlug, entity) {
   );
 }
 
-function writeFile(wiki, entity, sourceCounts, provenance, outDir) {
+function writeFile(wiki, entity, sourceCounts, provenance, outDir, knownEntityIds = new Set()) {
   fs.mkdirSync(outDir, { recursive: true });
   const baseSlug = slugify(entity.canonical_name, entity.entity_type);
-  const filepath = resolveOutputPath(outDir, baseSlug, entity);
+  const filepath = resolveOutputPath(outDir, baseSlug, entity, knownEntityIds);
   fs.writeFileSync(filepath, buildFrontmatter(entity, sourceCounts, provenance) + wiki + "\n", "utf8");
   return filepath;
 }
@@ -859,7 +871,7 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
 // Orchestration
 // ---------------------------------------------------------------
 
-async function generateForEntity(sb, env, entity, args) {
+async function generateForEntity(sb, env, entity, args, knownEntityIds = new Set()) {
   // 1. Linked thoughts
   const linked = await fetchLinkedThoughts(sb, entity.id);
   // 2. Typed edges + connected entity names
@@ -929,7 +941,7 @@ async function generateForEntity(sb, env, entity, args) {
 
   if (args.outputMode === "file") {
     const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
-    const filepath = writeFile(wiki, entity, sourceCounts, provenance, outDir);
+    const filepath = writeFile(wiki, entity, sourceCounts, provenance, outDir, knownEntityIds);
     console.log(`[wiki] wrote file: ${filepath}`);
     // Also persist to wiki_pages table for the dashboard
     const slug = slugify(entity.canonical_name, entity.entity_type);
@@ -1026,13 +1038,16 @@ async function main() {
   if (args.batch) {
     const candidates = await listBatchCandidates(sb, args.batchMinLinked, args.batchLimit);
     console.log(`[wiki] batch: ${candidates.length} candidate entities (min_linked=${args.batchMinLinked})`);
+    // Build a set of live entity IDs so orphaned wiki files (from deleted/merged entities)
+    // can be reclaimed rather than generating -1, -2 slug suffixes.
+    const knownEntityIds = new Set(candidates.map((c) => c.id));
     let ok = 0;
     let failed = 0;
     for (const cand of candidates) {
       const entity = await resolveEntityById(sb, cand.id);
       if (!entity) continue;
       try {
-        await generateForEntity(sb, env, entity, args);
+        await generateForEntity(sb, env, entity, args, knownEntityIds);
         ok++;
       } catch (err) {
         failed++;

@@ -332,7 +332,7 @@ async function findEntityByAlias(name) {
 async function upsertEntity(entity) {
   const normalized = normalizeName(entity.name);
 
-  // Before inserting, check if this name is an alias for an existing entity
+  // 1. Check aliases
   const aliasMatchId = await findEntityByAlias(entity.name);
   if (aliasMatchId) {
     await supabase
@@ -340,6 +340,23 @@ async function upsertEntity(entity) {
       .update({ last_seen_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", aliasMatchId);
     return aliasMatchId;
+  }
+
+  // 2. Cross-type dedup: if any entity with this normalized_name already exists
+  //    (regardless of type), use it — prevents re-creating AQB as "project"
+  //    after it has been reclassified or merged into "organization".
+  const { data: crossType } = await supabase
+    .from("entities")
+    .select("id")
+    .eq("normalized_name", normalized)
+    .limit(1)
+    .maybeSingle();
+  if (crossType) {
+    await supabase
+      .from("entities")
+      .update({ last_seen_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", crossType.id);
+    return crossType.id;
   }
 
   const { data, error } = await supabase

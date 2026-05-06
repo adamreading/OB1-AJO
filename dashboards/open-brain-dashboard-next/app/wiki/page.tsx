@@ -496,6 +496,22 @@ function RenameModal({
 
 // ── Merge Modal ────────────────────────────────────────────────────────────
 
+interface OrphanEntity {
+  id: number;
+  canonical_name: string;
+  entity_type: string;
+  aliases?: string[];
+}
+
+interface MergeCandidate {
+  entity_id: number;
+  title: string;
+  type: string;
+  slug?: string;
+  aliases?: string[];
+  noWiki?: boolean;
+}
+
 function MergeModal({
   source,
   pages,
@@ -505,24 +521,50 @@ function MergeModal({
   source: WikiPageDetail;
   pages: WikiPageSummary[];
   onClose: () => void;
-  onMerged: (targetSlug: string) => void;
+  onMerged: (targetSlug?: string) => void;
 }) {
   const [search, setSearch] = useState("");
-  const [target, setTarget] = useState<WikiPageSummary | null>(null);
+  const [target, setTarget] = useState<MergeCandidate | null>(null);
+  const [orphans, setOrphans] = useState<OrphanEntity[]>([]);
   const [merging, setMerging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const candidates = pages.filter(
-    (p) =>
-      p.entity_id &&
-      p.entity_id !== source.entity_id &&
-      (search === "" ||
-        p.title.toLowerCase().includes(search.toLowerCase()) ||
-        (p.aliases ?? []).some((a) => a.toLowerCase().includes(search.toLowerCase())))
+  useEffect(() => {
+    fetch("/api/entities?no_wiki=true")
+      .then((r) => r.json())
+      .then((d: { entities?: OrphanEntity[] }) => setOrphans(d.entities ?? []))
+      .catch(() => {});
+  }, []);
+
+  const wikiCandidates: MergeCandidate[] = pages
+    .filter((p) => p.entity_id && p.entity_id !== source.entity_id)
+    .map((p) => ({
+      entity_id: p.entity_id!,
+      title: p.title,
+      type: getEntityType(p),
+      slug: p.slug,
+      aliases: p.aliases,
+    }));
+
+  const orphanCandidates: MergeCandidate[] = orphans
+    .filter((o) => o.id !== source.entity_id)
+    .map((o) => ({
+      entity_id: o.id,
+      title: o.canonical_name,
+      type: o.entity_type,
+      aliases: o.aliases,
+      noWiki: true,
+    }));
+
+  const candidates = [...wikiCandidates, ...orphanCandidates].filter(
+    (c) =>
+      search === "" ||
+      c.title.toLowerCase().includes(search.toLowerCase()) ||
+      (c.aliases ?? []).some((a) => a.toLowerCase().includes(search.toLowerCase()))
   );
 
   const handleMerge = async () => {
-    if (!target || !source.entity_id || !target.entity_id) return;
+    if (!target || !source.entity_id) return;
     setMerging(true);
     setError(null);
     try {
@@ -575,18 +617,21 @@ function MergeModal({
           {candidates.length === 0 ? (
             <p className="px-3 py-4 text-xs text-text-muted text-center">No matching entities</p>
           ) : (
-            candidates.slice(0, 20).map((p) => (
+            candidates.slice(0, 20).map((c) => (
               <button
-                key={p.slug}
-                onClick={() => setTarget(p)}
+                key={`${c.noWiki ? "orphan" : "wiki"}-${c.entity_id}`}
+                onClick={() => setTarget(c)}
                 className={`w-full text-left px-3 py-2 border-b border-border/50 last:border-0 transition-colors text-sm ${
-                  target?.slug === p.slug
+                  target?.entity_id === c.entity_id
                     ? "bg-violet-surface text-violet"
                     : "hover:bg-bg-hover text-text-primary"
                 }`}
               >
-                {p.title}
-                <span className="ml-1.5 text-xs text-text-muted">{p.type}</span>
+                {c.title}
+                <span className="ml-1.5 text-xs text-text-muted">{c.type}</span>
+                {c.noWiki && (
+                  <span className="ml-1.5 text-[10px] text-amber-400/70">(no wiki)</span>
+                )}
               </button>
             ))
           )}
@@ -708,7 +753,7 @@ function WikiPageInner() {
     }
   }, [selected, notesContent]);
 
-  const handleMerged = useCallback((targetSlug: string) => {
+  const handleMerged = useCallback((targetSlug?: string) => {
     setShowMergeModal(false);
     setLoading(true);
     fetch("/api/wiki")
@@ -716,7 +761,8 @@ function WikiPageInner() {
       .then((d: { data: WikiPageSummary[] }) => {
         setPages(d.data || []);
         setLoading(false);
-        loadDetail(targetSlug);
+        if (targetSlug) loadDetail(targetSlug);
+        else setSelected(null);
       })
       .catch(() => setLoading(false));
   }, [loadDetail]);
