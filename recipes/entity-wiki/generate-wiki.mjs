@@ -739,8 +739,24 @@ async function upsertWikiPage(env, pageData) {
   if (!upsertRes.ok) {
     const text = await upsertRes.text();
     console.error(`[wiki] upsert wiki_pages failed for "${pageData.slug}": ${upsertRes.status} ${text.slice(0, 300)}`);
-  } else {
-    console.log(`[wiki] upserted wiki_pages row for "${pageData.slug}"`);
+    return;
+  }
+  console.log(`[wiki] upserted wiki_pages row for "${pageData.slug}"`);
+
+  // Clean up stale alternate-slug rows for the same entity (e.g. tool-uipath-1
+  // left over from a previous collision run). One entity → one wiki_pages row.
+  if (pageData.entity_id) {
+    const cleanRes = await fetch(
+      `${base}/rest/v1/wiki_pages?entity_id=eq.${pageData.entity_id}&slug=neq.${encodeURIComponent(pageData.slug)}`,
+      {
+        method: "DELETE",
+        headers: { apikey: key, authorization: `Bearer ${key}` },
+      },
+    );
+    if (!cleanRes.ok) {
+      const text = await cleanRes.text();
+      console.warn(`[wiki] stale slug cleanup failed for entity #${pageData.entity_id}: ${cleanRes.status} ${text.slice(0, 200)}`);
+    }
   }
 }
 
