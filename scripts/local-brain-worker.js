@@ -147,6 +147,7 @@ Entity rules:
 - importance is an integer from 1 to 5.
 - Extract only concrete, recognizable entities. Use "PostgreSQL", not "database".
 - Always use the most complete canonical form of a name. Use "Tom Falconar" not "Tom". Use "Adam Ososki" not "Adam".
+- Use the SHORTEST canonical name. Strip generic qualifiers that aren't part of the official name: write "Call Listening" not "Call Listening App" or "Call Listening System"; write "Bookstack" not "Bookstack Wiki"; write "ZVA" not "ZVA Chatbot". Never add App, System, Tool, Service, Wiki, Module, Platform, Chatbot, Bot, Dashboard, Website unless the entity is officially named that way.
 - Omit entities and relationships below 0.5 confidence.
 
 Relationship relation values — pick the MOST SPECIFIC match:
@@ -329,6 +330,10 @@ async function findEntityByAlias(name) {
   return null;
 }
 
+// Generic qualifiers the LLM sometimes appends that aren't part of an official name.
+// When stripping produces a name that already exists in the DB, use that entity.
+const GENERIC_SUFFIXES = /[\s-]+(app|system|tool|service|wiki|module|platform|chatbot|bot|dashboard|website|site|portal|project)$/i;
+
 async function upsertEntity(entity) {
   const normalized = normalizeName(entity.name);
 
@@ -357,6 +362,26 @@ async function upsertEntity(entity) {
       .update({ last_seen_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", crossType.id);
     return crossType.id;
+  }
+
+  // 3. Generic-suffix dedup: "Call Listening App" → try "Call Listening".
+  //    Prevents duplicate entities when the LLM adds qualifiers like App/System/Wiki.
+  const strippedName = entity.name.replace(GENERIC_SUFFIXES, "").trim();
+  if (strippedName && strippedName !== entity.name) {
+    const strippedNormalized = normalizeName(strippedName);
+    const { data: strippedMatch } = await supabase
+      .from("entities")
+      .select("id")
+      .eq("normalized_name", strippedNormalized)
+      .limit(1)
+      .maybeSingle();
+    if (strippedMatch) {
+      await supabase
+        .from("entities")
+        .update({ last_seen_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq("id", strippedMatch.id);
+      return strippedMatch.id;
+    }
   }
 
   const { data, error } = await supabase
