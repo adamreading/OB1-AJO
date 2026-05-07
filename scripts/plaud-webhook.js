@@ -127,10 +127,12 @@ async function getThought(id) {
   return res.body;
 }
 
-async function capturePending(content, decision, updateTargetId, originalContent) {
+async function capturePending(content, decision, updateTargetId, originalContent, type, classification) {
   const body = { content, source_type: "plaud", ollama_decision: decision };
   if (updateTargetId != null) body.update_target_id = updateTargetId;
   if (originalContent != null) body.original_content = originalContent;
+  if (type) body.type = type;
+  if (classification) body.classification = classification;
   return apiCall("POST", "/capture-pending", body);
 }
 
@@ -206,10 +208,20 @@ function parseEntries(summaryMarkdown) {
     const lines = entryText.split("\n");
     let bodyStart = -1;
     let actionsStart = -1;
+    let entryType = null;
+    let entryClassification = null;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? "";
-      if (line.startsWith("CONTEXT:") && bodyStart === -1) bodyStart = i + 1;
+      if (line.startsWith("TYPE:") && bodyStart === -1) {
+        const val = line.slice(5).trim().toLowerCase();
+        if (val) entryType = val;
+      }
+      if (line.startsWith("CONTEXT:") && bodyStart === -1) {
+        const val = line.slice(8).trim().toLowerCase();
+        if (val === "work" || val === "personal") entryClassification = val;
+        bodyStart = i + 1;
+      }
       if (line.startsWith("ACTIONS:")) { actionsStart = i; break; }
     }
 
@@ -235,7 +247,7 @@ function parseEntries(summaryMarkdown) {
       content += "\n\nAction items:\n" + actions.map((a) => `- ${a}`).join("\n");
     }
 
-    entries.push(content);
+    entries.push({ content, type: entryType, classification: entryClassification });
   }
 
   return entries;
@@ -267,7 +279,7 @@ async function processRecording(payload) {
   console.log(`[plaud-webhook] Processing ${entries.length} entries from: ${filename}`);
 
   for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
+    const { content: entry, type: entryType, classification: entryClassification } = entries[i];
     const label = `entry ${i + 1}/${entries.length}`;
 
     try {
@@ -283,18 +295,18 @@ async function processRecording(payload) {
         if (!existing?.content) {
           // Target not found — fall back to NEW pending
           console.log(`[plaud-webhook] ${label}: UPDATE:${targetId} — thought not found, queuing as NEW pending`);
-          const r = await capturePending(entry, "NEW", null, null);
+          const r = await capturePending(entry, "NEW", null, null, entryType, entryClassification);
           console.log(`[plaud-webhook] ${label}: NEW (fallback) — ${r.body?.action ?? r.status}`);
         } else {
           // Synthesize now while Ollama is available; store merged content in pending thought
           // The original is untouched until the user approves in the Review panel
           const merged = await synthesizeUpdate(existing.content, entry);
-          const r = await capturePending(merged, "UPDATE", targetId, existing.content);
+          const r = await capturePending(merged, "UPDATE", targetId, existing.content, entryType, entryClassification);
           console.log(`[plaud-webhook] ${label}: UPDATE:${targetId} pending review — ${r.body?.action ?? r.status}`);
         }
 
       } else {
-        const r = await capturePending(entry, "NEW", null, null);
+        const r = await capturePending(entry, "NEW", null, null, entryType, entryClassification);
         console.log(`[plaud-webhook] ${label}: NEW pending review — ${r.body?.action ?? r.status}`);
       }
     } catch (err) {

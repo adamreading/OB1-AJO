@@ -408,7 +408,7 @@ app.post("/capture", async (c) => {
 
 // Capture-pending — ingest from Plaud without queueing for processing (waits for review)
 app.post("/capture-pending", async (c) => {
-  const { content, source_type, ollama_decision, update_target_id, original_content } = await c.req.json();
+  const { content, source_type, ollama_decision, update_target_id, original_content, type, classification } = await c.req.json();
   if (!content?.trim()) return c.json({ error: "content is required" }, 400);
 
   const trimmed = content.trim();
@@ -436,15 +436,21 @@ app.post("/capture-pending", async (c) => {
   if (update_target_id != null) meta.update_target_id = update_target_id;
   if (original_content) meta.original_content = original_content;
 
+  const VALID_TYPES = ["task","idea","observation","reference","person_note","decision","lesson","meeting","journal"];
+  const resolvedType = (typeof type === "string" && VALID_TYPES.includes(type)) ? type : "observation";
+  const resolvedClassification = (classification === "work" || classification === "personal") ? classification : "work";
+
+  if (resolvedClassification) meta.classification = resolvedClassification;
+
   const { data: inserted, error } = await supabase
     .from("thoughts")
     .insert({
       content: trimmed,
-      type: "observation",
+      type: resolvedType,
       status: null,
       importance: 3,
       quality_score: 50,
-      classification: "personal",
+      classification: resolvedClassification,
       source_type: source_type || "plaud",
       content_fingerprint: fp,
       metadata: meta,
