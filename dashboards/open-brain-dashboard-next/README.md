@@ -14,7 +14,7 @@ A full-featured web dashboard for your Open Brain second brain. Browse, search, 
 
 ## What It Does
 
-Provides 9 pages for managing your thoughts:
+Provides 10 pages for managing your thoughts:
 
 | Page | Description |
 |------|-------------|
@@ -24,6 +24,7 @@ Provides 9 pages for managing your thoughts:
 | **Detail** | Full thought view with inline editing, delete, linked reflections, and related connections |
 | **Search** | Semantic (vector similarity) and full-text search with match scores and pagination |
 | **Add to Brain** | Smart ingest with auto-routing — short text goes to single capture, long text to extraction with dry-run preview |
+| **Review** | Plaud capture triage — thoughts awaiting human approval before entering the brain. Checkbox select, inline editing (content / type / classification), per-row Pass/Delete, bulk Pass/Delete. UPDATE entries show the original thought for comparison. |
 | **Audit** | Quality review for low-score thoughts with bulk delete |
 | **Duplicates** | Semantic similarity detection with keep/delete/keep-both resolution |
 | **Login** | API key authentication via encrypted session cookie |
@@ -161,6 +162,9 @@ The dashboard calls these endpoints on your Open Brain REST API:
 | `/duplicates` | GET | Duplicates page |
 | `/thoughts?type=task` | GET | Workflow board (filtered by type) |
 | `/thought/:id` | PUT | Workflow board (status/priority updates) |
+| `/thoughts?review_status=pending_review&source_type=plaud` | GET | Review page (pending triage) |
+| `/capture-pending` | POST | Plaud webhook — capture thought pending review |
+| `/review/approve` | POST | Review page — batch approve pending thoughts |
 
 > [!NOTE]
 > If your Open Brain instance doesn't have all these endpoints (e.g., no smart-ingest or duplicates), those pages will show errors but the core pages (dashboard, browse, search, detail) will still work.

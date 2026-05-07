@@ -472,10 +472,13 @@ Two Edge Functions serve the AJO fork. Both are in this repo and must be deploye
 | GET/PUT/DELETE | `/thought/:id` | Single thought CRUD |
 | GET/POST | `/thought/:id/reflection` | Reflections on a thought |
 | POST | `/capture` | Quick single-thought add with dedup fingerprinting |
+| POST | `/capture-pending` | Capture thought pending human review — stores `metadata.review_status: pending_review` without queueing for entity extraction. Accepts `type`, `classification`, `ollama_decision`, `update_target_id`, `original_content`. Used by the Plaud webhook. |
+| POST | `/review/approve` | Batch approve pending thoughts by `serial_id` array. NEW: queues for extraction + embedding, clears review_status. UPDATE: applies merged content to target thought, re-queues target, deletes pending vessel. |
 | GET | `/ingestion-jobs` | List bulk import jobs |
 | GET | `/ingestion-jobs/:id` | Single job + items |
 | POST | `/ingest` | Extract and commit a block of text as thoughts |
 | POST | `/ingestion-jobs/:id/execute` | Execute a pending job's items |
+| GET | `/thoughts` | Now also accepts `review_status` (`pending_review` / `approved`) and `source_type` query filters |
 | GET | `/action-items` | Thoughts with non-empty `metadata.action_items`; supports `classification`, `since_hours`, `limit` |
 | GET | `/wiki-pages` | List all wiki pages (no content, includes entity aliases) |
 | GET | `/wiki-pages/:slug` | Single wiki page with full content |
@@ -538,6 +541,9 @@ KANBAN_INITIAL_STATUS="backlog"
 
 WORK_CONTEXT_DESC="Professional work, software development, and corporate projects"
 PERSONAL_CONTEXT_DESC="Home life, hobbies, fitness, and family"
+
+# Plaud webhook (optional — default port is 4001)
+# PLAUD_WEBHOOK_PORT=4001
 ```
 
 > **Note:** The wiki compiler also uses these env vars via the fallback aliases `OPEN_BRAIN_URL` (= `SUPABASE_URL`) and `OPEN_BRAIN_SERVICE_KEY` (= `SUPABASE_KEY`). The generate-wiki.mjs script handles both names automatically. The `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` env vars are not required — the script detects `OLLAMA_URL` and derives the OpenAI-compatible endpoint automatically.
@@ -557,14 +563,22 @@ BRAIN_KEY="the-same-password-as-above"
 
 ## 🚀 Phase 6: Launching
 
-Run the unified start script from the project root. This launches the dashboard and the local background worker simultaneously.
+Run the unified start script from the project root. This launches all four processes in separate PowerShell windows.
 
 ```powershell
 .\start_brain.ps1
 ```
 
-*   **Dashboard**: [http://localhost:3010](http://localhost:3010)
-*   **Worker**: Watch the terminal for "Starting Open Brain local worker..."
+| Process | URL / Notes |
+|---------|-------------|
+| **Dashboard** (Next.js) | http://localhost:3010 |
+| **Brain Worker** | Background window — classification + entity extraction via Ollama |
+| **Plaud Webhook** | http://127.0.0.1:4001/webhook — receives Applaud `transcript_ready` events |
+| **Applaud** | http://127.0.0.1:44471 — Plaud sync daemon (polls Plaud API, fires webhooks) |
+
+> **Applaud path**: `start_brain.ps1` hardcodes the Applaud directory. Edit the `$ApplaudPath` variable at the top of the script if Applaud is cloned elsewhere.
+>
+> **Plaud setup**: In Applaud's web UI, set the webhook URL to `http://127.0.0.1:4001/webhook`. New Plaud transcripts will then land in the **Review** panel (`/review`) in the dashboard before entering the brain.
 
 ### How the integrated workflow runs
 
@@ -680,6 +694,7 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 | **REST API** | `supabase/functions/rest-api/index.ts` | All logic for the Dashboard |
 | **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude, ChatGPT, Perplexity, etc. |
 | **AI Worker** | `scripts/local-brain-worker.js` | Classification + entity graph extraction (Ollama) |
+| **Plaud Webhook** | `scripts/plaud-webhook.js` | Applaud → brain bridge; parses `---ENTRY---` blocks, runs Ollama SKIP/NEW/UPDATE triage, captures to `/capture-pending` for human review |
 | **Wiki Compiler** | `recipes/entity-wiki/generate-wiki.mjs` | On-demand and auto-triggered wiki generation |
 | **Wiki Synthesis** | `recipes/wiki-synthesis/scripts/synthesize-wiki.mjs` | Autobiography / topic wiki page generation |
 | **Score Thoughts** | `scripts/score-thoughts.mjs` | Heuristic quality scoring backfill |
@@ -700,7 +715,8 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 *   **Action Items pipeline**: The enrichment worker extracts `action_items` from every thought into metadata. The `/actions` dashboard page surfaces these as a triage inbox — each item can be dismissed (Done) or promoted to a Kanban task (→ Kanban, which creates a `type=task, status=backlog` thought). Action items are the discovery layer; Kanban is the execution layer. Also available via the `list_action_items` MCP tool.
 *   **Session context sharing**: `get_context_brief` and `resume` MCP tools let any AI client (Claude, ChatGPT, Perplexity) pull a live briefing from the database at session start, solving the cross-AI context copy-paste problem without any sync infrastructure.
 *   **Source-agnostic capture review**: `capture_review` MCP tool (replaces `fieldy_review`) lists recent auto-captured memories from any device — Fieldy, Plaud, or future auto-capture sources. Filter by source or see all.
+*   **Plaud capture triage**: Thoughts from Plaud land in a Review panel (`/review`) before entering the brain. `POST /capture-pending` stores them with `metadata.review_status: pending_review` — they are invisible to the wiki, Kanban, and action items pipeline until approved. The webhook pre-processes each `---ENTRY---` block from the Plaud template: TYPE and CONTEXT fields are parsed and set directly on the thought; classification defaults to `work` if the CONTEXT field is absent. UPDATE decisions (where Ollama decides a new entry should merge with an existing thought) synthesise the merge at webhook time and store the result as a pending thought — the original is never touched until the user approves in the Review panel, making reject always safe with nothing to restore.
 
 ---
 
-*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools, wiki MCP tools (search_wiki/read_wiki_page/get_entity_connections), improved edge extraction (typed relation vocabulary + entity-type constraints), persona synthesis script, MCP v1.4.0 (get_context_brief/resume/list_action_items/capture_review), Actions dashboard page with Done + Promote to Kanban triage.*
+*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools, wiki MCP tools (search_wiki/read_wiki_page/get_entity_connections), improved edge extraction (typed relation vocabulary + entity-type constraints), persona synthesis script, MCP v1.4.0 (get_context_brief/resume/list_action_items/capture_review), Actions dashboard page with Done + Promote to Kanban triage, Plaud/Applaud capture pipeline with Review triage panel (capture-pending gate, Ollama SKIP/NEW/UPDATE decisions, safe UPDATE handling, TYPE+CONTEXT parsing from template).*

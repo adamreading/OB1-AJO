@@ -85,6 +85,14 @@ When working in this repo as the AJO maintainer, be aware:
 - `wiki-wipe.mjs` — clear wiki_pages + entity health report
 - `reclassify-existing.js` — re-run Work/Personal classification
 - `synthesize-persona.mjs` — generate conceptual `topic-adam-*` wiki pages from semantic clusters; requires `OPENROUTER_API_KEY` + Ollama running. CLI: `node --env-file=.env scripts/synthesize-persona.mjs [--list|--lens <name>|--dry-run]`
+- `plaud-webhook.js` — Applaud → Open Brain webhook receiver (port 4001). Parses `---ENTRY---` blocks from Plaud's custom template, runs Ollama SKIP/NEW/UPDATE decisions per entry, and captures each to `/capture-pending` (pending human review). For UPDATE decisions, synthesises the merge via Ollama at capture time and stores the merged content in the pending thought — the original is never touched until approved in the Review panel.
+
+**Plaud capture pipeline**:
+- `start_brain.ps1` now launches 4 processes: Dashboard (port 3010), Brain Worker, Plaud Webhook (port 4001), Applaud (Plaud sync daemon).
+- `metadata.review_status: "pending_review"` is the review gate — thoughts with this flag are NOT inserted into `entity_extraction_queue` and therefore invisible to the wiki, Kanban, and action items pipeline until approved.
+- Use `POST /capture-pending` (not `/capture`) for any source that requires human triage before entering the brain.
+- `POST /review/approve` batch-approves: NEW decisions queue the thought for extraction + embedding; UPDATE decisions apply the pending thought's merged content to the original target thought, re-queue it, and delete the pending vessel.
+- The Review dashboard page (`/review`) shows all `source_type: plaud` thoughts with `review_status: pending_review`. Each row shows an `ollama_decision` badge (`NEW` or `→ #N` for updates), inline editable content/type/classification, per-row Pass/Delete, and bulk Pass/Delete. For UPDATE entries, the original content is available in a collapsible section for comparison before approving.
 
 **Upstream sync — MANDATORY PROCESS**:
 The AJO fork tracks `upstream https://github.com/NateBJones-Projects/OB1`. Never manually port upstream changes — always use git properly:
