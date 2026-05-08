@@ -446,6 +446,20 @@ async function upsertEdge(fromEntityId, toEntityId, relation, confidence) {
     toId = fromEntityId;
   }
 
+  // Blocklist check — user removed this edge previously, refuse to recreate it.
+  // Same id-ordering as above, so a single blocklist row blocks both directions
+  // for symmetric relations.
+  const { data: blocked } = await supabase
+    .from("edge_blocklist")
+    .select("relation")
+    .eq("from_entity_id", fromId)
+    .eq("to_entity_id", toId)
+    .eq("relation", relation)
+    .maybeSingle();
+  if (blocked) {
+    return { blocked: true };
+  }
+
   const { data: existing } = await supabase
     .from("edges")
     .select("id, support_count, confidence")
@@ -464,7 +478,7 @@ async function upsertEdge(fromEntityId, toEntityId, relation, confidence) {
       })
       .eq("id", existing.id);
     if (error) console.error(`Edge update failed for ${existing.id}:`, error.message);
-    return;
+    return { blocked: false };
   }
 
   const { error } = await supabase.from("edges").insert({
@@ -475,6 +489,7 @@ async function upsertEdge(fromEntityId, toEntityId, relation, confidence) {
     confidence,
   });
   if (error) console.error(`Edge insert failed for ${fromId} -> ${toId}:`, error.message);
+  return { blocked: false };
 }
 
 async function writeGraph(thoughtId, analysis) {
@@ -496,15 +511,25 @@ async function writeGraph(thoughtId, analysis) {
   }
 
   let edgeCount = 0;
+  let blockedCount = 0;
   for (const rel of analysis.relationships) {
     const fromId = entityIds.get(normalizeName(rel.from));
     const toId = entityIds.get(normalizeName(rel.to));
     if (!fromId || !toId || fromId === toId) continue;
-    await upsertEdge(fromId, toId, rel.relation, rel.confidence);
-    edgeCount++;
+    const result = await upsertEdge(fromId, toId, rel.relation, rel.confidence);
+    if (result?.blocked) blockedCount++;
+    else edgeCount++;
   }
 
-  return { entities: entityIds.size, relationships: edgeCount, skipped: false };
+  if (blockedCount > 0) {
+    // Diagnostic counter — tells the user which thoughts keep producing edges
+    // they've already blocklisted, so they know which thoughts to edit/split.
+    const { data: cur } = await supabase.from("thoughts").select("blocklist_hits").eq("id", thoughtId).maybeSingle();
+    const next = (cur?.blocklist_hits ?? 0) + blockedCount;
+    await supabase.from("thoughts").update({ blocklist_hits: next }).eq("id", thoughtId);
+  }
+
+  return { entities: entityIds.size, relationships: edgeCount, blocked: blockedCount, skipped: false };
 }
 
 async function updateThought(thoughtId, thought, analysis) {
@@ -584,7 +609,7 @@ async function processItem(queueItem) {
 
   console.log(
     `Done ${thoughtId.slice(0, 8)}: ${analysis.type}/${analysis.context}, ` +
-      `${graph.skipped ? "graph skipped" : `${graph.entities} entities, ${graph.relationships} relationships`}`,
+      `${graph.skipped ? "graph skipped" : `${graph.entities} entities, ${graph.relationships} relationships${graph.blocked ? `, ${graph.blocked} blocked` : ""}`}`,
   );
 }
 

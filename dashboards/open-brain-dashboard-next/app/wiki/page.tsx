@@ -403,6 +403,154 @@ function AliasModal({
   );
 }
 
+// ── Edit Relationships Modal ───────────────────────────────────────────────
+//
+// Lists every edge touching this entity (both directions). The ✕ button on
+// each row deletes the edge AND adds it to edge_blocklist so the worker
+// won't recreate it the next time a thought mentioning both entities is
+// processed. This is the user-facing fix for "edits make wrong edges worse".
+
+interface EdgeRow {
+  id: number;
+  from_entity_id: number;
+  to_entity_id: number;
+  relation: string;
+  support_count: number;
+  confidence: number | null;
+  direction: "out" | "in";
+  symmetric: boolean;
+  other: { id: number; canonical_name: string; entity_type: string };
+}
+
+function EdgesModal({
+  page,
+  onClose,
+  onEdgeRemoved,
+}: {
+  page: WikiPageDetail;
+  onClose: () => void;
+  onEdgeRemoved: () => void;
+}) {
+  const [edges, setEdges] = useState<EdgeRow[] | null>(null);
+  const [removing, setRemoving] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!page.entity_id) return;
+    fetch(`/api/entities/${page.entity_id}/edges`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d: { edges: EdgeRow[] }) => setEdges(d.edges || []))
+      .catch((e: Error) => setError(e.message));
+  }, [page.entity_id]);
+
+  const handleRemove = useCallback(async (edge: EdgeRow) => {
+    if (!page.entity_id) return;
+    setRemoving(edge.id);
+    setError(null);
+    try {
+      const res = await fetch(`/api/edges`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_entity_id: edge.from_entity_id,
+          to_entity_id: edge.to_entity_id,
+          relation: edge.relation,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      setEdges((prev) => (prev || []).filter((e) => e.id !== edge.id));
+      onEdgeRemoved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Remove failed");
+    } finally {
+      setRemoving(null);
+    }
+  }, [page.entity_id, onEdgeRemoved]);
+
+  // Group edges by relation for readable display
+  const grouped = (edges || []).reduce<Record<string, EdgeRow[]>>((acc, e) => {
+    (acc[e.relation] = acc[e.relation] || []).push(e);
+    return acc;
+  }, {});
+  const relations = Object.keys(grouped).sort((a, b) =>
+    grouped[b].reduce((s, e) => s + (e.support_count || 0), 0) -
+    grouped[a].reduce((s, e) => s + (e.support_count || 0), 0)
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="bg-bg-surface border border-border rounded-xl shadow-xl w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-5 border-b border-border">
+          <h3 className="text-sm font-semibold text-text-primary">
+            Relationships — {page.title}
+          </h3>
+          <button onClick={onClose} className="text-text-muted hover:text-text-secondary transition-colors text-lg leading-none">
+            ×
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5">
+          <p className="text-xs text-text-muted mb-4">
+            Removing an edge here also blocklists it. The worker will not recreate this relationship from extraction even if future thoughts mention both entities together. Use this for relationships the LLM keeps inferring incorrectly.
+          </p>
+
+          {edges === null && !error && (
+            <p className="text-xs text-text-muted">Loading edges…</p>
+          )}
+          {edges && edges.length === 0 && (
+            <p className="text-xs text-text-muted">No relationships on this entity yet.</p>
+          )}
+
+          {relations.map((rel) => (
+            <div key={rel} className="mb-4">
+              <h4 className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1.5">{rel}</h4>
+              <div className="flex flex-col gap-1">
+                {grouped[rel].map((e) => (
+                  <div
+                    key={e.id}
+                    className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-bg-elevated border border-border"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-text-muted text-xs shrink-0" title={e.symmetric ? "Symmetric relation" : `${e.direction === "out" ? "outgoing" : "incoming"}`}>
+                        {e.symmetric ? "↔" : e.direction === "out" ? "→" : "←"}
+                      </span>
+                      <span className="text-sm text-text-primary truncate" title={e.other.canonical_name}>
+                        {e.other.canonical_name}
+                      </span>
+                      <span className="text-xs text-text-muted shrink-0">
+                        ({e.other.entity_type}, {e.support_count} {e.support_count === 1 ? "thought" : "thoughts"})
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => handleRemove(e)}
+                      disabled={removing === e.id}
+                      className="px-2 py-0.5 rounded text-xs text-danger/70 hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-50 shrink-0"
+                      title="Remove this edge and add to blocklist so it doesn't come back"
+                    >
+                      {removing === e.id ? "…" : "✕ remove"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {error && <p className="mt-3 text-xs text-danger">{error}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Rename Modal ───────────────────────────────────────────────────────────
 
 function RenameModal({
@@ -702,6 +850,7 @@ function WikiPageInner() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [showAliasModal, setShowAliasModal] = useState(false);
+  const [showEdgesModal, setShowEdgesModal] = useState(false);
   const [showMergeModal, setShowMergeModal] = useState(false);
   const [showAbsorbModal, setShowAbsorbModal] = useState(false);
   const [showRenameModal, setShowRenameModal] = useState(false);
@@ -881,6 +1030,14 @@ function WikiPageInner() {
           onClose={() => setShowAliasModal(false)}
           onAliasAdded={handleAliasAdded}
           onAliasRemoved={handleAliasRemoved}
+        />
+      )}
+
+      {showEdgesModal && selected && (
+        <EdgesModal
+          page={selected}
+          onClose={() => setShowEdgesModal(false)}
+          onEdgeRemoved={() => { /* edge list refreshes locally; article regen comes on next worker tick */ }}
         />
       )}
 
@@ -1088,6 +1245,13 @@ function WikiPageInner() {
                         className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
                       >
                         Aliases {(selected.aliases ?? []).length > 0 ? `(${selected.aliases!.length})` : ""}
+                      </button>
+                      <button
+                        onClick={() => setShowEdgesModal(true)}
+                        title="Edit relationships — remove wrong edges and blocklist them"
+                        className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+                      >
+                        Edges
                       </button>
                       <button
                         onClick={() => setShowAbsorbModal(true)}

@@ -899,6 +899,150 @@ app.delete("/entity-blocklist", async (c) => {
   return c.json({ unblocked: true, entity_type, normalized_name }, 200, corsHeaders);
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// Edges — read, delete (with auto-blocklist), and edge_blocklist management
+// ────────────────────────────────────────────────────────────────────────────
+
+// Mirrors the worker's SYMMETRIC_RELATIONS set in scripts/local-brain-worker.js.
+// Symmetric relations are stored with from_entity_id < to_entity_id so a single
+// row blocks/represents both directions. Keep these in sync.
+const SYMMETRIC_RELATIONS = new Set([
+  "co_occurs_with", "related_to", "collaborates_with", "integrates_with", "alternative_to",
+]);
+function normalizeEdgeKey(fromId: number, toId: number, relation: string): { from: number; to: number } {
+  if (SYMMETRIC_RELATIONS.has(relation) && fromId > toId) return { from: toId, to: fromId };
+  return { from: fromId, to: toId };
+}
+
+// List all edges touching an entity, with the other entity's name/type joined.
+// Powers the dashboard's Edit Relationships panel.
+app.get("/entities/:id/edges", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!id || isNaN(id)) return c.json({ error: "Valid entity id required" }, 400, corsHeaders);
+
+  const [outRes, inRes] = await Promise.all([
+    supabase.from("edges")
+      .select("id, from_entity_id, to_entity_id, relation, support_count, confidence, updated_at")
+      .eq("from_entity_id", id),
+    supabase.from("edges")
+      .select("id, from_entity_id, to_entity_id, relation, support_count, confidence, updated_at")
+      .eq("to_entity_id", id),
+  ]);
+  if (outRes.error) return c.json({ error: outRes.error.message }, 500, corsHeaders);
+  if (inRes.error) return c.json({ error: inRes.error.message }, 500, corsHeaders);
+
+  // De-dup symmetric edges (where this entity is on both sides via different orderings is impossible,
+  // but the same edge could appear in both queries if both endpoints are this entity — guarded by the
+  // edge constraint upstream)
+  const seen = new Set<number>();
+  const all = [...(outRes.data || []), ...(inRes.data || [])].filter((e) => {
+    if (seen.has(e.id)) return false;
+    seen.add(e.id);
+    return true;
+  });
+
+  const otherIds = Array.from(new Set(all.flatMap((e) => [e.from_entity_id, e.to_entity_id]).filter((x) => x !== id)));
+  const nameMap = new Map<number, { canonical_name: string; entity_type: string }>();
+  if (otherIds.length > 0) {
+    const { data: ents } = await supabase
+      .from("entities")
+      .select("id, canonical_name, entity_type")
+      .in("id", otherIds);
+    for (const e of ents || []) nameMap.set(e.id, { canonical_name: e.canonical_name, entity_type: e.entity_type });
+  }
+
+  const edges = all.map((e) => {
+    const otherId = e.from_entity_id === id ? e.to_entity_id : e.from_entity_id;
+    const direction = e.from_entity_id === id ? "out" : "in";
+    const other = nameMap.get(otherId) || { canonical_name: `#${otherId}`, entity_type: "unknown" };
+    return {
+      id: e.id,
+      from_entity_id: e.from_entity_id,
+      to_entity_id: e.to_entity_id,
+      relation: e.relation,
+      support_count: e.support_count,
+      confidence: e.confidence,
+      direction,
+      other: { id: otherId, canonical_name: other.canonical_name, entity_type: other.entity_type },
+      symmetric: SYMMETRIC_RELATIONS.has(e.relation),
+    };
+  });
+
+  edges.sort((a, b) => (b.support_count ?? 0) - (a.support_count ?? 0));
+  return c.json({ edges }, 200, corsHeaders);
+});
+
+// Delete an edge AND add it to edge_blocklist so the worker won't recreate it.
+// This is the "✕ remove" action from the Edit Relationships panel.
+// Body: { from_entity_id, to_entity_id, relation }
+app.delete("/edges", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const fromIdRaw = Number(body.from_entity_id);
+  const toIdRaw = Number(body.to_entity_id);
+  const relation = typeof body.relation === "string" ? body.relation.trim() : "";
+  if (!fromIdRaw || !toIdRaw || !relation || isNaN(fromIdRaw) || isNaN(toIdRaw)) {
+    return c.json({ error: "from_entity_id, to_entity_id, relation required" }, 400, corsHeaders);
+  }
+  const { from, to } = normalizeEdgeKey(fromIdRaw, toIdRaw, relation);
+
+  await supabase.from("edge_blocklist").upsert({
+    from_entity_id: from,
+    to_entity_id: to,
+    relation,
+    reason: "user_removed",
+    blocked_at: new Date().toISOString(),
+  }, { onConflict: "from_entity_id,to_entity_id,relation" });
+
+  const { error } = await supabase.from("edges").delete()
+    .eq("from_entity_id", from)
+    .eq("to_entity_id", to)
+    .eq("relation", relation);
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+
+  return c.json({ deleted: true, blocklisted: true, from_entity_id: from, to_entity_id: to, relation }, 200, corsHeaders);
+});
+
+// List all blocked edges with entity names joined for display.
+app.get("/edge-blocklist", async (c) => {
+  const { data, error } = await supabase
+    .from("edge_blocklist")
+    .select("from_entity_id, to_entity_id, relation, reason, blocked_at")
+    .order("blocked_at", { ascending: false });
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+
+  const ids = Array.from(new Set((data || []).flatMap((r: any) => [r.from_entity_id, r.to_entity_id])));
+  const nameMap = new Map<number, string>();
+  if (ids.length > 0) {
+    const { data: ents } = await supabase.from("entities").select("id, canonical_name").in("id", ids);
+    for (const e of ents || []) nameMap.set(e.id, e.canonical_name);
+  }
+  const entries = (data || []).map((r: any) => ({
+    ...r,
+    from_name: nameMap.get(r.from_entity_id) ?? `#${r.from_entity_id}`,
+    to_name: nameMap.get(r.to_entity_id) ?? `#${r.to_entity_id}`,
+  }));
+  return c.json({ entries }, 200, corsHeaders);
+});
+
+// Unblock an edge so the worker can recreate it from extraction.
+// Body: { from_entity_id, to_entity_id, relation }
+app.delete("/edge-blocklist", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const fromIdRaw = Number(body.from_entity_id);
+  const toIdRaw = Number(body.to_entity_id);
+  const relation = typeof body.relation === "string" ? body.relation.trim() : "";
+  if (!fromIdRaw || !toIdRaw || !relation || isNaN(fromIdRaw) || isNaN(toIdRaw)) {
+    return c.json({ error: "from_entity_id, to_entity_id, relation required" }, 400, corsHeaders);
+  }
+  const { from, to } = normalizeEdgeKey(fromIdRaw, toIdRaw, relation);
+  const { error } = await supabase.from("edge_blocklist").delete()
+    .eq("from_entity_id", from)
+    .eq("to_entity_id", to)
+    .eq("relation", relation);
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  return c.json({ unblocked: true, from_entity_id: from, to_entity_id: to, relation }, 200, corsHeaders);
+});
+
 // Wiki pages — update curator notes only (never overwritten by auto-regeneration)
 app.patch("/wiki-pages/:slug/notes", async (c) => {
   const slug = c.req.param("slug");
