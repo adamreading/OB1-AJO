@@ -528,6 +528,50 @@ async function writeGraph(thoughtId, analysis) {
   return { entities: entityIds.size, relationships: edgeCount, blocked: blockedCount, skipped: false };
 }
 
+// Heuristic quality score — pure function, no DB calls. Lifted from
+// scripts/score-thoughts.mjs so every thought the worker processes gets a
+// real score instead of staying at the default 50. Keep these two in sync.
+function scoreThought(thought) {
+  const content = (thought.content || "").trim();
+  const metadata = thought.metadata || {};
+  const len = content.length;
+  let score;
+  if (len <= 10) score = 5;
+  else if (len <= 30) score = 15;
+  else if (len <= 75) score = 35;
+  else if (len <= 200) score = 52;
+  else if (len <= 500) score = 65;
+  else if (len <= 2000) score = 75;
+  else score = 82;
+  const words = content.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+  if (wordCount < 3) score -= 20;
+  else if (wordCount >= 50) score += 10;
+  else if (wordCount >= 15) score += 5;
+  const unique = new Set(words.map((w) => w.toLowerCase().replace(/[^a-z0-9]/g, "")).filter(Boolean));
+  const richness = wordCount > 0 ? unique.size / wordCount : 0;
+  if (richness >= 0.7) score += 8;
+  else if (richness >= 0.5) score += 4;
+  else if (richness < 0.3 && wordCount > 5) score -= 8;
+  const sentences = (content.match(/[.!?]+/g) || []).length;
+  if (sentences >= 3) score += 6;
+  else if (sentences >= 1) score += 3;
+  if (/^https?:\/\/\S+$/.test(content)) score -= 35;
+  else if (/^https?:\/\//.test(content) && wordCount < 6) score -= 20;
+  if (len > 10 && content === content.toUpperCase() && /[A-Z]/.test(content)) score -= 15;
+  const digits = (content.match(/\d/g) || []).length;
+  if (len > 5 && digits / len > 0.6) score -= 15;
+  // eslint-disable-next-line no-control-regex
+  const garbage = (content.match(/[\x00-\x1f\x7f-\x9f]/g) || []).length;
+  if (garbage > 3) score -= 25;
+  if (thought.type && thought.type !== "idea") score += 3;
+  if (thought.importance && thought.importance !== 3) score += 3;
+  if (Array.isArray(metadata.topics) && metadata.topics.length > 0) score += 5;
+  if (metadata.entities && typeof metadata.entities === "object" && Object.keys(metadata.entities).length > 0) score += 5;
+  if (metadata.summary && String(metadata.summary).length > 20) score += 4;
+  return Math.max(1, Math.min(100, Math.round(score)));
+}
+
 async function updateThought(thoughtId, thought, analysis) {
   const metadata = {
     ...(thought.metadata || {}),
@@ -537,10 +581,18 @@ async function updateThought(thoughtId, thought, analysis) {
     entity_extracted_at: new Date().toISOString(),
   };
 
+  const quality_score = scoreThought({
+    content: thought.content,
+    type: analysis.type,
+    importance: analysis.importance,
+    metadata: { ...metadata, summary: analysis.summary },
+  });
+
   const updates = {
     type: analysis.type,
     importance: analysis.importance,
     classification: analysis.context,
+    quality_score,
     updated_at: new Date().toISOString(),
     metadata,
   };
