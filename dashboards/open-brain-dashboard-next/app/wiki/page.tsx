@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ function TypeBadge({ page }: { page: WikiPageSummary }) {
   );
 }
 
-function MarkdownContent({ content, onWikiLink }: { content: string; onWikiLink?: (slug: string) => void }) {
+function MarkdownContent({ content, onWikiLink, entityMap }: { content: string; onWikiLink?: (slug: string) => void; entityMap?: Map<string, string> }) {
   const lines = content.split("\n");
   const elements: React.ReactNode[] = [];
   let listItems: string[] = [];
@@ -127,6 +127,16 @@ function MarkdownContent({ content, onWikiLink }: { content: string; onWikiLink?
       })
       // Legacy UUID citations [xxxxxxxx-xxxx-...] — styled but not linked (rebuild will replace with integer format)
       .replace(/\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/gi, '<span class="text-text-muted text-xs font-mono">[$1]</span>')
+      // Bare entity-name brackets like [M365 Copilot] or [AWS EC2] that the LLM
+      // emitted without the markdown link form. Auto-resolve to a wiki link
+      // when the inner text matches a known entity title or alias. Misses
+      // (random brackets) are returned as-is so we don't over-link prose.
+      .replace(/\[([^\]]+)\]/g, (match, inner) => {
+        if (!entityMap) return match;
+        const slug = entityMap.get(String(inner).trim().toLowerCase());
+        if (!slug) return match;
+        return `<a href="/wiki?slug=${slug}" data-wiki-slug="true" class="text-violet hover:underline">${inner}</a>`;
+      })
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
       .replace(/\*(.+?)\*/g, "<em>$1</em>")
       .replace(/`(.+?)`/g, "<code class=\"bg-bg-elevated px-1 rounded text-xs\">$1</code>");
@@ -1030,6 +1040,20 @@ function WikiPageInner() {
   const entityPages = filteredPages.filter((p) => p.type === "entity");
   const topicPages = filteredPages.filter((p) => p.type === "topic");
 
+  // Lowercase title/alias → slug, for auto-resolving bare [Entity Name] brackets
+  // that the wiki compiler emits without markdown link syntax. Built once per
+  // pages-list change so render cost is constant.
+  const entityMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of pages) {
+      map.set(p.title.toLowerCase(), p.slug);
+      for (const alias of p.aliases ?? []) {
+        if (alias) map.set(alias.toLowerCase(), p.slug);
+      }
+    }
+    return map;
+  }, [pages]);
+
   return (
     <>
       {showAliasModal && selected && (
@@ -1307,7 +1331,7 @@ function WikiPageInner() {
 
               {/* Content area */}
               <div className="flex-1 overflow-y-auto px-6 py-4">
-                <MarkdownContent content={selected.content} onWikiLink={loadDetail} />
+                <MarkdownContent content={selected.content} onWikiLink={loadDetail} entityMap={entityMap} />
 
                 {/* Curator notes section */}
                 <div className="mt-6 border-t border-border pt-4">
