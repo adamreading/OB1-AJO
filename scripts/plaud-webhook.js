@@ -259,8 +259,12 @@ async function processRecording(payload) {
   const recordingId = payload.recording?.id;
   const filename = payload.recording?.filename ?? "unknown";
 
-  if (recordingId && processed.has(recordingId)) {
-    console.log(`[plaud-webhook] Already processed: ${filename} — skipping`);
+  // Dedup by summary file path so the same recording can be re-processed when a
+  // new template summary (consumer_note) is applied. Different template versions
+  // get a unique data_id suffix in the filename, so they are treated as distinct.
+  const dedupeKey = payload.files?.summary || recordingId;
+  if (dedupeKey && processed.has(dedupeKey)) {
+    console.log(`[plaud-webhook] Already processed: ${filename} (${dedupeKey}) — skipping`);
     return;
   }
 
@@ -314,8 +318,8 @@ async function processRecording(payload) {
     }
   }
 
-  if (recordingId) {
-    processed.add(recordingId);
+  if (dedupeKey) {
+    processed.add(dedupeKey);
     saveProcessed(processed);
   }
 }

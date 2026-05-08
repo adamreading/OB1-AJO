@@ -6,6 +6,8 @@ node_modules/
 .agent/
 .claude.json
 .claude/worktrees/
+.claude/settings.json
+.claude/settings.local.json
 
 # Python caches
 __pycache__/
@@ -20,6 +22,7 @@ credentials.json
 token.json
 gmail-sync-log.json
 sync-log.json
+scripts/.plaud-processed.json
 
 # Build artifacts
 deno.lock
