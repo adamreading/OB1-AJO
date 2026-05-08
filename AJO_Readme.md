@@ -563,19 +563,21 @@ BRAIN_KEY="the-same-password-as-above"
 
 ## 🚀 Phase 6: Launching
 
-Run the unified start script from the project root. This launches all four processes in separate PowerShell windows.
+Run the unified start script from the project root. This launches all four processes inside a single Windows Terminal window using **psmux** with a 2×2 pane layout — easier to monitor than four scattered PowerShell windows.
 
 ```powershell
 .\start_brain.ps1
 ```
 
-| Process | URL / Notes |
-|---------|-------------|
-| **Dashboard** (Next.js) | http://localhost:3010 |
-| **Brain Worker** | Background window — classification + entity extraction via Ollama |
-| **Plaud Webhook** | http://127.0.0.1:4001/webhook — receives Applaud `transcript_ready` events |
-| **Applaud** | http://127.0.0.1:44471 — Plaud sync daemon (polls Plaud API, fires webhooks) |
+| Pane | Process | URL / Notes |
+|------|---------|-------------|
+| Top-left | **Dashboard** (Next.js) | http://localhost:3010 |
+| Top-right | **Plaud Webhook** | http://127.0.0.1:4001/webhook — receives Applaud `transcript_ready` events |
+| Bottom-left | **Brain Worker** | classification + entity extraction via Ollama |
+| Bottom-right | **Applaud** | http://127.0.0.1:44471 — Plaud sync daemon (polls Plaud API, fires webhooks) |
 
+> **Prerequisites**: `psmux` and Windows Terminal (`wt.exe`) must be on the system. Install psmux via `winget install psmux` (or equivalent). Paths to `psmux`, `wt`, and `powershell.exe` are pinned at the top of `start_brain.ps1` — edit if your install locations differ.
+>
 > **Applaud path**: `start_brain.ps1` hardcodes the Applaud directory. Edit the `$ApplaudPath` variable at the top of the script if Applaud is cloned elsewhere.
 >
 > **Plaud setup**: In Applaud's web UI, set the webhook URL to `http://127.0.0.1:4001/webhook`. New Plaud transcripts will then land in the **Review** panel (`/review`) in the dashboard before entering the brain.

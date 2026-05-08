@@ -88,7 +88,7 @@ When working in this repo as the AJO maintainer, be aware:
 - `plaud-webhook.js` — Applaud → Open Brain webhook receiver (port 4001). Parses `---ENTRY---` blocks from Plaud's custom template, runs Ollama SKIP/NEW/UPDATE decisions per entry, and captures each to `/capture-pending` (pending human review). For UPDATE decisions, synthesises the merge via Ollama at capture time and stores the merged content in the pending thought — the original is never touched until approved in the Review panel.
 
 **Plaud capture pipeline**:
-- `start_brain.ps1` now launches 4 processes: Dashboard (port 3010), Brain Worker, Plaud Webhook (port 4001), Applaud (Plaud sync daemon).
+- `start_brain.ps1` launches 4 processes in a single Windows Terminal window via `psmux` (2×2 pane layout): Dashboard top-left (port 3010), Plaud Webhook top-right (port 4001), Brain Worker bottom-left, Applaud bottom-right (Plaud sync daemon, port 44471). Requires `psmux` + `wt.exe` installed; paths pinned at top of script.
 - `metadata.review_status: "pending_review"` is the review gate — thoughts with this flag are NOT inserted into `entity_extraction_queue` and therefore invisible to the wiki, Kanban, and action items pipeline until approved.
 - Use `POST /capture-pending` (not `/capture`) for any source that requires human triage before entering the brain.
 - `POST /review/approve` batch-approves: NEW decisions queue the thought for extraction + embedding; UPDATE decisions apply the pending thought's merged content to the original target thought, re-queue it, and delete the pending vessel.
