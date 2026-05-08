@@ -408,7 +408,7 @@ app.post("/capture", async (c) => {
 
 // Capture-pending — ingest from Plaud without queueing for processing (waits for review)
 app.post("/capture-pending", async (c) => {
-  const { content, source_type, ollama_decision, update_target_id, original_content, type, classification } = await c.req.json();
+  const { content, source_type, ollama_decision, update_target_id, original_content, type, classification, action_items } = await c.req.json();
   if (!content?.trim()) return c.json({ error: "content is required" }, 400);
 
   const trimmed = content.trim();
@@ -435,6 +435,9 @@ app.post("/capture-pending", async (c) => {
   if (ollama_decision) meta.ollama_decision = ollama_decision;
   if (update_target_id != null) meta.update_target_id = update_target_id;
   if (original_content) meta.original_content = original_content;
+  if (Array.isArray(action_items) && action_items.length > 0) {
+    meta.action_items = action_items.filter((a: unknown) => typeof a === "string" && a.trim().length > 0);
+  }
 
   const VALID_TYPES = ["task","idea","observation","reference","person_note","decision","lesson","meeting","journal"];
   const resolvedType = (typeof type === "string" && VALID_TYPES.includes(type)) ? type : "observation";
