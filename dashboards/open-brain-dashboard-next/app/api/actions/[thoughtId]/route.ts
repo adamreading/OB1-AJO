@@ -77,13 +77,21 @@ export async function PATCH(
     if (action === "promote") {
       // Create a new task thought from the action item text
       const captured = await restPost(apiKey, "/capture", { content: itemText });
-      // Promote to task on backlog
+      // Promote to task on backlog. Record provenance so the new task can show
+      // a "Source thought" link back to the capture/meeting it came from.
+      // Without this the task is orphaned the moment the action item is
+      // removed from the source thought (which we do below).
       const classification = thought.metadata?.classification ?? "work";
       await restPut(apiKey, `/thought/${captured.thought_id}`, {
         type: "task",
         status: "backlog",
         importance: thought.importance ?? 3,
-        metadata: { classification },
+        metadata: {
+          classification,
+          source_thought_id: thought.id,        // serial_id of the parent
+          source_action_item: itemText,         // the exact line text — handy if the parent's content is long
+          promoted_at: new Date().toISOString(),
+        },
       });
       promotedId = captured.thought_id;
     }

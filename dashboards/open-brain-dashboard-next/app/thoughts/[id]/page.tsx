@@ -106,6 +106,26 @@ export default async function ThoughtDetailPage({
         <ThoughtDeleteButton deleteAction={deleteAction} />
       </div>
 
+      {/* Source thought — present when this thought was promoted from an
+          action item on another thought. Lets the user navigate back to the
+          meeting/capture that produced this task. */}
+      {meta.source_thought_id !== undefined && meta.source_thought_id !== null && (
+        <div className="bg-bg-surface border border-border rounded-lg p-3 flex items-center gap-2 text-sm">
+          <span className="text-text-muted">From action item on:</span>
+          <Link
+            href={`/thoughts/${meta.source_thought_id}`}
+            className="text-violet hover:underline font-mono"
+          >
+            #{String(meta.source_thought_id)}
+          </Link>
+          {typeof meta.promoted_at === "string" && (
+            <span className="text-xs text-text-muted ml-auto">
+              promoted <FormattedDate date={meta.promoted_at} />
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Content + Edit */}
       <ThoughtEditor thought={thought} editAction={editAction} />
 
