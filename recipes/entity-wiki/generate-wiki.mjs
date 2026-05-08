@@ -464,7 +464,11 @@ Write well-structured markdown with these sections in order:
 ## Timeline (chronological, most recent first, max 8 items),
 ## Relationships, ## Open Questions (3-5 genuine gaps).
 
-Ground every claim in the input snippets. Cite thought ids as [#42] (hash + integer, e.g. [#7], [#142]). Always include the # — never write [42] without it. Citations go inline after the claim, not as standalone list items.
+CITATIONS — MANDATORY:
+Every claim must cite the thought ids it came from. Use the format [#42] (hash + integer, e.g. [#7], [#142]). Always include the # — never write [42] without it. Citations go inline at the END of the claim, not as standalone list items. For multiple sources, list each separately like "[#7] [#42]" — do NOT combine into "[#7, #42]".
+
+EVERY bullet in Key Facts MUST end with at least one citation. EVERY entry in Timeline MUST end with at least one citation. EVERY question in Open Questions MUST cite the thought it derives from. Bullets without citations are invalid output. If you cannot cite a claim, omit it.
+
 Skip sections with no material rather than filling with generic text.
 
 CURATOR NOTES: If the STRUCTURE block contains a "curator_notes" field, treat it as
