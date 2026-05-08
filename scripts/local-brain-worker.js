@@ -438,7 +438,12 @@ async function linkThoughtEntity(thoughtId, entityId, confidence) {
   if (error) console.error(`Thought/entity link failed for ${thoughtId} -> ${entityId}:`, error.message);
 }
 
-async function upsertEdge(fromEntityId, toEntityId, relation, confidence) {
+// Layer 2: writeProvenanceEdge inserts a row into thought_entity_edges. The
+// SQL trigger trg_maintain_edge_support_count maintains edges.support_count
+// and confidence as derived aggregates over thought_entity_edges. Blocklist is
+// consulted client-side to skip provenance writes for user-removed edges so
+// the edge truly stays gone.
+async function writeProvenanceEdge(thoughtId, fromEntityId, toEntityId, relation, confidence) {
   let fromId = fromEntityId;
   let toId = toEntityId;
   if (SYMMETRIC_RELATIONS.has(relation) && fromId > toId) {
@@ -446,9 +451,8 @@ async function upsertEdge(fromEntityId, toEntityId, relation, confidence) {
     toId = fromEntityId;
   }
 
-  // Blocklist check — user removed this edge previously, refuse to recreate it.
-  // Same id-ordering as above, so a single blocklist row blocks both directions
-  // for symmetric relations.
+  // Blocklist check — same lower-id-first convention used by upsertEdge so a
+  // single blocklist row covers both directions for symmetric relations.
   const { data: blocked } = await supabase
     .from("edge_blocklist")
     .select("relation")
@@ -460,35 +464,20 @@ async function upsertEdge(fromEntityId, toEntityId, relation, confidence) {
     return { blocked: true };
   }
 
-  const { data: existing } = await supabase
-    .from("edges")
-    .select("id, support_count, confidence")
-    .eq("from_entity_id", fromId)
-    .eq("to_entity_id", toId)
-    .eq("relation", relation)
-    .maybeSingle();
-
-  if (existing) {
-    const { error } = await supabase
-      .from("edges")
-      .update({
-        support_count: (existing.support_count || 1) + 1,
-        confidence: Math.max(confidence, Number(existing.confidence || 0)),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", existing.id);
-    if (error) console.error(`Edge update failed for ${existing.id}:`, error.message);
-    return { blocked: false };
-  }
-
-  const { error } = await supabase.from("edges").insert({
+  // Insert provenance row. Trigger recomputes count(*) and upserts edges row.
+  // PRIMARY KEY (thought_id, from, to, relation) means this is naturally
+  // idempotent for the same thought emitting the same triple multiple times.
+  const { error } = await supabase.from("thought_entity_edges").upsert({
+    thought_id: thoughtId,
     from_entity_id: fromId,
     to_entity_id: toId,
     relation,
-    support_count: 1,
     confidence,
-  });
-  if (error) console.error(`Edge insert failed for ${fromId} -> ${toId}:`, error.message);
+  }, { onConflict: "thought_id,from_entity_id,to_entity_id,relation" });
+  if (error) {
+    console.error(`thought_entity_edges insert failed for ${thoughtId}: ${fromId}→${toId}/${relation}:`, error.message);
+    return { blocked: false, error: true };
+  }
   return { blocked: false };
 }
 
@@ -500,6 +489,13 @@ async function writeGraph(thoughtId, analysis) {
     .delete()
     .eq("thought_id", thoughtId)
     .eq("source", "ajo_local_worker");
+
+  // Layer 2: clear this thought's edge contributions BEFORE re-extraction.
+  // The trigger on thought_entity_edges DELETE will recompute support_count
+  // for each affected (from, to, relation) triple — drops the count for any
+  // edge this thought used to support. Drops to zero → edge auto-deletes
+  // (unless an endpoint is pinned, per the trigger's pin protection).
+  await supabase.from("thought_entity_edges").delete().eq("thought_id", thoughtId);
 
   const entityIds = new Map();
   for (const entity of analysis.entities) {
@@ -516,9 +512,9 @@ async function writeGraph(thoughtId, analysis) {
     const fromId = entityIds.get(normalizeName(rel.from));
     const toId = entityIds.get(normalizeName(rel.to));
     if (!fromId || !toId || fromId === toId) continue;
-    const result = await upsertEdge(fromId, toId, rel.relation, rel.confidence);
+    const result = await writeProvenanceEdge(thoughtId, fromId, toId, rel.relation, rel.confidence);
     if (result?.blocked) blockedCount++;
-    else edgeCount++;
+    else if (!result?.error) edgeCount++;
   }
 
   if (blockedCount > 0) {

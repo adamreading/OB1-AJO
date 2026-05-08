@@ -993,6 +993,16 @@ app.delete("/edges", async (c) => {
     blocked_at: new Date().toISOString(),
   }, { onConflict: "from_entity_id,to_entity_id,relation" });
 
+  // Layer 2: clear provenance rows. The trigger on thought_entity_edges DELETE
+  // will recompute support_count to 0 and delete the edges row (unless an
+  // endpoint is pinned, in which case the edges row is kept at support=0 —
+  // that's intentional, but the explicit delete below ensures it's gone for
+  // user-removed edges since the user clearly doesn't want it.
+  await supabase.from("thought_entity_edges").delete()
+    .eq("from_entity_id", from)
+    .eq("to_entity_id", to)
+    .eq("relation", relation);
+
   const { error } = await supabase.from("edges").delete()
     .eq("from_entity_id", from)
     .eq("to_entity_id", to)

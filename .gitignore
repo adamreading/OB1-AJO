@@ -23,6 +23,9 @@ token.json
 gmail-sync-log.json
 sync-log.json
 scripts/.plaud-processed.json
+scripts/edge-snapshots/
+.claude/scheduled_tasks.lock
+start_brain.old
 
 # Build artifacts
 deno.lock
