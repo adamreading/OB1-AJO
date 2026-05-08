@@ -270,6 +270,18 @@ export function KanbanCardModal({
               <span>Topics: {topics.join(", ")}</span>
             )}
             <span>ID: {thought.id}</span>
+            {thought.metadata?.source_thought_id !== undefined &&
+              thought.metadata?.source_thought_id !== null && (
+                <span>
+                  From:{" "}
+                  <a
+                    href={`/thoughts/${thought.metadata.source_thought_id}`}
+                    className="text-violet hover:underline font-mono"
+                  >
+                    #{String(thought.metadata.source_thought_id)}
+                  </a>
+                </span>
+              )}
           </div>
         </div>
 

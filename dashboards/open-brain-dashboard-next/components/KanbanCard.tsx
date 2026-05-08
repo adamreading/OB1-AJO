@@ -52,6 +52,8 @@ export function KanbanCard({
   const topics = Array.isArray(thought.metadata?.topics)
     ? (thought.metadata.topics as string[]).slice(0, 2)
     : [];
+  const sourceThoughtId = thought.metadata?.source_thought_id;
+  const hasSource = sourceThoughtId !== undefined && sourceThoughtId !== null;
 
   const context = getThoughtContext(thought);
   const isWork = context === "work";
@@ -106,6 +108,17 @@ export function KanbanCard({
           ))}
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {hasSource && (
+            <a
+              href={`/thoughts/${sourceThoughtId}`}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              title={`From action item on thought #${sourceThoughtId}`}
+              className="text-[10px] text-violet/70 hover:text-violet hover:underline font-mono"
+            >
+              ← #{String(sourceThoughtId)}
+            </a>
+          )}
           <span className="text-[10px] text-text-muted">
             {formatAge(thought.created_at)}
           </span>
