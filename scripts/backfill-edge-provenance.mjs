@@ -117,12 +117,20 @@ for (let i = 0; i < edges.length; i++) {
       relation: e.relation,
       confidence: e.confidence,
     }));
-    const { error } = await sb.from("thought_entity_edges").upsert(rows, {
-      onConflict: "thought_id,from_entity_id,to_entity_id,relation",
-    });
+    // Plain insert — backfill iterates edges once so duplicates shouldn't occur.
+    // If a conflict does happen, fall through and report.
+    const { error } = await sb.from("thought_entity_edges").insert(rows);
     if (error) {
-      console.error(`  insert failed for edge #${e.id}: ${error.message}`);
-      continue;
+      // Tolerate the rare duplicate by retrying row-by-row, skipping conflicts.
+      let recovered = 0;
+      for (const row of rows) {
+        const { error: e2 } = await sb.from("thought_entity_edges").insert(row);
+        if (!e2) recovered++;
+      }
+      if (recovered === 0) {
+        console.error(`  insert failed for edge #${e.id}: ${error.message}`);
+        continue;
+      }
     }
   }
   stats.backfilled++;
