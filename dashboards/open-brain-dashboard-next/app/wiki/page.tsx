@@ -115,8 +115,16 @@ function MarkdownContent({ content, onWikiLink }: { content: string; onWikiLink?
         const extra = u.startsWith("/wiki?slug=") ? ' data-wiki-slug="true"' : '';
         return `<a href="${safe}"${extra} class="text-violet hover:underline">${t}</a>`;
       })
-      // Thought citation links [#NNN] or [NNN] — support counts use (N) so [N] is safe to match
-      .replace(/\[#?(\d+)\]/g, '<a href="/thoughts/$1" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#$1]</a>')
+      // Thought citation links — single [#NN]/[NN] AND multi [#164, #167, #170].
+      // Single regex pass so the second replace can't re-match the first's output
+      // and produce nested anchor tags. The LLM sometimes groups citations into
+      // one bracket; each id becomes its own link, joined by commas.
+      .replace(/\[(#?\d+(?:\s*,\s*#?\d+)*)\]/g, (_match, inner) => {
+        const ids = inner.split(/\s*,\s*/).map((s: string) => s.replace(/^#/, ""));
+        return ids
+          .map((id: string) => `<a href="/thoughts/${id}" class="text-violet/70 hover:text-violet hover:underline text-xs font-mono">[#${id}]</a>`)
+          .join(ids.length > 1 ? ", " : "");
+      })
       // Legacy UUID citations [xxxxxxxx-xxxx-...] — styled but not linked (rebuild will replace with integer format)
       .replace(/\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/gi, '<span class="text-text-muted text-xs font-mono">[$1]</span>')
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
