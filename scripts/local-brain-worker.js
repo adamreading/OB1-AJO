@@ -22,6 +22,7 @@ const MODEL = process.env.OLLAMA_MODEL || "qwen3:30b";
 const POLL_MS = Number(process.env.LOCAL_WORKER_POLL_MS || 10000);
 const INITIAL_KANBAN_STATUS = process.env.KANBAN_INITIAL_STATUS || "backlog";
 const WORKER_VERSION = "ajo-local-brain-worker-v2";
+const MIN_LINKED_FOR_WIKI = Number(process.env.MIN_LINKED_FOR_WIKI || 3);
 const WIKI_SCRIPT = path.join(__dirname, "../recipes/entity-wiki/generate-wiki.mjs");
 const WIKI_REPO_ROOT = path.join(__dirname, "..");
 
@@ -384,6 +385,21 @@ async function upsertEntity(entity) {
     }
   }
 
+  // 4. Blocklist check — entity was previously deleted or merged. Refuse to
+  //    re-create it. Aliases/normalized/generic-suffix above all short-circuit
+  //    before this, so a merged-then-aliased name still resolves to the
+  //    surviving entity. Only brand-new creation is gated here.
+  const { data: blocked } = await supabase
+    .from("entity_blocklist")
+    .select("reason")
+    .eq("entity_type", entity.type)
+    .eq("normalized_name", normalized)
+    .maybeSingle();
+  if (blocked) {
+    console.log(`[blocklist] Skipping "${entity.name}" (${entity.type}) — previously ${blocked.reason || "removed"}`);
+    return null;
+  }
+
   const { data, error } = await supabase
     .from("entities")
     .upsert(
@@ -572,6 +588,18 @@ async function processItem(queueItem) {
   );
 }
 
+async function filterEntitiesByLinkCount(entityIds, minLinked) {
+  const eligible = [];
+  for (const id of entityIds) {
+    const { count } = await supabase
+      .from("thought_entities")
+      .select("thought_id", { count: "exact", head: true })
+      .eq("entity_id", id);
+    if ((count ?? 0) >= minLinked) eligible.push(id);
+  }
+  return eligible;
+}
+
 function spawnWiki(entityId) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [WIKI_SCRIPT, "--id", String(entityId)], {
@@ -603,9 +631,19 @@ async function processQueue() {
         if (dirtyEntityIds.size > 0) {
           const ids = [...dirtyEntityIds];
           dirtyEntityIds.clear();
-          console.log(`[wiki] Queue drained — regenerating wiki for ${ids.length} entit${ids.length === 1 ? "y" : "ies"}...`);
-          for (const id of ids) await spawnWiki(id);
-          console.log("[wiki] Done.");
+          // Filter to entities that actually have enough linked thoughts to be
+          // worth a wiki page. Single-mention entities create noise; the page
+          // can be generated later once the entity accumulates enough material.
+          const eligible = await filterEntitiesByLinkCount(ids, MIN_LINKED_FOR_WIKI);
+          const skipped = ids.length - eligible.length;
+          if (skipped > 0) {
+            console.log(`[wiki] Skipping ${skipped} entit${skipped === 1 ? "y" : "ies"} below min-linked threshold (${MIN_LINKED_FOR_WIKI})`);
+          }
+          if (eligible.length > 0) {
+            console.log(`[wiki] Queue drained — regenerating wiki for ${eligible.length} entit${eligible.length === 1 ? "y" : "ies"}...`);
+            for (const id of eligible) await spawnWiki(id);
+            console.log("[wiki] Done.");
+          }
         }
         console.log(`Queue empty. Waiting ${Math.round(POLL_MS / 1000)}s...`);
         await sleep(POLL_MS);

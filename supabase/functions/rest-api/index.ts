@@ -842,9 +842,25 @@ app.patch("/entities/:id", async (c) => {
 });
 
 // Entities — delete (wiki_pages deleted explicitly; thought_entities + edges cascade)
+// Adds (entity_type, normalized_name) to entity_blocklist so the local worker
+// will not recreate this entity from thoughts that mention it. Aliases on other
+// entities still resolve before the blocklist check, so merges/aliases survive.
 app.delete("/entities/:id", async (c) => {
   const id = Number(c.req.param("id"));
   if (!id || isNaN(id)) return c.json({ error: "Valid entity id required" }, 400, corsHeaders);
+
+  const { data: entity } = await supabase
+    .from("entities").select("entity_type, normalized_name").eq("id", id).maybeSingle();
+
+  if (entity?.entity_type && entity?.normalized_name) {
+    await supabase.from("entity_blocklist")
+      .upsert({
+        entity_type: entity.entity_type,
+        normalized_name: entity.normalized_name,
+        reason: "deleted",
+        blocked_at: new Date().toISOString(),
+      }, { onConflict: "entity_type,normalized_name" });
+  }
 
   // wiki_pages FK is SET NULL so it won't cascade — delete it first
   await supabase.from("wiki_pages").delete().eq("entity_id", id);
@@ -853,6 +869,34 @@ app.delete("/entities/:id", async (c) => {
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
 
   return c.json({ deleted: true, id }, 200, corsHeaders);
+});
+
+// Entity blocklist — list all blocked names (deleted/merged sources)
+app.get("/entity-blocklist", async (c) => {
+  const { data, error } = await supabase
+    .from("entity_blocklist")
+    .select("entity_type, normalized_name, reason, blocked_at")
+    .order("blocked_at", { ascending: false });
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  return c.json({ entries: data || [] }, 200, corsHeaders);
+});
+
+// Entity blocklist — unblock so the worker can re-extract this name. Use this
+// if a delete was a mistake or the name now refers to a genuinely new entity.
+app.delete("/entity-blocklist", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const entity_type = typeof body.entity_type === "string" ? body.entity_type.trim() : "";
+  const normalized_name = typeof body.normalized_name === "string" ? body.normalized_name.trim().toLowerCase() : "";
+  if (!entity_type || !normalized_name) {
+    return c.json({ error: "entity_type and normalized_name (string) required" }, 400, corsHeaders);
+  }
+  const { error } = await supabase
+    .from("entity_blocklist")
+    .delete()
+    .eq("entity_type", entity_type)
+    .eq("normalized_name", normalized_name);
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  return c.json({ unblocked: true, entity_type, normalized_name }, 200, corsHeaders);
 });
 
 // Wiki pages — update curator notes only (never overwritten by auto-regeneration)
@@ -918,7 +962,7 @@ app.post("/entities/:id/merge", async (c) => {
   }
 
   const { data: source } = await supabase
-    .from("entities").select("canonical_name, aliases").eq("id", sourceId).maybeSingle();
+    .from("entities").select("canonical_name, aliases, entity_type, normalized_name").eq("id", sourceId).maybeSingle();
   if (!source) return c.json({ error: "Source entity not found" }, 404, corsHeaders);
 
   const { data: target } = await supabase
@@ -963,6 +1007,20 @@ app.post("/entities/:id/merge", async (c) => {
   await supabase.from("entities")
     .update({ aliases: combined, updated_at: new Date().toISOString() })
     .eq("id", targetId);
+
+  // Block the source name from being re-extracted as a new entity. Aliases on
+  // the target now include the source's canonical_name, so when the worker
+  // sees that name in a thought, the alias check resolves to the target BEFORE
+  // the blocklist is consulted — merges still link correctly.
+  if (source.entity_type && source.normalized_name) {
+    await supabase.from("entity_blocklist")
+      .upsert({
+        entity_type: source.entity_type,
+        normalized_name: source.normalized_name,
+        reason: "merged",
+        blocked_at: new Date().toISOString(),
+      }, { onConflict: "entity_type,normalized_name" });
+  }
 
   // Delete source wiki page + entity
   await supabase.from("wiki_pages").delete().eq("entity_id", sourceId);
