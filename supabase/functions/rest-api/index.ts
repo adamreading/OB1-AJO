@@ -999,7 +999,30 @@ app.delete("/edges", async (c) => {
     .eq("relation", relation);
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
 
-  return c.json({ deleted: true, blocklisted: true, from_entity_id: from, to_entity_id: to, relation }, 200, corsHeaders);
+  // Re-queue one thought from each affected entity so the local worker spawns
+  // wiki regeneration. Without this, the article markdown stays stale — the
+  // edges table is live and accurate, but the cached wiki content still shows
+  // the deleted relation until something triggers a recompile.
+  for (const entityId of [from, to]) {
+    const { data: link } = await supabase
+      .from("thought_entities")
+      .select("thought_id")
+      .eq("entity_id", entityId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (link?.thought_id) {
+      await supabase.from("entity_extraction_queue").upsert({
+        thought_id: link.thought_id,
+        status: "pending",
+        attempt_count: 0,
+        last_error: null,
+        queued_at: new Date().toISOString(),
+      }, { onConflict: "thought_id" });
+    }
+  }
+
+  return c.json({ deleted: true, blocklisted: true, from_entity_id: from, to_entity_id: to, relation, requeued: true }, 200, corsHeaders);
 });
 
 // List all blocked edges with entity names joined for display.
