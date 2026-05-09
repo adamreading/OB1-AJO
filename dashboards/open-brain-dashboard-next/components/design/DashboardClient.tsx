@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ThoughtGraph, type ConstellationNode, type ConstellationEdge } from "./ThoughtGraph";
+import {
+  ThoughtGraph,
+  type ConstellationNode,
+  type ConstellationEdge,
+  type EntityTypeInfo,
+} from "./ThoughtGraph";
 import { Card, SegBar, Sparkline, TypeChip, TypeDonut } from "./Atoms";
 import { AddToBrain } from "@/components/AddToBrain";
 import type { Thought } from "@/lib/types";
@@ -69,18 +74,32 @@ export function DashboardClient({
   }>({ nodes: [], edges: [], strongest: null });
   const [graphLoading, setGraphLoading] = useState(true);
   const [minWeight, setMinWeight] = useState(2);
-  const [hiddenCategories, setHiddenCategories] = useState<Set<string>>(
-    new Set()
-  );
+  const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
+  const [entityTypes, setEntityTypes] = useState<EntityTypeInfo[]>([]);
 
-  function toggleCategory(cat: string) {
-    setHiddenCategories((prev) => {
+  function toggleType(t: string) {
+    setHiddenTypes((prev) => {
       const next = new Set(prev);
-      if (next.has(cat)) next.delete(cat);
-      else next.add(cat);
+      if (next.has(t)) next.delete(t);
+      else next.add(t);
       return next;
     });
   }
+
+  // Pull the dynamic entity-type catalog so the legend matches the DB
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/entity-types")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d?.types) return;
+        setEntityTypes(d.types as EntityTypeInfo[]);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Reflect filter changes in the URL so server-rendered KPIs update on hard nav
   useEffect(() => {
@@ -330,24 +349,17 @@ export function DashboardClient({
                 flexWrap: "wrap",
               }}
             >
-              {(
-                [
-                  ["#9d83ff", "people"],
-                  ["#6ca6ff", "projects"],
-                  ["#ff9650", "orgs"],
-                  ["#50c8c8", "tools"],
-                ] as const
-              ).map(([c, l]) => {
-                const hidden = hiddenCategories.has(l);
+              {entityTypes.map((t) => {
+                const hidden = hiddenTypes.has(t.entity_type);
                 return (
                   <button
-                    key={l}
+                    key={t.entity_type}
                     type="button"
-                    onClick={() => toggleCategory(l)}
+                    onClick={() => toggleType(t.entity_type)}
                     title={
                       hidden
-                        ? `Show ${l}`
-                        : `Hide ${l} — click to filter the graph`
+                        ? `Show ${t.label}`
+                        : `Hide ${t.label} — click to filter the graph`
                     }
                     style={{
                       display: "flex",
@@ -370,11 +382,11 @@ export function DashboardClient({
                         width: 7,
                         height: 7,
                         borderRadius: "50%",
-                        background: c,
+                        background: t.color,
                         opacity: hidden ? 0.3 : 1,
                       }}
                     />
-                    {l}
+                    {t.label}
                   </button>
                 );
               })}
@@ -456,7 +468,8 @@ export function DashboardClient({
                 width={1100}
                 height={600}
                 minWeight={minWeight}
-                hiddenCategories={hiddenCategories}
+                hiddenTypes={hiddenTypes}
+                entityTypes={entityTypes}
               />
             )}
           </div>

@@ -17,6 +17,13 @@ export interface ConstellationEdge {
   weight: number;
 }
 
+export interface EntityTypeInfo {
+  entity_type: string;
+  label: string;
+  color: string;
+  count: number;
+}
+
 interface Props {
   nodes: ConstellationNode[];
   edges: ConstellationEdge[];
@@ -24,27 +31,40 @@ interface Props {
   height?: number;
   /** Minimum edge weight to render. Nodes with no surviving edges still appear. */
   minWeight?: number;
-  /** Categories to hide (clicking the legend toggles these). */
-  hiddenCategories?: Set<string>;
+  /** entity_types that the legend has toggled OFF. Keys are raw entity_type values. */
+  hiddenTypes?: Set<string>;
+  /** Authoritative color/label source per entity_type. If missing, falls back to a default palette. */
+  entityTypes?: EntityTypeInfo[];
+  /** Persistently highlight one node (e.g. the entity currently being viewed). */
+  selectedId?: number | null;
+  /** Override the default plain-click behavior. If provided, click calls this instead of router.push. */
+  onNodeClick?: (node: ConstellationNode) => void;
+  /** Compact strip mode — only renders selected node + first-degree neighbors in a row. */
+  collapsed?: boolean;
 }
 
-const TYPE_TO_CATEGORY: Record<string, "people" | "projects" | "orgs" | "tools"> = {
-  person: "people",
-  project: "projects",
-  organization: "orgs",
-  org: "orgs",
-  tool: "tools",
-  topic: "projects",
-  place: "orgs",
-  entity: "projects",
+// Fallback palette used when no entityTypes prop is provided (or for unknown types).
+const FALLBACK_COLOR: Record<string, string> = {
+  person: "#9d83ff",
+  project: "#6ca6ff",
+  organization: "#ff9650",
+  org: "#ff9650",
+  tool: "#50c8c8",
+  topic: "#b8a6ff",
+  place: "#ffd870",
+  entity: "#a8b8d0",
 };
 
-const CATEGORY_COLOR: Record<string, string> = {
-  people: "#9d83ff",
-  projects: "#6ca6ff",
-  orgs: "#ff9650",
-  tools: "#50c8c8",
-};
+function colorFor(
+  type: string,
+  entityTypes?: EntityTypeInfo[]
+): string {
+  if (entityTypes) {
+    const match = entityTypes.find((t) => t.entity_type === type);
+    if (match) return match.color;
+  }
+  return FALLBACK_COLOR[type] ?? "#a8b8d0";
+}
 
 // Lightweight force layout: spring edges + repulsion + center pull. Deterministic
 // per `nodes/edges` content so the graph doesn't reshuffle on each re-render.
@@ -371,21 +391,22 @@ export function ThoughtGraph({
   width = 1100,
   height = 600,
   minWeight = 1,
-  hiddenCategories,
+  hiddenTypes,
+  entityTypes,
+  selectedId = null,
+  onNodeClick,
+  collapsed = false,
 }: Props) {
   const router = useRouter();
   const [hover, setHover] = useState<number | null>(null);
   const [focused, setFocused] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Filter nodes by category visibility (legend toggle)
+  // Filter nodes by entity_type visibility (legend toggle)
   const categoryVisibleNodes = useMemo(() => {
-    if (!hiddenCategories || hiddenCategories.size === 0) return nodes;
-    return nodes.filter((n) => {
-      const cat = TYPE_TO_CATEGORY[n.type] || "projects";
-      return !hiddenCategories.has(cat);
-    });
-  }, [nodes, hiddenCategories]);
+    if (!hiddenTypes || hiddenTypes.size === 0) return nodes;
+    return nodes.filter((n) => !hiddenTypes.has(n.type));
+  }, [nodes, hiddenTypes]);
 
   const categoryVisibleIds = useMemo(
     () => new Set(categoryVisibleNodes.map((n) => n.id)),
@@ -465,7 +486,8 @@ export function ThoughtGraph({
 
   // Always anchor a node at the center: focused (user-selected) or the hottest
   // node by default, so the layout doesn't fly apart at low min-weights.
-  const pinnedId = focused ?? hottestId;
+  // Anchor priority: explicit focus > caller-provided selection > hottest node
+  const pinnedId = focused ?? selectedId ?? hottestId;
 
   const positions = useMemo(
     () => layout(visibleNodes, filteredEdges, width, height, pinnedId),
@@ -500,12 +522,17 @@ export function ThoughtGraph({
   function handleNodeClick(node: ConstellationNode, e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    // Shift/cmd-click → focus mode (also covers no-slug nodes)
+    // Shift/cmd-click → focus mode (always, regardless of onNodeClick override)
     if (e.shiftKey || e.metaKey || e.ctrlKey) {
       setFocused((f) => (f === node.id ? null : node.id));
       return;
     }
-    // Plain click → wiki if we have a slug, else focus mode
+    // Plain click — onNodeClick override takes priority (used by the wiki page
+    // to switch the loaded entity in-place instead of full navigation).
+    if (onNodeClick) {
+      onNodeClick(node);
+      return;
+    }
     if (node.slug) {
       router.push(`/wiki?slug=${node.slug}`);
       return;
@@ -528,6 +555,83 @@ export function ThoughtGraph({
       >
         No entities captured yet — start adding thoughts to populate the graph.
       </div>
+    );
+  }
+
+  // Collapsed mode — horizontal strip of selected + first-degree neighbors,
+  // skipping the force layout entirely.
+  if (collapsed) {
+    const anchorId = selectedId ?? hottestId;
+    const anchor = anchorId !== null ? nodes.find((n) => n.id === anchorId) : null;
+    if (!anchor) return null;
+    const neighborIds = baseAdjacency.get(anchor.id) ?? new Set<number>();
+    const neighbors = nodes
+      .filter((n) => neighborIds.has(n.id))
+      .sort((a, b) => b.mentions - a.mentions)
+      .slice(0, 8);
+
+    const stripH = Math.max(80, height);
+    const cy = stripH / 2;
+    const cx = width / 2;
+    const stride = Math.min(110, (width - 200) / Math.max(1, neighbors.length));
+
+    return (
+      <svg
+        width="100%"
+        height={stripH}
+        viewBox={`0 0 ${width} ${stripH}`}
+        style={{ display: "block" }}
+      >
+        {/* Edges from anchor to each neighbor */}
+        {neighbors.map((n, i) => {
+          const x = cx + (i - (neighbors.length - 1) / 2) * stride + stride * (neighbors.length / 2 + 1);
+          return (
+            <line
+              key={n.id}
+              x1={cx}
+              y1={cy}
+              x2={x}
+              y2={cy}
+              stroke="rgba(157,131,255,0.4)"
+              strokeWidth={1}
+            />
+          );
+        })}
+        {/* Anchor */}
+        {(() => {
+          const color = colorFor(anchor.type, entityTypes);
+          return (
+            <g
+              onClick={(e) => handleNodeClick(anchor, e)}
+              style={{ cursor: "pointer" }}
+            >
+              <circle cx={cx} cy={cy} r={28} fill={color} fillOpacity={0.5} stroke="#fff" strokeOpacity={0.8} strokeWidth={1.5} />
+              <circle cx={cx} cy={cy} r={6} fill={color} />
+              <text x={cx} y={cy + 46} textAnchor="middle" fill="var(--fg)" fontSize="12" fontWeight="600">
+                {anchor.label}
+              </text>
+            </g>
+          );
+        })()}
+        {/* Neighbors */}
+        {neighbors.map((n, i) => {
+          const x = cx + (i - (neighbors.length - 1) / 2) * stride + stride * (neighbors.length / 2 + 1);
+          const color = colorFor(n.type, entityTypes);
+          return (
+            <g
+              key={n.id}
+              onClick={(e) => handleNodeClick(n, e)}
+              style={{ cursor: "pointer" }}
+            >
+              <circle cx={x} cy={cy} r={14} fill={color} fillOpacity={0.4} stroke={color} strokeWidth={1} />
+              <circle cx={x} cy={cy} r={4} fill={color} />
+              <text x={x} y={cy + 32} textAnchor="middle" fill="var(--fg-3)" fontSize="10.5">
+                {n.label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
     );
   }
 
@@ -667,14 +771,14 @@ export function ThoughtGraph({
         {visibleNodes.map((n) => {
           const pos = positions.get(n.id);
           if (!pos) return null;
-          const cat = TYPE_TO_CATEGORY[n.type] || "projects";
-          const color = CATEGORY_COLOR[cat];
+          const color = colorFor(n.type, entityTypes);
           const isHot = n.id === hottestId;
           const isActive = n.id === activeId;
+          const isSelected = selectedId !== null && n.id === selectedId;
           const dimmed = isHoverDimmed(n.id);
           const placement = labelPlacements.get(n.id);
           const showLabel = !dimmed && !!placement;
-          const labelEmphasis = isActive || isHot;
+          const labelEmphasis = isActive || isHot || isSelected;
 
           const NodeContent = (
             <g
@@ -684,14 +788,26 @@ export function ThoughtGraph({
               opacity={dimmed ? 0.18 : 1}
               style={{ cursor: "pointer", transition: "opacity 160ms" }}
             >
+              {/* Selection ring — wiki "you are here" indicator */}
+              {isSelected && (
+                <circle
+                  cx={pos.x}
+                  cy={pos.y}
+                  r={pos.r + 6}
+                  fill="none"
+                  stroke="#ffffff"
+                  strokeOpacity={0.7}
+                  strokeWidth={1.5}
+                />
+              )}
               <circle
                 cx={pos.x}
                 cy={pos.y}
                 r={pos.r}
                 fill={color}
-                fillOpacity={isActive ? 0.32 : isHot ? 0.25 : 0.15}
+                fillOpacity={isSelected ? 0.42 : isActive ? 0.32 : isHot ? 0.25 : 0.15}
                 stroke={color}
-                strokeWidth={isActive ? 2 : isHot ? 1.5 : 1}
+                strokeWidth={isSelected ? 2 : isActive ? 2 : isHot ? 1.5 : 1}
               />
               <circle
                 cx={pos.x}

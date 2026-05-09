@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import { WikiGraphView } from "@/components/design/WikiGraphView";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -879,6 +880,7 @@ function WikiPageInner() {
   const [notesError, setNotesError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [view, setView] = useState<"graph" | "list">("graph");
 
   useEffect(() => {
     setLoading(true);
@@ -1054,6 +1056,91 @@ function WikiPageInner() {
     return map;
   }, [pages]);
 
+  // Save curator notes — used by both views.
+  const saveNotes = useCallback(
+    async (notes: string) => {
+      if (!selected) return;
+      const res = await fetch(`/api/wiki/${encodeURIComponent(selected.slug)}/notes`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      setSelected((prev) => (prev ? { ...prev, notes: notes || null } : prev));
+      setNotesContent(notes);
+    },
+    [selected]
+  );
+
+  // Graph view: full-bleed, dark canvas, constellation hero + 2-col body
+  if (view === "graph") {
+    return (
+      <div
+        className="ob1-fullbleed from-legacy"
+        style={{ background: "var(--bg-0)", minHeight: "100vh" }}
+      >
+        <div
+          style={{
+            padding: "32px 40px 56px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 22,
+          }}
+        >
+          {/* Header */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              gap: 24,
+              flexWrap: "wrap",
+            }}
+          >
+            <div>
+              <div className="eyebrow" style={{ marginBottom: 8 }}>
+                Brain · Wiki
+              </div>
+              <h1
+                style={{
+                  margin: 0,
+                  fontSize: 30,
+                  fontWeight: 600,
+                  letterSpacing: "-0.025em",
+                  color: "var(--fg)",
+                }}
+              >
+                {pages.length} entit{pages.length === 1 ? "y" : "ies"} in your knowledge graph
+              </h1>
+              <p
+                style={{
+                  margin: "6px 0 0",
+                  color: "var(--fg-3)",
+                  fontSize: 14,
+                  maxWidth: 660,
+                }}
+              >
+                Articles are auto-generated from your thoughts. You can&apos;t edit them
+                directly — drop a curator note instead and it&apos;ll steer the next
+                regeneration.
+              </p>
+            </div>
+            <ViewToggle view={view} setView={setView} />
+          </div>
+
+          <WikiGraphView
+            selected={selected}
+            onSelectSlug={loadDetail}
+            onSaveNotes={saveNotes}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       {showAliasModal && selected && (
@@ -1104,7 +1191,10 @@ function WikiPageInner() {
         {/* Left panel — list */}
         <div className="w-72 shrink-0 border-r border-border flex flex-col overflow-hidden">
           <div className="px-4 py-3 border-b border-border">
-            <h1 className="text-lg font-semibold text-text-primary">Wiki</h1>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <h1 className="text-lg font-semibold text-text-primary">Wiki</h1>
+              <ViewToggle view={view} setView={setView} />
+            </div>
             <p className="text-xs text-text-muted mt-0.5">
               {pages.length} page{pages.length !== 1 ? "s" : ""}
             </p>
@@ -1406,6 +1496,56 @@ export default function WikiPage() {
     <Suspense fallback={null}>
       <WikiPageInner />
     </Suspense>
+  );
+}
+
+function ViewToggle({
+  view,
+  setView,
+}: {
+  view: "graph" | "list";
+  setView: (v: "graph" | "list") => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        padding: 3,
+        gap: 2,
+        background: "var(--bg-3)",
+        border: "1px solid var(--line)",
+        borderRadius: 8,
+      }}
+    >
+      {(["graph", "list"] as const).map((v) => {
+        const active = view === v;
+        return (
+          <button
+            key={v}
+            type="button"
+            onClick={() => setView(v)}
+            style={{
+              padding: "4px 10px",
+              borderRadius: 6,
+              fontSize: 11,
+              color: active ? "var(--fg)" : "var(--fg-3)",
+              background: active
+                ? "rgba(130,97,255,0.18)"
+                : "transparent",
+              border: active
+                ? "1px solid rgba(157,131,255,0.25)"
+                : "1px solid transparent",
+              fontWeight: active ? 500 : 400,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              textTransform: "capitalize",
+            }}
+          >
+            {v}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

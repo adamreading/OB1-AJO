@@ -902,6 +902,62 @@ app.delete("/entity-blocklist", async (c) => {
   return c.json({ unblocked: true, entity_type, normalized_name }, 200, corsHeaders);
 });
 
+// Distinct entity_type values currently in the entities table, with a count
+// and a stable color per type. Used by the dashboard + wiki constellation to
+// generate filter chips dynamically — adding a new entity_type lights up a
+// new chip everywhere automatically.
+app.get("/entity-types", async (c) => {
+  const { data, error } = await supabase
+    .from("entities")
+    .select("entity_type")
+    .not("entity_type", "is", null)
+    .limit(50000);
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+
+  const counts = new Map<string, number>();
+  for (const row of data || []) {
+    const t = (row as { entity_type: string | null }).entity_type;
+    if (!t) continue;
+    counts.set(t, (counts.get(t) ?? 0) + 1);
+  }
+
+  // Seed palette for the historical types so existing screens don't reshuffle
+  // colors. New types fall back to a deterministic hash-of-name hue.
+  const seedPalette: Record<string, string> = {
+    person: "#9d83ff",
+    organization: "#ff9650",
+    org: "#ff9650",
+    project: "#6ca6ff",
+    tool: "#50c8c8",
+    place: "#ffd870",
+    topic: "#b8a6ff",
+    entity: "#a8b8d0",
+  };
+
+  function hashedHue(name: string): number {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+    return Math.abs(h) % 360;
+  }
+
+  const types = Array.from(counts.entries())
+    .map(([entity_type, count]) => {
+      // Plural label to match the dashboard legend conventions
+      const label =
+        entity_type === "person"
+          ? "people"
+          : entity_type === "organization" || entity_type === "org"
+          ? "orgs"
+          : `${entity_type}s`;
+      const color = seedPalette[entity_type]
+        ?? `oklch(72% 0.14 ${hashedHue(entity_type)})`;
+      return { entity_type, label, color, count };
+    })
+    .sort((a, b) => b.count - a.count);
+
+  return c.json({ types }, 200, corsHeaders);
+});
+
 // Distinct source_type values currently in the thoughts table — used to populate
 // the Source filter dropdown without hard-coding values that may drift.
 app.get("/sources", async (c) => {
@@ -1084,12 +1140,22 @@ app.get("/entities/:id/edges", async (c) => {
 
   const otherIds = Array.from(new Set(all.flatMap((e) => [e.from_entity_id, e.to_entity_id]).filter((x) => x !== id)));
   const nameMap = new Map<number, { canonical_name: string; entity_type: string }>();
+  const slugMap = new Map<number, string>();
   if (otherIds.length > 0) {
-    const { data: ents } = await supabase
-      .from("entities")
-      .select("id, canonical_name, entity_type")
-      .in("id", otherIds);
+    const [{ data: ents }, { data: pages }] = await Promise.all([
+      supabase
+        .from("entities")
+        .select("id, canonical_name, entity_type")
+        .in("id", otherIds),
+      supabase
+        .from("wiki_pages")
+        .select("entity_id, slug")
+        .in("entity_id", otherIds),
+    ]);
     for (const e of ents || []) nameMap.set(e.id, { canonical_name: e.canonical_name, entity_type: e.entity_type });
+    for (const p of pages || []) {
+      if (p.entity_id) slugMap.set(p.entity_id, p.slug);
+    }
   }
 
   const edges = all.map((e) => {
@@ -1097,6 +1163,7 @@ app.get("/entities/:id/edges", async (c) => {
     const direction = e.from_entity_id === id ? "out" : "in";
     const other = nameMap.get(otherId) || { canonical_name: `#${otherId}`, entity_type: "unknown" };
     return {
+      edge_id: e.id,
       id: e.id,
       from_entity_id: e.from_entity_id,
       to_entity_id: e.to_entity_id,
@@ -1104,6 +1171,11 @@ app.get("/entities/:id/edges", async (c) => {
       support_count: e.support_count,
       confidence: e.confidence,
       direction,
+      other_id: otherId,
+      other_name: other.canonical_name,
+      other_type: other.entity_type,
+      other_slug: slugMap.get(otherId) ?? null,
+      // Backwards-compat: keep the nested shape used by the existing edit panel
       other: { id: otherId, canonical_name: other.canonical_name, entity_type: other.entity_type },
       symmetric: SYMMETRIC_RELATIONS.has(e.relation),
     };
