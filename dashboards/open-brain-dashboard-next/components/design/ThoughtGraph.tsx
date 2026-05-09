@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 export interface ConstellationNode {
   id: number;
@@ -221,6 +222,7 @@ export function ThoughtGraph({
   height = 600,
   minWeight = 1,
 }: Props) {
+  const router = useRouter();
   const [hover, setHover] = useState<number | null>(null);
   const [focused, setFocused] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -277,18 +279,18 @@ export function ThoughtGraph({
   }, [nodes, positions, hottestId, activeId, activeNeighbors]);
 
   function handleNodeClick(node: ConstellationNode, e: React.MouseEvent) {
-    // Shift/cmd-click → focus mode (don't navigate)
+    e.preventDefault();
+    e.stopPropagation();
+    // Shift/cmd-click → focus mode (also covers no-slug nodes)
     if (e.shiftKey || e.metaKey || e.ctrlKey) {
-      e.preventDefault();
       setFocused((f) => (f === node.id ? null : node.id));
       return;
     }
-    // Plain click → wiki page if available, else just focus
+    // Plain click → wiki if we have a slug, else focus mode
     if (node.slug) {
-      // Allow Link behavior to take over
+      router.push(`/wiki?slug=${node.slug}`);
       return;
     }
-    e.preventDefault();
     setFocused((f) => (f === node.id ? null : node.id));
   }
 
@@ -483,23 +485,7 @@ export function ThoughtGraph({
             </g>
           );
 
-          // Wrap in <a> when slug exists so plain click navigates
-          return n.slug ? (
-            <a
-              key={n.id}
-              href={`/wiki?slug=${n.slug}`}
-              onClick={(e) => {
-                if (e.shiftKey || e.metaKey || e.ctrlKey) {
-                  e.preventDefault();
-                  setFocused((f) => (f === n.id ? null : n.id));
-                }
-              }}
-            >
-              {NodeContent}
-            </a>
-          ) : (
-            <g key={n.id}>{NodeContent}</g>
-          );
+          return <g key={n.id}>{NodeContent}</g>;
         })}
       </svg>
       <div
