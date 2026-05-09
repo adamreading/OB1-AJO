@@ -1,12 +1,15 @@
-# Open Brain: Unified Startup Script
-# This script starts the Dashboard and the Local Brain Worker in one command.
+# Open Brain: Unified Startup Script (psmux edition)
+# Starts all 4 services in a 2x2 layout inside Windows Terminal (fullscreen).
 
 $ProjectRoot = Get-Location
+$psmux = "C:\Users\JoannaThompson\AppData\Local\Microsoft\WinGet\Links\psmux.exe"
+$wt    = "C:\Users\JoannaThompson\AppData\Local\Microsoft\WindowsApps\wt.exe"
+$ps    = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 Write-Host ""
 Write-Host "Open Brain Pro: Powering up..." -ForegroundColor Cyan
 
-# 1. Check for Ollama
+# Check for Ollama
 Write-Host "Checking Ollama status..." -ForegroundColor Gray
 $OllamaCheck = curl.exe -s http://localhost:11434/api/tags
 if ($null -eq $OllamaCheck) {
@@ -16,33 +19,45 @@ if ($null -eq $OllamaCheck) {
     Write-Host "Ollama is online." -ForegroundColor Green
 }
 
-# 2. Start Dashboard
 Write-Host ""
-Write-Host "Launching Dashboard (Next.js) on Port 3010..." -ForegroundColor Cyan
+Write-Host "Launching all services in Windows Terminal (2x2)..." -ForegroundColor Cyan
+Write-Host "------------------------------------------------"
+Write-Host "TOP-LEFT:     Dashboard     http://localhost:3010"
+Write-Host "TOP-RIGHT:    Plaud Webhook http://127.0.0.1:4001/webhook"
+Write-Host "BOTTOM-LEFT:  Brain Worker"
+Write-Host "BOTTOM-RIGHT: Applaud       http://127.0.0.1:44471"
+Write-Host "------------------------------------------------"
+
 $DashboardPath = Join-Path $ProjectRoot "dashboards\open-brain-dashboard-next"
-Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$DashboardPath'; `$env:PORT=3010; npm.cmd run dev"
+$WorkerPath    = Join-Path $ProjectRoot "scripts\local-brain-worker.js"
+$WebhookPath   = Join-Path $ProjectRoot "scripts\plaud-webhook.js"
+$ApplaudPath   = "C:\Users\JoannaThompson\projects\applaud"
 
-# 3. Start Local Brain Worker
-Write-Host "Starting Local Brain Worker (classification + entity graph extraction)..." -ForegroundColor Cyan
-$WorkerPath = Join-Path $ProjectRoot "scripts\local-brain-worker.js"
-Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$ProjectRoot'; node --env-file=.env '$WorkerPath'"
+# Kill any existing session
+& $psmux kill-session -t "open-brain" 2>$null
 
-# 4. Start Plaud Webhook Handler
-Write-Host "Starting Plaud Webhook Handler (port 4001)..." -ForegroundColor Cyan
-$WebhookPath = Join-Path $ProjectRoot "scripts\plaud-webhook.js"
-Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$ProjectRoot'; node --env-file=.env '$WebhookPath'"
+# Step 1: Create session — pane 0 is top-left (Dashboard), capture its ID
+& $psmux new-session -d -s "open-brain" -x 220 -y 50
+$pane0 = (& $psmux list-panes -t "open-brain" -F "#{pane_id}")[0]
 
-# 5. Start Applaud (Plaud sync + webhook trigger)
-Write-Host "Starting Applaud (Plaud recorder sync)..." -ForegroundColor Cyan
-$ApplaudPath = "C:\Users\JoannaThompson\projects\applaud"
-Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "cd '$ApplaudPath'; pnpm start"
+# Step 2: Split right from pane 0 — creates top-right (Webhook), capture its ID
+& $psmux split-window -h -t "open-brain:0.0"
+$pane1 = (& $psmux list-panes -t "open-brain" -F "#{pane_id}" | Where-Object { $_ -ne $pane0 })[0]
 
-Write-Host ""
-Write-Host "Everything is starting up!" -ForegroundColor Green
-Write-Host "------------------------------------------------"
-Write-Host "Dashboard:    http://localhost:3010"
-Write-Host "Applaud UI:   http://127.0.0.1:44471"
-Write-Host "AI Worker:    Running in background window"
-Write-Host "Plaud Webhook: http://127.0.0.1:4001/webhook"
-Write-Host "------------------------------------------------"
-Write-Host "Close this window to keep the others running."
+# Step 3: Split down from pane 0 — creates bottom-left (Brain Worker)
+& $psmux split-window -v -t $pane0
+
+# Step 4: Split down from pane 1 — creates bottom-right (Applaud)
+& $psmux split-window -v -t $pane1
+
+# Step 5: Get all pane IDs in order
+$panes = & $psmux list-panes -t "open-brain" -F "#{pane_id}"
+
+# Step 6: Send commands to each pane by ID
+& $psmux send-keys -t $panes[0] "cd '$DashboardPath'; `$env:PORT=3010; npm.cmd run dev" Enter
+& $psmux send-keys -t $panes[1] "cd '$ProjectRoot'; node --env-file=.env '$WebhookPath'" Enter
+& $psmux send-keys -t $panes[2] "cd '$ProjectRoot'; node --env-file=.env '$WorkerPath'" Enter
+& $psmux send-keys -t $panes[3] "cd '$ApplaudPath'; pnpm start" Enter
+
+# Open Windows Terminal fullscreen and attach
+& $wt --maximized $ps -NoExit -Command "& '$psmux' attach-session -t 'open-brain'"
