@@ -69,16 +69,39 @@ When working in this repo as the AJO maintainer, be aware:
 
 **Wiki pipeline**:
 - Compiler (`generate-wiki.mjs`) always regenerates all pages — `manually_edited` is ignored.
-- Curator notes → `wiki_pages.notes` column. Compiler reads this and injects it into the LLM prompt. Never overwritten.
+- Curator notes → `wiki_pages.notes` column. Treated as **HIGHEST AUTHORITY** in the regen prompt: explicit override of conflicting thought snippets, drop-the-thought conflict-resolution rule, plus a tail reminder appended to the user message when notes are present (sits in the model's recency window). The wiki UI surfaces this in a violet-bordered "curator note" panel — the only writable surface on the wiki page.
 - Citations format: `[#42]` (integer serial_id). Entity cross-links: `/wiki?slug=entity-slug`.
 - Wiki output files are gitignored (`wikis/`, `compiled-wiki/`, `output/`).
-- Wiki sidebar filter is by entity type (All / Person / Org / Project / Tool / Place / Topic).
+- Wiki page has two views toggleable in the header:
+  - **Graph view** (default) — constellation hero (collapsible 480px↔100px strip) + 2-col body. Left column: parsed Summary / Key Facts / Timeline from the markdown (split on `## H2`). Right column: Relationships (from `/entities/:id/edges`, grouped by `relation`), Open Questions, Curator Note.
+  - **List view** — preserves the existing alphabetical sidebar + side-panel detail. Sidebar filter chips are dynamic (one per entity_type returned by `/entity-types`).
 - Entity detail header: Rename, Aliases, Merge, Type dropdown (writes `entity_type` to DB), Delete (two-step confirm; removes entity + wiki page).
 - `DELETE /entities/:id` — deletes wiki_pages row explicitly (FK is SET NULL), then entity (thought_entities + edges cascade).
 
 **Quality scoring**: `quality_score` defaults to 50. Run `scripts/score-thoughts.mjs` to backfill heuristic scores. The Audit page threshold is configurable in the UI.
 
-**Kanban**: Uses `@dnd-kit/sortable` with `SortableContext` per column and `onDragOver` in `KanbanBoard` for card-to-card insertion. Status values are: `backlog`, `planning`, `active`, `review`, `done`, `archived`.
+**Kanban (Workflow page)**: Uses `@dnd-kit/sortable` with `SortableContext` per column and `onDragOver` in `KanbanBoard` for card-to-card insertion. Status values are: `backlog`, `planning`, `active`, `review`, `done`, `archived`. Cards (`KanbanCard.tsx`) require an `@entity` tag in the header (sourced from `metadata.topics[0]`); if no topic is present, they show muted `— unlinked` instead. This is the most important density signal — never remove it.
+
+**Dashboard design system (OB1 redesign)**:
+The Dashboard / Thoughts / Workflow / Wiki pages and the Sidebar were redesigned to a Linear/Vercel-grade look. New pieces to know about:
+- **Tokens**: `dashboards/open-brain-dashboard-next/app/globals.css` defines a parallel token layer (`--bg-0..4`, `--fg..fg-4`, `--violet-50..700`, `--ok/warn/crit`, `--r-sm/md/lg/xl`) alongside the legacy `--color-*` tokens. New components use the new tokens; legacy pages keep `--color-*` working. Don't conflate.
+- **Atoms**: `components/design/Atoms.tsx` exports `TypeChip`, `Card`, `SegBar`, `Sparkline`, `TypeDonut`, `ImpDots` (1–5 dot importance scale), `ScoreBar` (heuristic worker.js score), and `importanceToFiveScale()` helper. Reuse these instead of re-rolling.
+- **ThoughtGraph**: `components/design/ThoughtGraph.tsx` is the constellation graph — sunflower-seed force layout + auto-fit + smart label placement. Props: `nodes`, `edges`, `minWeight`, `hiddenTypes`, `entityTypes` (from `/entity-types`), `selectedId`, `onNodeClick` (override default plain-click), `collapsed`. Used by the dashboard hero AND the wiki graph view.
+- **Brand**: `components/design/Brand.tsx` exports `Mark` and `Wordmark` for "Open Brain" / "OB·1".
+- **Sidebar** is 6 items in 3 groups (Capture: Today, Review · Brain: Thoughts, Wiki, Workflow · Discover: Actions). Live counts come from `/api/sidebar-counts`.
+- **Importance vs Score** are distinct everywhere they appear. Don't conflate them. Importance is 1–5 (or 0–100 legacy mapped via `importanceToFiveScale`); Score is the worker.js heuristic.
+
+**Route consolidation**:
+The dashboard absorbed Search, Audit, Duplicates, and Add into the Thoughts page. The old routes are intercepted by `middleware.ts` and redirect to `/thoughts` with prefilters: `/search` → just `/thoughts`, `/audit` → `?score_max=15`, `/duplicates` → `?duplicates=1`, `/ingest` → `?compose=1`. The page directories under `app/audit`, `app/duplicates`, `app/search`, `app/ingest` are deleted — don't recreate them.
+
+**Dynamic entity-type filters (REQUIRED)**:
+Anywhere entity types are surfaced in the UI — dashboard legend, wiki graph filter rail, wiki list-view sidebar chips — they must come from `GET /entity-types` (Edge Function) → `/api/entity-types` (Next proxy). The endpoint returns `[{ entity_type, label, color, count }]` with a seed palette for known types (person, project, organization, tool, topic, place) and a deterministic hashed-hue color for any new type. **Never hard-code the type list** — adding a new `entity_type` to the DB must light up a chip everywhere automatically.
+
+**Dashboard REST endpoints (added during redesign)**:
+- `GET /entity-types` — distinct entity_types with color + count.
+- `GET /sources` — distinct source_type values from thoughts (count desc), powers Source dropdown.
+- `GET /constellation?days=&limit=&min_weight=&classification=` — top-N entities by mention count + co-occurrence edges among them. Each node carries its wiki `slug` for click-through.
+- `GET /entities/:id/edges` — edges touching the entity, with each row now including `other_slug` so the wiki Relationships card can navigate without a second round-trip.
 
 **Maintainer scripts** (all in `scripts/`):
 - `score-thoughts.mjs` — heuristic quality scoring backfill

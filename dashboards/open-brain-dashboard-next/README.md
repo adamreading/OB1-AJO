@@ -14,20 +14,35 @@ A full-featured web dashboard for your Open Brain second brain. Browse, search, 
 
 ## What It Does
 
-Provides 10 pages for managing your thoughts:
+Provides 6 primary pages, a "premium dark + violet" design (Linear/Vercel direction), and a constellation graph as the signature visual.
 
 | Page | Description |
 |------|-------------|
-| **Dashboard** | Stats overview (total thoughts, type distribution, top topics), recent activity, quick capture, workflow summary widget |
-| **Workflow** | Kanban board for tasks and ideas with drag-and-drop status management (New → Planning → Active → Review → Done → Archived) |
-| **Browse** | Paginated thought table with filters for type, source, and importance |
-| **Detail** | Full thought view with inline editing, delete, linked reflections, and related connections |
-| **Search** | Semantic (vector similarity) and full-text search with match scores and pagination |
-| **Add to Brain** | Smart ingest with auto-routing — short text goes to single capture, long text to extraction with dry-run preview |
-| **Review** | Plaud capture triage — thoughts awaiting human approval before entering the brain. Checkbox select, inline editing (content / type / classification), per-row Pass/Delete, bulk Pass/Delete. UPDATE entries show the original thought for comparison. |
-| **Audit** | Quality review for low-score thoughts with bulk delete |
-| **Duplicates** | Semantic similarity detection with keep/delete/keep-both resolution |
-| **Login** | API key authentication via encrypted session cookie |
+| **Dashboard** (`/`) | Control-room view — KPI strip with sparklines (total / active / wiki entities / awaiting review), entity-co-occurrence **constellation hero** with min-weight slider + dynamic legend filters, type donut + workflow snapshot, capture box, recent activity. |
+| **Thoughts** (`/thoughts`) | Unified browse / search / audit / duplicates view. Semantic vs full-text search toggle, dynamic Source dropdown, Score-range audit slider with low-score row highlighting, "+ New thought" inline composer. Replaces the old Search, Audit, Duplicates, and Add pages. |
+| **Workflow** (`/kanban`) | Kanban board for tasks & ideas with drag-and-drop status. Cards force a primary `@entity` tag in the header (sourced from `metadata.topics[0]`) so each card's subject is legible at a glance. |
+| **Wiki** (`/wiki`) | Knowledge graph view with **Graph / List** toggle. Graph mode hosts a collapsible constellation hero plus a 2-column body (Summary / Key Facts / Timeline left; Relationships / Open Questions / Curator Note right). Curator Note is the only writable surface — it steers the next regeneration. List mode preserves the existing alphabetical browse view. |
+| **Review** (`/review`) | Plaud capture triage — thoughts awaiting human approval before entering the brain. Inline editing, per-row Pass/Delete, bulk Pass/Delete. Content shown 6 lines deep by default with click-to-expand. |
+| **Actions** (`/actions`) | Action items extracted from captures, promotable to Kanban tasks. |
+| **Login** (`/login`) | API key authentication via encrypted session cookie. |
+| **Detail** (`/thoughts/[id]`) | Full thought view with inline editing, delete, linked reflections. Reachable from any thought reference. |
+
+### Sidebar
+
+Six items grouped:
+
+- **Capture** — Today, Review
+- **Brain** — Thoughts, Wiki, Workflow
+- **Discover** — Actions
+
+Counts shown next to each item come live from `/api/sidebar-counts`. The old routes `/search`, `/audit`, `/duplicates`, `/ingest` redirect via middleware to `/thoughts` with prefilters (`?score_max=15`, `?duplicates=1`, `?compose=1`) so any external link or bookmark still resolves.
+
+### Design system
+
+- **Tokens**: `app/globals.css` defines `--bg-0..4`, `--fg..fg-4`, `--violet-50..700`, `--ok/warn/crit`, `--r-sm/md/lg/xl`. New pages use these; legacy `--color-*` tokens still work for any older surface.
+- **Shared atoms**: `components/design/Atoms.tsx` — `TypeChip` (with `source` prop), `Card`, `SegBar`, `Sparkline`, `TypeDonut`, `ImpDots` (1–5), `ScoreBar` (worker.js heuristic).
+- **Constellation**: `components/design/ThoughtGraph.tsx` — sunflower-seed force layout + auto-fit zoom + smart 4-position label placement. Props include `selectedId`, `collapsed`, `onNodeClick`, `entityTypes`, `hiddenTypes`. Reused by Dashboard hero AND Wiki graph view.
+- **Dynamic entity types**: filter chips and node colors come from `/api/entity-types` so adding a new `entity_type` row lights up a chip everywhere automatically. **Don't hard-code the type list anywhere.**
 
 ## Prerequisites
 
@@ -149,22 +164,34 @@ The dashboard calls these endpoints on your Open Brain REST API:
 | Endpoint | Method | Used By |
 |----------|--------|---------|
 | `/health` | GET | Login validation |
-| `/thoughts` | GET | Browse page (paginated, filtered) |
-| `/thought/:id` | GET | Detail page |
-| `/thought/:id` | PUT | Inline edit (content, type, importance) |
-| `/thought/:id` | DELETE | Delete button |
-| `/search` | POST | Search page (semantic + full-text) |
-| `/stats` | GET | Dashboard stats widget |
-| `/capture` | POST | Quick capture (single thought) |
-| `/thought/:id/reflection` | GET | Detail page (linked reflections) |
-| `/ingest` | POST | Smart ingest (extraction) |
-| `/ingestion-jobs` | GET | Ingest page (job history) |
-| `/duplicates` | GET | Duplicates page |
-| `/thoughts?type=task` | GET | Workflow board (filtered by type) |
-| `/thought/:id` | PUT | Workflow board (status/priority updates) |
-| `/thoughts?review_status=pending_review&source_type=plaud` | GET | Review page (pending triage) |
-| `/capture-pending` | POST | Plaud webhook — capture thought pending review |
-| `/review/approve` | POST | Review page — batch approve pending thoughts |
+| `/thoughts` | GET | Thoughts page (paginated, filtered) |
+| `/thought/:id` | GET, PUT, DELETE | Detail page; inline edit; delete |
+| `/search` | POST | Thoughts page semantic + full-text search |
+| `/stats` | GET | Dashboard KPIs + type donut |
+| `/capture` | POST | Add to Brain (single thought) |
+| `/thought/:id/reflection` | GET | Detail page linked reflections |
+| `/ingest` | POST | Add to Brain extraction path |
+| `/ingestion-jobs` | GET | Job history |
+| `/duplicates` | GET | Thoughts page duplicates filter |
+| `/thoughts?type=task,idea&status=…` | GET | Workflow board |
+| `/thoughts?review_status=pending_review&source_type=plaud` | GET | Review page |
+| `/capture-pending` | POST | Plaud webhook — capture pending review |
+| `/review/approve` | POST | Review page batch approve |
+| `/wiki-pages` | GET | Wiki page list |
+| `/wiki-pages/:slug` | GET, PUT | Wiki page detail; manual edit (rare) |
+| `/wiki-pages/:slug/notes` | PATCH | Curator note save (highest-authority for next regen) |
+| `/entities` | GET | Entity merge / alias / type management |
+| `/entities/:id` | PATCH, DELETE | Rename / retype / delete |
+| `/entities/:id/edges` | GET | Wiki Relationships card (each edge includes `other_slug`) |
+| `/entities/:id/aliases` | PATCH | Alias add / remove |
+| `/entities/:id/merge` | POST | Merge two entities |
+| `/edges`, `/edge-blocklist` | GET, DELETE | Edit Relationships modal |
+| **`/entity-types`** | GET | **Dynamic legend + filter chips** (Dashboard, Wiki). Returns `[{ entity_type, label, color, count }]`. |
+| **`/sources`** | GET | **Dynamic Source dropdown** on Thoughts page. |
+| **`/constellation?days=&limit=&min_weight=`** | GET | **Dashboard hero + Wiki graph view**. Returns top entities by mention + co-occurrence edges, with each node carrying its wiki `slug`. |
+| `/action-items` | GET | Actions page |
+
+The three bolded endpoints were added during the OB1 redesign and must be present for Dashboard / Thoughts / Wiki to render correctly.
 
 > [!NOTE]
 > If your Open Brain instance doesn't have all these endpoints (e.g., no smart-ingest or duplicates), those pages will show errors but the core pages (dashboard, browse, search, detail) will still work.
@@ -185,11 +212,12 @@ No API key is stored in environment variables or exposed to the browser.
 
 ## Tech Stack
 
-- **Next.js 16** (App Router)
+- **Next.js 16** (App Router, Turbopack)
 - **React 19** with TypeScript
-- **Tailwind CSS 4** (dark theme)
+- **Tailwind CSS 4** (dark theme) + a parallel design-token layer in `globals.css` for the redesigned pages
 - **iron-session 8** (encrypted cookies)
-- **@dnd-kit** (drag-and-drop for workflow board)
+- **@dnd-kit** (drag-and-drop for the Workflow board)
+- The constellation graph in `components/design/ThoughtGraph.tsx` is a hand-rolled SVG force layout — no d3-force or external graph library, keeps the bundle slim.
 - Zero external runtime dependencies beyond these
 
 ## Troubleshooting
