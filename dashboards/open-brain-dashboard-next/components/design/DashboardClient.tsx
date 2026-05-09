@@ -455,25 +455,30 @@ export function DashboardClient({
           {graph.strongest && (
             <div
               style={{
-                position: "absolute",
-                bottom: 16,
-                right: 20,
                 display: "flex",
-                gap: 8,
-                alignItems: "center",
-                fontSize: 11,
-                color: "var(--fg-4)",
-                padding: "6px 10px",
-                background: "rgba(7,7,10,0.7)",
-                borderRadius: 6,
-                border: "1px solid var(--line)",
+                justifyContent: "flex-end",
+                padding: "0 24px 16px",
               }}
             >
-              Strongest cluster:{" "}
-              <span style={{ color: "var(--violet-300)" }}>
-                {graph.strongest.source} ↔ {graph.strongest.target} (
-                {graph.strongest.weight} thoughts)
-              </span>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  fontSize: 11,
+                  color: "var(--fg-4)",
+                  padding: "6px 10px",
+                  background: "rgba(7,7,10,0.7)",
+                  borderRadius: 6,
+                  border: "1px solid var(--line)",
+                }}
+              >
+                Strongest cluster:{" "}
+                <span style={{ color: "var(--violet-300)" }}>
+                  {graph.strongest.source} ↔ {graph.strongest.target} (
+                  {graph.strongest.weight} thoughts)
+                </span>
+              </div>
             </div>
           )}
         </div>
