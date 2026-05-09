@@ -33,7 +33,7 @@ export default function RootLayout({
       <body className="min-h-screen flex bg-bg-primary text-text-primary">
         <ThemeProvider>
           <SidebarShell />
-          <main className="flex-1 md:ml-60 min-h-screen pt-12 md:pt-0">
+          <main className="flex-1 min-h-screen pt-12 md:pt-0 md:ml-[var(--sidebar-width,240px)] [transition:margin-left_160ms_ease]">
             <div className="legacy-wrapper">{children}</div>
           </main>
         </ThemeProvider>

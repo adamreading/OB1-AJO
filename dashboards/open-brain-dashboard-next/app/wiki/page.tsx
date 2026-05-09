@@ -1135,8 +1135,58 @@ function WikiPageInner() {
             selected={selected}
             onSelectSlug={loadDetail}
             onSaveNotes={saveNotes}
+            onRename={() => setShowRenameModal(true)}
+            onAliases={() => setShowAliasModal(true)}
+            onEdges={() => setShowEdgesModal(true)}
+            onAbsorb={() => setShowAbsorbModal(true)}
+            onMerge={() => setShowMergeModal(true)}
+            onDelete={handleDeleteEntity}
+            confirmDelete={confirmDelete}
+            setConfirmDelete={setConfirmDelete}
+            deleting={deleting}
           />
         </div>
+
+        {/* Entity-management modals — same set the List view uses. */}
+        {showAliasModal && selected && (
+          <AliasModal
+            page={selected}
+            onClose={() => setShowAliasModal(false)}
+            onAliasAdded={handleAliasAdded}
+            onAliasRemoved={handleAliasRemoved}
+          />
+        )}
+        {showEdgesModal && selected && (
+          <EdgesModal
+            page={selected}
+            onClose={() => setShowEdgesModal(false)}
+            onEdgeRemoved={() => { /* edge list refreshes locally; article regen comes on next worker tick */ }}
+          />
+        )}
+        {showMergeModal && selected && (
+          <MergeModal
+            source={selected}
+            pages={pages}
+            onClose={() => setShowMergeModal(false)}
+            onMerged={handleMerged}
+          />
+        )}
+        {showAbsorbModal && selected && (
+          <MergeModal
+            source={selected}
+            pages={pages}
+            mode="absorb"
+            onClose={() => setShowAbsorbModal(false)}
+            onMerged={handleMerged}
+          />
+        )}
+        {showRenameModal && selected && (
+          <RenameModal
+            page={selected}
+            onClose={() => setShowRenameModal(false)}
+            onRenamed={handleRenamed}
+          />
+        )}
       </div>
     );
   }

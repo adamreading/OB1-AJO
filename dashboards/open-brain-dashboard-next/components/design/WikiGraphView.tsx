@@ -39,6 +39,17 @@ interface WikiGraphViewProps {
   onSaveNotes: (notes: string) => Promise<void>;
   onRegenerate?: () => void;
   onOpenThoughts?: () => void;
+  /** Entity-management triggers — re-use the same modals the List view opens. */
+  onRename?: () => void;
+  onAliases?: () => void;
+  onEdges?: () => void;
+  onAbsorb?: () => void;
+  onMerge?: () => void;
+  onDelete?: () => Promise<void> | void;
+  /** Two-step delete confirm state, lifted from parent so all modals share state. */
+  confirmDelete?: boolean;
+  setConfirmDelete?: (v: boolean) => void;
+  deleting?: boolean;
 }
 
 interface SectionMap {
@@ -312,6 +323,15 @@ export function WikiGraphView({
   onSaveNotes,
   onRegenerate,
   onOpenThoughts,
+  onRename,
+  onAliases,
+  onEdges,
+  onAbsorb,
+  onMerge,
+  onDelete,
+  confirmDelete = false,
+  setConfirmDelete,
+  deleting = false,
 }: WikiGraphViewProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [graph, setGraph] = useState<{
@@ -740,16 +760,109 @@ export function WikiGraphView({
                 · slug: {selected.slug}
               </span>
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {onOpenThoughts && (
+                <button type="button" onClick={onOpenThoughts} style={ghostBtn}>
+                  Open thoughts ({selected.thought_count})
+                </button>
+              )}
+              {selected.entity_id != null && onRename && (
+                <button type="button" onClick={onRename} style={ghostBtn} title="Rename entity">
+                  Rename
+                </button>
+              )}
+              {selected.entity_id != null && onAliases && (
+                <button
+                  type="button"
+                  onClick={onAliases}
+                  style={ghostBtn}
+                  title="Manage aliases"
+                >
+                  Aliases
+                  {(selected.aliases ?? []).length > 0
+                    ? ` (${selected.aliases!.length})`
+                    : ""}
+                </button>
+              )}
+              {selected.entity_id != null && onEdges && (
+                <button
+                  type="button"
+                  onClick={onEdges}
+                  style={ghostBtn}
+                  title="Edit relationships — remove wrong edges and blocklist them"
+                >
+                  Edges
+                </button>
+              )}
+              {selected.entity_id != null && onAbsorb && (
+                <button
+                  type="button"
+                  onClick={onAbsorb}
+                  style={ghostBtn}
+                  title="Absorb a duplicate into this entity"
+                >
+                  Absorb
+                </button>
+              )}
+              {selected.entity_id != null && onMerge && (
+                <button
+                  type="button"
+                  onClick={onMerge}
+                  style={ghostBtn}
+                  title="Merge this entity into another — this entity is deleted"
+                >
+                  Merge
+                </button>
+              )}
               {onRegenerate && (
                 <button type="button" onClick={onRegenerate} style={ghostBtn}>
                   Regenerate
                 </button>
               )}
-              {onOpenThoughts && (
-                <button type="button" onClick={onOpenThoughts} style={ghostBtn}>
-                  Open thoughts ({selected.thought_count})
-                </button>
+              {selected.entity_id != null && onDelete && (
+                confirmDelete ? (
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => onDelete()}
+                      disabled={deleting}
+                      style={{
+                        padding: "7px 12px",
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,80,80,0.6)",
+                        background: "var(--crit)",
+                        color: "#fff",
+                        fontSize: 12,
+                        fontWeight: 500,
+                        cursor: deleting ? "not-allowed" : "pointer",
+                        fontFamily: "inherit",
+                        opacity: deleting ? 0.6 : 1,
+                      }}
+                    >
+                      {deleting ? "Deleting…" : "Confirm delete"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete?.(false)}
+                      style={ghostBtn}
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete?.(true)}
+                    title="Delete entity and wiki page"
+                    style={{
+                      ...ghostBtn,
+                      borderColor: "rgba(255,80,80,0.3)",
+                      color: "rgba(255,150,150,0.9)",
+                    }}
+                  >
+                    Delete
+                  </button>
+                )
               )}
             </div>
           </div>
