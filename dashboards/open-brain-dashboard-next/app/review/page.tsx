@@ -383,11 +383,28 @@ function ReviewPageInner() {
                           type="button"
                           onClick={() => toggleExpand(t.id)}
                           className="text-left text-text-primary hover:text-violet transition-colors w-full"
+                          title={isExpanded ? "Click to collapse" : "Click to show full content"}
                         >
-                          {isExpanded
-                            ? <span className="whitespace-pre-wrap">{t.content}</span>
-                            : <span>{t.content.length > 120 ? t.content.slice(0, 120) + "…" : t.content}</span>
-                          }
+                          <span
+                            className="whitespace-pre-wrap block"
+                            style={
+                              isExpanded
+                                ? undefined
+                                : {
+                                    display: "-webkit-box",
+                                    WebkitLineClamp: 6,
+                                    WebkitBoxOrient: "vertical",
+                                    overflow: "hidden",
+                                  }
+                            }
+                          >
+                            {t.content}
+                          </span>
+                          {!isExpanded && t.content.split("\n").length > 6 && (
+                            <span className="block text-xs text-text-muted mt-1">
+                              … click to expand
+                            </span>
+                          )}
                         </button>
                       )}
                     </td>
