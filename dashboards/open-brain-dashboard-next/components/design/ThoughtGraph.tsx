@@ -177,7 +177,8 @@ function layout(
   }
 
   // Auto-fit: scale & translate so the populated bbox fills the canvas with a
-  // generous label margin. Fewer entities → bigger nodes → more readable.
+  // generous label margin. Fewer entities → bigger nodes; many entities → all
+  // still visible (we allow zoom-out, not just zoom-in).
   const raw = nodes.map((n) => {
     const p = positions.get(n.id)!;
     return { id: n.id, x: p.x, y: p.y, r: radiusFor(n) };
@@ -189,17 +190,16 @@ function layout(
   const bboxW = maxX - minX;
   const bboxH = maxY - minY;
 
-  // Reserve room for labels: bottom needs more (labels render below nodes).
-  const padTop = 36;
+  // Reserve room for labels on all sides.
+  const padTop = 40;
   const padBottom = 56;
   const padX = 90;
   const targetW = width - padX * 2;
   const targetH = height - padTop - padBottom;
   const scaleX = bboxW > 0 ? targetW / bboxW : 1;
   const scaleY = bboxH > 0 ? targetH / bboxH : 1;
-  // Cap zoom-in; never zoom out (we want bigger when sparser).
-  const scale = Math.min(scaleX, scaleY, 2.2);
-  const finalScale = Math.max(1, scale);
+  // Cap zoom-in at 2.2× and zoom-out at 0.45× (so nothing vanishes).
+  const finalScale = Math.max(0.45, Math.min(scaleX, scaleY, 2.2));
 
   const out = new Map<number, { x: number; y: number; r: number }>();
   for (const p of raw) {
@@ -213,51 +213,102 @@ function layout(
   return out;
 }
 
-/** Label-collision pass. A label is hidden if its bounding box would overlap
- * any larger node's circle OR any previously claimed label. Labels in
- * `forceShow` (hot/active/active-neighbors) always render. */
-function pickVisibleLabels(
+export type LabelAnchor = "middle" | "start" | "end";
+export interface LabelPlacement {
+  x: number;
+  y: number;
+  anchor: LabelAnchor;
+}
+
+/** Place labels around their nodes, trying below → above → right → left.
+ * A placement is rejected if its bounding box overlaps another node's circle
+ * or another label. Labels in `forceShow` get one extra try (slightly farther
+ * from the node) before being placed-anyway as a last resort. */
+function placeLabels(
   nodes: ConstellationNode[],
   positions: Map<number, { x: number; y: number; r: number }>,
   forceShow: Set<number>
-): Set<number> {
-  const visible = new Set<number>(forceShow);
-  // Sort by mentions desc — bigger nodes claim space first.
-  const ordered = [...nodes].sort((a, b) => b.mentions - a.mentions);
-  const claimedLabels: {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-  }[] = [];
+): Map<number, LabelPlacement> {
+  const placements = new Map<number, LabelPlacement>();
+  // Bigger nodes claim space first, then force-show, then the rest.
+  const ordered = [...nodes].sort((a, b) => {
+    const fa = forceShow.has(a.id) ? 1 : 0;
+    const fb = forceShow.has(b.id) ? 1 : 0;
+    if (fa !== fb) return fb - fa;
+    return b.mentions - a.mentions;
+  });
+
+  const claimedLabels: { x: number; y: number; w: number; h: number }[] = [];
+
   for (const n of ordered) {
     const p = positions.get(n.id);
     if (!p) continue;
     const labelLen = n.label.length;
     const w = Math.min(180, labelLen * 6.8 + 10);
     const h = 16;
-    const labelY = p.y + p.r + 14;
-    const box = { x: p.x - w / 2, y: labelY - 8, w, h };
+    const gap = 14;
+    const force = forceShow.has(n.id);
 
-    // Reject if label collides with any other (already-positioned) node circle
-    let collidesWithCircle = false;
-    for (const other of nodes) {
-      if (other.id === n.id) continue;
-      const op = positions.get(other.id);
-      if (!op) continue;
-      // Closest point on label-rect to circle center
-      const closestX = Math.max(box.x, Math.min(op.x, box.x + box.w));
-      const closestY = Math.max(box.y, Math.min(op.y, box.y + box.h));
-      const dx = op.x - closestX;
-      const dy = op.y - closestY;
-      if (dx * dx + dy * dy < op.r * op.r) {
-        collidesWithCircle = true;
-        break;
+    // Candidate placements ordered by preference
+    type Candidate = LabelPlacement & {
+      box: { x: number; y: number; w: number; h: number };
+    };
+    const candidates: Candidate[] = [
+      // below center
+      {
+        x: p.x,
+        y: p.y + p.r + gap,
+        anchor: "middle",
+        box: { x: p.x - w / 2, y: p.y + p.r + gap - 8, w, h },
+      },
+      // above center
+      {
+        x: p.x,
+        y: p.y - p.r - gap + 4,
+        anchor: "middle",
+        box: { x: p.x - w / 2, y: p.y - p.r - gap - 4, w, h },
+      },
+      // right of node
+      {
+        x: p.x + p.r + 8,
+        y: p.y + 4,
+        anchor: "start",
+        box: { x: p.x + p.r + 6, y: p.y - h / 2, w, h },
+      },
+      // left of node
+      {
+        x: p.x - p.r - 8,
+        y: p.y + 4,
+        anchor: "end",
+        box: { x: p.x - p.r - w - 6, y: p.y - h / 2, w, h },
+      },
+    ];
+
+    function intersectsCircle(box: {
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+    }): boolean {
+      for (const other of nodes) {
+        if (other.id === n.id) continue;
+        const op = positions.get(other.id);
+        if (!op) continue;
+        const closestX = Math.max(box.x, Math.min(op.x, box.x + box.w));
+        const closestY = Math.max(box.y, Math.min(op.y, box.y + box.h));
+        const dx = op.x - closestX;
+        const dy = op.y - closestY;
+        if (dx * dx + dy * dy < op.r * op.r) return true;
       }
+      return false;
     }
 
-    let collidesWithLabel = false;
-    if (!collidesWithCircle) {
+    function intersectsClaimed(box: {
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+    }): boolean {
       for (const c of claimedLabels) {
         if (
           box.x < c.x + c.w &&
@@ -265,18 +316,34 @@ function pickVisibleLabels(
           box.y < c.y + c.h &&
           box.y + box.h > c.y
         ) {
-          collidesWithLabel = true;
-          break;
+          return true;
         }
       }
+      return false;
     }
 
-    if (forceShow.has(n.id) || (!collidesWithCircle && !collidesWithLabel)) {
-      claimedLabels.push(box);
-      visible.add(n.id);
+    let chosen: Candidate | null = null;
+    for (const c of candidates) {
+      if (!intersectsCircle(c.box) && !intersectsClaimed(c.box)) {
+        chosen = c;
+        break;
+      }
     }
+    // For force-shown labels, fall back to "below" even if it collides — we
+    // accept the visual cost of an overlap to keep the focus context legible.
+    if (!chosen && force) {
+      chosen = candidates[0];
+    }
+    if (!chosen) continue;
+
+    claimedLabels.push(chosen.box);
+    placements.set(n.id, {
+      x: chosen.x,
+      y: chosen.y,
+      anchor: chosen.anchor,
+    });
   }
-  return visible;
+  return placements;
 }
 
 export function ThoughtGraph({
@@ -376,15 +443,16 @@ export function ThoughtGraph({
     return !activeNeighbors?.has(id);
   };
 
-  // Visible labels = collision-resolved set, expanded with hover/focus + neighbors
-  const visibleLabels = useMemo(() => {
+  // Label placements (per-node x/y/anchor). A node missing from the map has
+  // no room for its label — hidden until hovered or focused.
+  const labelPlacements = useMemo(() => {
     const force = new Set<number>();
     if (hottestId !== null) force.add(hottestId);
     if (activeId !== null) {
       force.add(activeId);
       activeNeighbors?.forEach((n) => force.add(n));
     }
-    return pickVisibleLabels(visibleNodes, positions, force);
+    return placeLabels(visibleNodes, positions, force);
   }, [visibleNodes, positions, hottestId, activeId, activeNeighbors]);
 
   function handleNodeClick(node: ConstellationNode, e: React.MouseEvent) {
@@ -536,7 +604,8 @@ export function ThoughtGraph({
           const isHot = n.id === hottestId;
           const isActive = n.id === activeId;
           const dimmed = isDimmed(n.id);
-          const showLabel = !dimmed && visibleLabels.has(n.id);
+          const placement = labelPlacements.get(n.id);
+          const showLabel = !dimmed && !!placement;
           const labelEmphasis = isActive || isHot;
 
           const NodeContent = (
@@ -562,11 +631,11 @@ export function ThoughtGraph({
                 r={Math.max(2, pos.r * 0.25)}
                 fill={color}
               />
-              {showLabel && (
+              {showLabel && placement && (
                 <text
-                  x={pos.x}
-                  y={pos.y + pos.r + 14}
-                  textAnchor="middle"
+                  x={placement.x}
+                  y={placement.y}
+                  textAnchor={placement.anchor}
                   fill={labelEmphasis ? "var(--fg)" : "var(--fg-3)"}
                   fontSize={labelEmphasis ? 12 : 10.5}
                   fontWeight={labelEmphasis ? 500 : 400}
