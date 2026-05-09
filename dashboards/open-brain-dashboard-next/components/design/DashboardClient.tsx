@@ -692,15 +692,17 @@ export function DashboardClient({
   );
 }
 
-// Decorative monotonic sparkline ramping up to the current value.
+// Decorative monotonic sparkline ramping up to the current value. Deterministic
+// — uses a sine-based jitter seeded by `target` so the server and client render
+// identical points (no hydration mismatch).
 function makeSparkline(target: number): number[] {
   const points = 14;
   if (target <= 0) return Array(points).fill(0);
   const arr: number[] = [];
-  const noise = () => 0.85 + Math.random() * 0.3;
   for (let i = 0; i < points; i++) {
     const ratio = (i + 1) / points;
-    arr.push(Math.max(1, Math.round(target * ratio * noise())));
+    const jitter = 0.92 + 0.16 * Math.abs(Math.sin((i + 1) * (target % 7 || 3)));
+    arr.push(Math.max(1, Math.round(target * ratio * jitter)));
   }
   arr[points - 1] = target;
   return arr;
