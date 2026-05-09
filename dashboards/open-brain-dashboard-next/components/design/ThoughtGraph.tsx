@@ -48,6 +48,8 @@ const CATEGORY_COLOR: Record<string, string> = {
 
 // Lightweight force layout: spring edges + repulsion + center pull. Deterministic
 // per `nodes/edges` content so the graph doesn't reshuffle on each re-render.
+// Layout runs in a virtual coordinate space; the auto-fit step below scales the
+// result to fill the visible canvas.
 function layout(
   nodes: ConstellationNode[],
   edges: ConstellationEdge[],
@@ -83,13 +85,21 @@ function layout(
   });
 
   const maxMentions = Math.max(...nodes.map((n) => n.mentions), 1);
+  // Node radius scales with mention count. Slightly bigger when there are
+  // fewer nodes (the auto-fit step amplifies this further).
+  const sizeBoost = Math.max(1, Math.min(2.2, 30 / Math.max(4, nodes.length)));
+  const radiusFor = (n: ConstellationNode) =>
+    (8 + (n.mentions / maxMentions) * 22) * sizeBoost;
 
   const ITERATIONS = 320;
   const REPULSION = 14000;
   const SPRING = 0.014;
   const CENTER_PULL = 0.008;
   const DAMPING = 0.78;
-  const MIN_DIST = 80; // hard separation floor
+  // Hard separation floor — must clear the larger of the two nodes' radii
+  // plus a label-height buffer so labels don't crash into other circles.
+  const minDist = (a: ConstellationNode, b: ConstellationNode) =>
+    radiusFor(a) + radiusFor(b) + 28;
 
   for (let iter = 0; iter < ITERATIONS; iter++) {
     // Repulsion (every pair)
@@ -119,9 +129,10 @@ function layout(
           pb.vx -= fx;
           pb.vy -= fy;
         }
-        // Hard separation if too close
-        if (dist < MIN_DIST) {
-          const push = (MIN_DIST - dist) * 0.5;
+        // Hard separation
+        const md = minDist(a, b);
+        if (dist < md) {
+          const push = (md - dist) * 0.5;
           if (!pa.pinned) {
             pa.x += (dx / dist) * push;
             pa.y += (dy / dist) * push;
@@ -165,21 +176,46 @@ function layout(
     }
   }
 
-  const out = new Map<number, { x: number; y: number; r: number }>();
-  for (const n of nodes) {
+  // Auto-fit: scale & translate so the populated bbox fills the canvas with a
+  // generous label margin. Fewer entities → bigger nodes → more readable.
+  const raw = nodes.map((n) => {
     const p = positions.get(n.id)!;
-    const r = 8 + (n.mentions / maxMentions) * 22;
-    out.set(n.id, {
-      x: Math.max(r + 70, Math.min(width - r - 70, p.x)),
-      y: Math.max(r + 28, Math.min(height - r - 28, p.y)),
-      r,
+    return { id: n.id, x: p.x, y: p.y, r: radiusFor(n) };
+  });
+  const minX = Math.min(...raw.map((p) => p.x - p.r));
+  const maxX = Math.max(...raw.map((p) => p.x + p.r));
+  const minY = Math.min(...raw.map((p) => p.y - p.r));
+  const maxY = Math.max(...raw.map((p) => p.y + p.r));
+  const bboxW = maxX - minX;
+  const bboxH = maxY - minY;
+
+  // Reserve room for labels: bottom needs more (labels render below nodes).
+  const padTop = 36;
+  const padBottom = 56;
+  const padX = 90;
+  const targetW = width - padX * 2;
+  const targetH = height - padTop - padBottom;
+  const scaleX = bboxW > 0 ? targetW / bboxW : 1;
+  const scaleY = bboxH > 0 ? targetH / bboxH : 1;
+  // Cap zoom-in; never zoom out (we want bigger when sparser).
+  const scale = Math.min(scaleX, scaleY, 2.2);
+  const finalScale = Math.max(1, scale);
+
+  const out = new Map<number, { x: number; y: number; r: number }>();
+  for (const p of raw) {
+    out.set(p.id, {
+      x: padX + (p.x - minX) * finalScale + (targetW - bboxW * finalScale) / 2,
+      y:
+        padTop + (p.y - minY) * finalScale + (targetH - bboxH * finalScale) / 2,
+      r: p.r * finalScale,
     });
   }
   return out;
 }
 
-/** Cheap label-collision pass: hide the smaller node's label when its bounding
- * box would overlap a larger node's. Always show labels for `forceShow`. */
+/** Label-collision pass. A label is hidden if its bounding box would overlap
+ * any larger node's circle OR any previously claimed label. Labels in
+ * `forceShow` (hot/active/active-neighbors) always render. */
 function pickVisibleLabels(
   nodes: ConstellationNode[],
   positions: Map<number, { x: number; y: number; r: number }>,
@@ -188,29 +224,55 @@ function pickVisibleLabels(
   const visible = new Set<number>(forceShow);
   // Sort by mentions desc — bigger nodes claim space first.
   const ordered = [...nodes].sort((a, b) => b.mentions - a.mentions);
-  const claimed: { x: number; y: number; w: number; h: number; id: number }[] = [];
+  const claimedLabels: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }[] = [];
   for (const n of ordered) {
     const p = positions.get(n.id);
     if (!p) continue;
     const labelLen = n.label.length;
-    const w = Math.min(160, labelLen * 6.5 + 8);
-    const h = 14;
+    const w = Math.min(180, labelLen * 6.8 + 10);
+    const h = 16;
     const labelY = p.y + p.r + 14;
-    const box = { x: p.x - w / 2, y: labelY - 6, w, h, id: n.id };
-    let overlaps = false;
-    for (const c of claimed) {
-      if (
-        box.x < c.x + c.w &&
-        box.x + box.w > c.x &&
-        box.y < c.y + c.h &&
-        box.y + box.h > c.y
-      ) {
-        overlaps = true;
+    const box = { x: p.x - w / 2, y: labelY - 8, w, h };
+
+    // Reject if label collides with any other (already-positioned) node circle
+    let collidesWithCircle = false;
+    for (const other of nodes) {
+      if (other.id === n.id) continue;
+      const op = positions.get(other.id);
+      if (!op) continue;
+      // Closest point on label-rect to circle center
+      const closestX = Math.max(box.x, Math.min(op.x, box.x + box.w));
+      const closestY = Math.max(box.y, Math.min(op.y, box.y + box.h));
+      const dx = op.x - closestX;
+      const dy = op.y - closestY;
+      if (dx * dx + dy * dy < op.r * op.r) {
+        collidesWithCircle = true;
         break;
       }
     }
-    if (!overlaps || forceShow.has(n.id)) {
-      claimed.push(box);
+
+    let collidesWithLabel = false;
+    if (!collidesWithCircle) {
+      for (const c of claimedLabels) {
+        if (
+          box.x < c.x + c.w &&
+          box.x + box.w > c.x &&
+          box.y < c.y + c.h &&
+          box.y + box.h > c.y
+        ) {
+          collidesWithLabel = true;
+          break;
+        }
+      }
+    }
+
+    if (forceShow.has(n.id) || (!collidesWithCircle && !collidesWithLabel)) {
+      claimedLabels.push(box);
       visible.add(n.id);
     }
   }
@@ -230,8 +292,8 @@ export function ThoughtGraph({
   const [focused, setFocused] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Filter nodes by category visibility
-  const visibleNodes = useMemo(() => {
+  // Filter nodes by category visibility (legend toggle)
+  const categoryVisibleNodes = useMemo(() => {
     if (!hiddenCategories || hiddenCategories.size === 0) return nodes;
     return nodes.filter((n) => {
       const cat = TYPE_TO_CATEGORY[n.type] || "projects";
@@ -239,9 +301,9 @@ export function ThoughtGraph({
     });
   }, [nodes, hiddenCategories]);
 
-  const visibleNodeIds = useMemo(
-    () => new Set(visibleNodes.map((n) => n.id)),
-    [visibleNodes]
+  const categoryVisibleIds = useMemo(
+    () => new Set(categoryVisibleNodes.map((n) => n.id)),
+    [categoryVisibleNodes]
   );
 
   // Apply min-weight + hidden-category filters to edges
@@ -250,11 +312,30 @@ export function ThoughtGraph({
       edges.filter(
         (e) =>
           e.weight >= minWeight &&
-          visibleNodeIds.has(e.source) &&
-          visibleNodeIds.has(e.target)
+          categoryVisibleIds.has(e.source) &&
+          categoryVisibleIds.has(e.target)
       ),
-    [edges, minWeight, visibleNodeIds]
+    [edges, minWeight, categoryVisibleIds]
   );
+
+  // Drop orphan nodes: only keep entities that still have at least one edge at
+  // the current min-weight. The hottest node is always kept so the canvas has
+  // a center anchor even when min-weight is high.
+  const visibleNodes = useMemo(() => {
+    const connected = new Set<number>();
+    for (const e of filteredEdges) {
+      connected.add(e.source);
+      connected.add(e.target);
+    }
+    // Always pin the hottest visible node so the layout never goes empty
+    const hottest = categoryVisibleNodes.length
+      ? categoryVisibleNodes.reduce((best, n) =>
+          n.mentions > best.mentions ? n : best
+        )
+      : null;
+    if (hottest) connected.add(hottest.id);
+    return categoryVisibleNodes.filter((n) => connected.has(n.id));
+  }, [categoryVisibleNodes, filteredEdges]);
 
   // Adjacency for hover/focus dimming
   const adjacency = useMemo(() => {

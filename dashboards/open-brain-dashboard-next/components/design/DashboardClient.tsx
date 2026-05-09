@@ -420,9 +420,17 @@ export function DashboardClient({
                   {minWeight}
                 </span>
                 <span style={{ color: "var(--fg-4)" }}>
-                  showing{" "}
-                  {graph.edges.filter((e) => e.weight >= minWeight).length} of{" "}
-                  {graph.edges.length} edges
+                  {(() => {
+                    const liveEdges = graph.edges.filter(
+                      (e) => e.weight >= minWeight
+                    );
+                    const liveNodes = new Set<number>();
+                    for (const e of liveEdges) {
+                      liveNodes.add(e.source);
+                      liveNodes.add(e.target);
+                    }
+                    return `showing ${liveNodes.size} entities · ${liveEdges.length} of ${graph.edges.length} links`;
+                  })()}
                 </span>
               </div>
             );
