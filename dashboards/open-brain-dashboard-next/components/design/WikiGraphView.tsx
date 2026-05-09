@@ -461,7 +461,7 @@ export function WikiGraphView({
           borderRadius: 16,
           overflow: "hidden",
           background:
-            "radial-gradient(ellipse at 50% 30%, rgba(130,97,255,0.08), rgba(12,12,18,0.4))",
+            "radial-gradient(ellipse at 50% 30%, rgba(130,97,255,0.10), color-mix(in srgb, var(--bg-1) 60%, transparent))",
           border: "1px solid var(--line)",
           position: "relative",
           transition: "all 0.25s ease",
@@ -660,7 +660,7 @@ export function WikiGraphView({
                 fontSize: 11,
                 color: "var(--fg-3)",
                 padding: "6px 12px",
-                background: "rgba(7,7,10,0.7)",
+                background: "color-mix(in srgb, var(--bg-0) 80%, transparent)",
                 borderRadius: 6,
                 border: "1px solid var(--line-strong)",
               }}

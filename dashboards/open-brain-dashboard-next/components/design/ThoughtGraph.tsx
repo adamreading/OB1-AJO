@@ -665,7 +665,7 @@ export function ThoughtGraph({
                 padding: "4px 10px",
                 borderRadius: 6,
                 border: "1px solid var(--line)",
-                background: "rgba(7,7,10,0.7)",
+                background: "color-mix(in srgb, var(--bg-0) 80%, transparent)",
                 color: "var(--violet-300)",
                 fontSize: 11,
                 fontFamily: "var(--font-mono)",
