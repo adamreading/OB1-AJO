@@ -67,14 +67,18 @@ function layout(
   const cy = height / 2;
   const radius = Math.min(width, height) * 0.38;
 
-  // Seed: pinned node anchored at center, others on a spiral around it.
+  // Seed: pinned node anchored at center, others on a sunflower (golden-ratio)
+  // distribution. The sunflower fills 2D space evenly — far less prone to
+  // collapsing into a line than a single-arm spiral.
   const others = nodes.filter((n) => n.id !== pinnedId);
   if (pinnedId !== null && nodes.some((n) => n.id === pinnedId)) {
     positions.set(pinnedId, { x: cx, y: cy, vx: 0, vy: 0, pinned: true });
   }
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
   others.forEach((n, i) => {
-    const angle = (i / Math.max(1, others.length)) * Math.PI * 2;
-    const r = radius * (0.45 + 0.55 * (i / Math.max(1, others.length)));
+    const t = i + 1;
+    const angle = t * goldenAngle;
+    const r = radius * Math.sqrt(t / Math.max(1, others.length));
     positions.set(n.id, {
       x: cx + Math.cos(angle) * r,
       y: cy + Math.sin(angle) * r,
@@ -91,17 +95,26 @@ function layout(
   const radiusFor = (n: ConstellationNode) =>
     (8 + (n.mentions / maxMentions) * 22) * sizeBoost;
 
-  const ITERATIONS = 320;
-  const REPULSION = 14000;
-  const SPRING = 0.014;
-  const CENTER_PULL = 0.008;
-  const DAMPING = 0.78;
+  // Forces tuned for typical 5–30 node graphs. Repulsion was previously 14000
+  // which collapsed dense graphs onto a diagonal because center-pull couldn't
+  // contain it. Lower repulsion + stronger center-pull keeps the cluster 2D.
+  const ITERATIONS = 360;
+  const REPULSION = 8500;
+  const SPRING = 0.013;
+  const CENTER_PULL = 0.018;
+  const DAMPING = 0.82;
   // Hard separation floor — must clear the larger of the two nodes' radii
   // plus a label-height buffer so labels don't crash into other circles.
   const minDist = (a: ConstellationNode, b: ConstellationNode) =>
     radiusFor(a) + radiusFor(b) + 28;
 
   for (let iter = 0; iter < ITERATIONS; iter++) {
+    // Cooling: forces start strong and ease off so the layout settles instead
+    // of oscillating. Velocity cap also tightens with temperature.
+    const t = 1 - iter / ITERATIONS;
+    const temp = 0.4 + 0.6 * t;
+    const maxStep = 30 * t + 4;
+
     // Repulsion (every pair)
     for (let i = 0; i < nodes.length; i++) {
       const a = nodes[i];
@@ -118,7 +131,7 @@ function layout(
           dsq = 4;
         }
         const dist = Math.sqrt(dsq);
-        const force = REPULSION / dsq;
+        const force = (REPULSION * temp) / dsq;
         const fx = (dx / dist) * force;
         const fy = (dy / dist) * force;
         if (!pa.pinned) {
@@ -163,7 +176,8 @@ function layout(
       }
     }
 
-    // Center pull + integrate
+    // Center pull + integrate (with velocity cap so a single iteration can't
+    // fling a node halfway across the canvas).
     for (const n of nodes) {
       const p = positions.get(n.id)!;
       if (p.pinned) continue;
@@ -171,6 +185,11 @@ function layout(
       p.vy += (cy - p.y) * CENTER_PULL;
       p.vx *= DAMPING;
       p.vy *= DAMPING;
+      const speed = Math.hypot(p.vx, p.vy);
+      if (speed > maxStep) {
+        p.vx = (p.vx / speed) * maxStep;
+        p.vy = (p.vy / speed) * maxStep;
+      }
       p.x += p.vx;
       p.y += p.vy;
     }
@@ -373,8 +392,8 @@ export function ThoughtGraph({
     [categoryVisibleNodes]
   );
 
-  // Apply min-weight + hidden-category filters to edges
-  const filteredEdges = useMemo(
+  // Edges respecting min-weight + hidden categories (full set, focus-agnostic)
+  const baseEdges = useMemo(
     () =>
       edges.filter(
         (e) =>
@@ -385,16 +404,32 @@ export function ThoughtGraph({
     [edges, minWeight, categoryVisibleIds]
   );
 
-  // Drop orphan nodes: only keep entities that still have at least one edge at
-  // the current min-weight. The hottest node is always kept so the canvas has
-  // a center anchor even when min-weight is high.
+  // Full adjacency (used to compute the neighborhood when focusing)
+  const baseAdjacency = useMemo(() => {
+    const map = new Map<number, Set<number>>();
+    for (const n of categoryVisibleNodes) map.set(n.id, new Set());
+    for (const e of baseEdges) {
+      map.get(e.source)?.add(e.target);
+      map.get(e.target)?.add(e.source);
+    }
+    return map;
+  }, [categoryVisibleNodes, baseEdges]);
+
+  // Visible nodes:
+  // - Focus mode → focused node + its first-degree neighbors only
+  // - Otherwise → drop orphans (no edges at current min-weight). Always keep
+  //   the hottest visible entity as a center anchor.
   const visibleNodes = useMemo(() => {
+    if (focused !== null && baseAdjacency.has(focused)) {
+      const neighbors = baseAdjacency.get(focused) ?? new Set();
+      const keep = new Set<number>([focused, ...neighbors]);
+      return categoryVisibleNodes.filter((n) => keep.has(n.id));
+    }
     const connected = new Set<number>();
-    for (const e of filteredEdges) {
+    for (const e of baseEdges) {
       connected.add(e.source);
       connected.add(e.target);
     }
-    // Always pin the hottest visible node so the layout never goes empty
     const hottest = categoryVisibleNodes.length
       ? categoryVisibleNodes.reduce((best, n) =>
           n.mentions > best.mentions ? n : best
@@ -402,18 +437,21 @@ export function ThoughtGraph({
       : null;
     if (hottest) connected.add(hottest.id);
     return categoryVisibleNodes.filter((n) => connected.has(n.id));
-  }, [categoryVisibleNodes, filteredEdges]);
+  }, [categoryVisibleNodes, baseEdges, focused, baseAdjacency]);
 
-  // Adjacency for hover/focus dimming
-  const adjacency = useMemo(() => {
-    const map = new Map<number, Set<number>>();
-    for (const n of visibleNodes) map.set(n.id, new Set());
-    for (const e of filteredEdges) {
-      map.get(e.source)?.add(e.target);
-      map.get(e.target)?.add(e.source);
-    }
-    return map;
-  }, [visibleNodes, filteredEdges]);
+  const visibleIds = useMemo(
+    () => new Set(visibleNodes.map((n) => n.id)),
+    [visibleNodes]
+  );
+
+  // Edges to render — both endpoints must be in visibleNodes
+  const filteredEdges = useMemo(
+    () =>
+      baseEdges.filter(
+        (e) => visibleIds.has(e.source) && visibleIds.has(e.target)
+      ),
+    [baseEdges, visibleIds]
+  );
 
   const hottestId = useMemo(
     () =>
@@ -434,26 +472,30 @@ export function ThoughtGraph({
     [visibleNodes, filteredEdges, width, height, pinnedId]
   );
 
-  // Active node = focused (locked) > hover (transient) > hottest
+  // Active node for label emphasis (focus is centered; non-focus uses hover)
   const activeId = focused ?? hover;
-  const activeNeighbors = activeId !== null ? adjacency.get(activeId) : null;
-  const isDimmed = (id: number): boolean => {
-    if (activeId === null) return false;
-    if (id === activeId) return false;
-    return !activeNeighbors?.has(id);
+  const activeNeighbors = activeId !== null ? baseAdjacency.get(activeId) : null;
+  // No more dimming — focus filters the visible node set, hover just highlights
+  const isHoverDimmed = (id: number): boolean => {
+    if (focused !== null) return false; // focus mode already filters
+    if (hover === null) return false;
+    if (id === hover) return false;
+    return !baseAdjacency.get(hover)?.has(id);
   };
 
-  // Label placements (per-node x/y/anchor). A node missing from the map has
-  // no room for its label — hidden until hovered or focused.
+  // Label placements (per-node x/y/anchor). Nodes missing from the map have
+  // no clear slot — they go unlabelled until hovered/focused.
   const labelPlacements = useMemo(() => {
     const force = new Set<number>();
     if (hottestId !== null) force.add(hottestId);
     if (activeId !== null) {
       force.add(activeId);
-      activeNeighbors?.forEach((n) => force.add(n));
+      activeNeighbors?.forEach((n) => {
+        if (visibleIds.has(n)) force.add(n);
+      });
     }
     return placeLabels(visibleNodes, positions, force);
-  }, [visibleNodes, positions, hottestId, activeId, activeNeighbors]);
+  }, [visibleNodes, positions, hottestId, activeId, activeNeighbors, visibleIds]);
 
   function handleNodeClick(node: ConstellationNode, e: React.MouseEvent) {
     e.preventDefault();
@@ -498,28 +540,50 @@ export function ThoughtGraph({
         if (e.target === e.currentTarget) setFocused(null);
       }}
     >
-      {focused !== null && (
-        <button
-          type="button"
-          onClick={() => setFocused(null)}
-          style={{
-            position: "absolute",
-            top: 12,
-            left: 12,
-            padding: "4px 10px",
-            borderRadius: 6,
-            border: "1px solid var(--line)",
-            background: "rgba(7,7,10,0.7)",
-            color: "var(--violet-300)",
-            fontSize: 11,
-            fontFamily: "var(--font-mono)",
-            cursor: "pointer",
-            zIndex: 2,
-          }}
-        >
-          ← exit focus
-        </button>
-      )}
+      {focused !== null && (() => {
+        const focusedNode = nodes.find((n) => n.id === focused);
+        return (
+          <div
+            style={{
+              position: "absolute",
+              top: 12,
+              left: 12,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              zIndex: 2,
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setFocused(null)}
+              style={{
+                padding: "4px 10px",
+                borderRadius: 6,
+                border: "1px solid var(--line)",
+                background: "rgba(7,7,10,0.7)",
+                color: "var(--violet-300)",
+                fontSize: 11,
+                fontFamily: "var(--font-mono)",
+                cursor: "pointer",
+              }}
+            >
+              ← exit focus
+            </button>
+            {focusedNode && (
+              <span
+                style={{
+                  fontSize: 11,
+                  color: "var(--fg-3)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                showing {focusedNode.label}&apos;s neighborhood
+              </span>
+            )}
+          </div>
+        );
+      })()}
       <svg
         width="100%"
         height={height}
@@ -556,11 +620,15 @@ export function ThoughtGraph({
           const a = positions.get(e.source);
           const b = positions.get(e.target);
           if (!a || !b) return null;
-          const isActiveEdge =
-            activeId !== null &&
-            (e.source === activeId || e.target === activeId);
+          // In hover mode, dim edges that don't touch the hovered node.
+          // Focus mode already filters non-relevant nodes out, so all
+          // remaining edges are by definition the focused entity's network.
+          const isHoverEdge =
+            hover !== null && (e.source === hover || e.target === hover);
           const dimmed =
-            activeId !== null && !isActiveEdge ? 0.06 : Math.min(1, 0.25 + e.weight * 0.04);
+            hover !== null && focused === null && !isHoverEdge
+              ? 0.06
+              : Math.min(1, 0.25 + e.weight * 0.04);
           return (
             <line
               key={i}
@@ -569,11 +637,11 @@ export function ThoughtGraph({
               x2={b.x}
               y2={b.y}
               stroke={
-                isActiveEdge
+                isHoverEdge
                   ? "rgba(157,131,255,0.9)"
                   : `rgba(157,131,255,${dimmed})`
               }
-              strokeWidth={isActiveEdge ? 1.5 : 0.8}
+              strokeWidth={isHoverEdge ? 1.5 : 0.8}
             />
           );
         })}
@@ -590,7 +658,7 @@ export function ThoughtGraph({
                 cy={pos.y}
                 r={pos.r * 2.4}
                 fill="url(#constellation-hot-glow)"
-                opacity={isDimmed(hottestId) ? 0.15 : 1}
+                opacity={isHoverDimmed(hottestId) ? 0.15 : 1}
               />
             );
           })()}
@@ -603,7 +671,7 @@ export function ThoughtGraph({
           const color = CATEGORY_COLOR[cat];
           const isHot = n.id === hottestId;
           const isActive = n.id === activeId;
-          const dimmed = isDimmed(n.id);
+          const dimmed = isHoverDimmed(n.id);
           const placement = labelPlacements.get(n.id);
           const showLabel = !dimmed && !!placement;
           const labelEmphasis = isActive || isHot;
