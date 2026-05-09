@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export interface ConstellationNode {
   id: number;
   label: string;
   type: string;
   mentions: number;
+  slug?: string | null;
 }
 
 export interface ConstellationEdge {
@@ -20,6 +21,8 @@ interface Props {
   edges: ConstellationEdge[];
   width?: number;
   height?: number;
+  /** Minimum edge weight to render. Nodes with no surviving edges still appear. */
+  minWeight?: number;
 }
 
 const TYPE_TO_CATEGORY: Record<string, "people" | "projects" | "orgs" | "tools"> = {
@@ -46,33 +49,44 @@ function layout(
   nodes: ConstellationNode[],
   edges: ConstellationEdge[],
   width: number,
-  height: number
+  height: number,
+  pinnedId: number | null
 ) {
-  if (!nodes.length) return new Map<number, { x: number; y: number }>();
+  if (!nodes.length) return new Map<number, { x: number; y: number; r: number }>();
 
-  // Seed positions on a spiral so layout converges quickly
-  const positions = new Map<number, { x: number; y: number; vx: number; vy: number }>();
+  const positions = new Map<
+    number,
+    { x: number; y: number; vx: number; vy: number; pinned: boolean }
+  >();
   const cx = width / 2;
   const cy = height / 2;
-  const radius = Math.min(width, height) * 0.35;
-  nodes.forEach((n, i) => {
-    const angle = (i / nodes.length) * Math.PI * 2;
-    const r = radius * (0.4 + 0.6 * (i / nodes.length));
+  const radius = Math.min(width, height) * 0.38;
+
+  // Seed: pinned node anchored at center, others on a spiral around it.
+  const others = nodes.filter((n) => n.id !== pinnedId);
+  if (pinnedId !== null && nodes.some((n) => n.id === pinnedId)) {
+    positions.set(pinnedId, { x: cx, y: cy, vx: 0, vy: 0, pinned: true });
+  }
+  others.forEach((n, i) => {
+    const angle = (i / Math.max(1, others.length)) * Math.PI * 2;
+    const r = radius * (0.45 + 0.55 * (i / Math.max(1, others.length)));
     positions.set(n.id, {
       x: cx + Math.cos(angle) * r,
       y: cy + Math.sin(angle) * r,
       vx: 0,
       vy: 0,
+      pinned: false,
     });
   });
 
   const maxMentions = Math.max(...nodes.map((n) => n.mentions), 1);
 
-  const ITERATIONS = 220;
-  const REPULSION = 6500;
-  const SPRING = 0.018;
-  const CENTER_PULL = 0.012;
+  const ITERATIONS = 320;
+  const REPULSION = 14000;
+  const SPRING = 0.014;
+  const CENTER_PULL = 0.008;
   const DAMPING = 0.78;
+  const MIN_DIST = 80; // hard separation floor
 
   for (let iter = 0; iter < ITERATIONS; iter++) {
     // Repulsion (every pair)
@@ -86,16 +100,34 @@ function layout(
         let dy = pa.y - pb.y;
         let dsq = dx * dx + dy * dy;
         if (dsq < 1) {
-          dx = (Math.random() - 0.5) * 2;
-          dy = (Math.random() - 0.5) * 2;
+          dx = (i - j) * 0.5;
+          dy = (j - i) * 0.5;
           dsq = 4;
         }
         const dist = Math.sqrt(dsq);
         const force = REPULSION / dsq;
-        pa.vx += (dx / dist) * force;
-        pa.vy += (dy / dist) * force;
-        pb.vx -= (dx / dist) * force;
-        pb.vy -= (dy / dist) * force;
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        if (!pa.pinned) {
+          pa.vx += fx;
+          pa.vy += fy;
+        }
+        if (!pb.pinned) {
+          pb.vx -= fx;
+          pb.vy -= fy;
+        }
+        // Hard separation if too close
+        if (dist < MIN_DIST) {
+          const push = (MIN_DIST - dist) * 0.5;
+          if (!pa.pinned) {
+            pa.x += (dx / dist) * push;
+            pa.y += (dy / dist) * push;
+          }
+          if (!pb.pinned) {
+            pb.x -= (dx / dist) * push;
+            pb.y -= (dy / dist) * push;
+          }
+        }
       }
     }
 
@@ -107,15 +139,20 @@ function layout(
       const dx = pb.x - pa.x;
       const dy = pb.y - pa.y;
       const k = SPRING * Math.min(3, e.weight);
-      pa.vx += dx * k;
-      pa.vy += dy * k;
-      pb.vx -= dx * k;
-      pb.vy -= dy * k;
+      if (!pa.pinned) {
+        pa.vx += dx * k;
+        pa.vy += dy * k;
+      }
+      if (!pb.pinned) {
+        pb.vx -= dx * k;
+        pb.vy -= dy * k;
+      }
     }
 
-    // Center pull
+    // Center pull + integrate
     for (const n of nodes) {
       const p = positions.get(n.id)!;
+      if (p.pinned) continue;
       p.vx += (cx - p.x) * CENTER_PULL;
       p.vy += (cy - p.y) * CENTER_PULL;
       p.vx *= DAMPING;
@@ -125,44 +162,135 @@ function layout(
     }
   }
 
-  // Clamp to viewport with a margin proportional to node radius
-  const out = new Map<number, { x: number; y: number }>();
+  const out = new Map<number, { x: number; y: number; r: number }>();
   for (const n of nodes) {
     const p = positions.get(n.id)!;
     const r = 8 + (n.mentions / maxMentions) * 22;
     out.set(n.id, {
-      x: Math.max(r + 60, Math.min(width - r - 60, p.x)),
-      y: Math.max(r + 24, Math.min(height - r - 24, p.y)),
+      x: Math.max(r + 70, Math.min(width - r - 70, p.x)),
+      y: Math.max(r + 28, Math.min(height - r - 28, p.y)),
+      r,
     });
   }
   return out;
+}
+
+/** Cheap label-collision pass: hide the smaller node's label when its bounding
+ * box would overlap a larger node's. Always show labels for `forceShow`. */
+function pickVisibleLabels(
+  nodes: ConstellationNode[],
+  positions: Map<number, { x: number; y: number; r: number }>,
+  forceShow: Set<number>
+): Set<number> {
+  const visible = new Set<number>(forceShow);
+  // Sort by mentions desc — bigger nodes claim space first.
+  const ordered = [...nodes].sort((a, b) => b.mentions - a.mentions);
+  const claimed: { x: number; y: number; w: number; h: number; id: number }[] = [];
+  for (const n of ordered) {
+    const p = positions.get(n.id);
+    if (!p) continue;
+    const labelLen = n.label.length;
+    const w = Math.min(160, labelLen * 6.5 + 8);
+    const h = 14;
+    const labelY = p.y + p.r + 14;
+    const box = { x: p.x - w / 2, y: labelY - 6, w, h, id: n.id };
+    let overlaps = false;
+    for (const c of claimed) {
+      if (
+        box.x < c.x + c.w &&
+        box.x + box.w > c.x &&
+        box.y < c.y + c.h &&
+        box.y + box.h > c.y
+      ) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (!overlaps || forceShow.has(n.id)) {
+      claimed.push(box);
+      visible.add(n.id);
+    }
+  }
+  return visible;
 }
 
 export function ThoughtGraph({
   nodes,
   edges,
   width = 1100,
-  height = 400,
+  height = 600,
+  minWeight = 1,
 }: Props) {
   const [hover, setHover] = useState<number | null>(null);
+  const [focused, setFocused] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Apply min-weight filter
+  const filteredEdges = useMemo(
+    () => edges.filter((e) => e.weight >= minWeight),
+    [edges, minWeight]
+  );
+
+  // Adjacency for hover/focus dimming
+  const adjacency = useMemo(() => {
+    const map = new Map<number, Set<number>>();
+    for (const n of nodes) map.set(n.id, new Set());
+    for (const e of filteredEdges) {
+      map.get(e.source)?.add(e.target);
+      map.get(e.target)?.add(e.source);
+    }
+    return map;
+  }, [nodes, filteredEdges]);
 
   const positions = useMemo(
-    () => layout(nodes, edges, width, height),
-    [nodes, edges, width, height]
+    () => layout(nodes, filteredEdges, width, height, focused),
+    [nodes, filteredEdges, width, height, focused]
   );
 
-  const maxMentions = useMemo(
-    () => Math.max(1, ...nodes.map((n) => n.mentions)),
-    [nodes]
-  );
   const hottestId = useMemo(
-    () => nodes.reduce<number | null>((best, n) => {
-      if (best === null) return n.id;
-      const bestNode = nodes.find((x) => x.id === best);
-      return n.mentions > (bestNode?.mentions ?? 0) ? n.id : best;
-    }, null),
+    () =>
+      nodes.length === 0
+        ? null
+        : nodes.reduce((best, n) => (n.mentions > best.mentions ? n : best))
+            .id,
     [nodes]
   );
+
+  // Active node = focused (locked) > hover (transient) > hottest
+  const activeId = focused ?? hover;
+  const activeNeighbors = activeId !== null ? adjacency.get(activeId) : null;
+  const isDimmed = (id: number): boolean => {
+    if (activeId === null) return false;
+    if (id === activeId) return false;
+    return !activeNeighbors?.has(id);
+  };
+
+  // Visible labels = collision-resolved set, expanded with hover/focus + neighbors
+  const visibleLabels = useMemo(() => {
+    const force = new Set<number>();
+    if (hottestId !== null) force.add(hottestId);
+    if (activeId !== null) {
+      force.add(activeId);
+      activeNeighbors?.forEach((n) => force.add(n));
+    }
+    return pickVisibleLabels(nodes, positions, force);
+  }, [nodes, positions, hottestId, activeId, activeNeighbors]);
+
+  function handleNodeClick(node: ConstellationNode, e: React.MouseEvent) {
+    // Shift/cmd-click → focus mode (don't navigate)
+    if (e.shiftKey || e.metaKey || e.ctrlKey) {
+      e.preventDefault();
+      setFocused((f) => (f === node.id ? null : node.id));
+      return;
+    }
+    // Plain click → wiki page if available, else just focus
+    if (node.slug) {
+      // Allow Link behavior to take over
+      return;
+    }
+    e.preventDefault();
+    setFocused((f) => (f === node.id ? null : node.id));
+  }
 
   if (!nodes.length) {
     return (
@@ -183,126 +311,210 @@ export function ThoughtGraph({
   }
 
   return (
-    <svg
-      width="100%"
-      height={height}
-      viewBox={`0 0 ${width} ${height}`}
-      style={{ display: "block" }}
+    <div
+      ref={containerRef}
+      style={{ position: "relative", width: "100%" }}
+      onClick={(e) => {
+        // Click on empty canvas exits focus mode
+        if (e.target === e.currentTarget) setFocused(null);
+      }}
     >
-      <defs>
-        <radialGradient id="constellation-hot-glow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#9d83ff" stopOpacity="0.5" />
-          <stop offset="100%" stopColor="#9d83ff" stopOpacity="0" />
-        </radialGradient>
-        <radialGradient id="constellation-canvas-glow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="rgba(130,97,255,0.10)" />
-          <stop offset="100%" stopColor="rgba(130,97,255,0)" />
-        </radialGradient>
-      </defs>
-      <rect
-        x="0"
-        y="0"
-        width={width}
+      {focused !== null && (
+        <button
+          type="button"
+          onClick={() => setFocused(null)}
+          style={{
+            position: "absolute",
+            top: 12,
+            left: 12,
+            padding: "4px 10px",
+            borderRadius: 6,
+            border: "1px solid var(--line)",
+            background: "rgba(7,7,10,0.7)",
+            color: "var(--violet-300)",
+            fontSize: 11,
+            fontFamily: "var(--font-mono)",
+            cursor: "pointer",
+            zIndex: 2,
+          }}
+        >
+          ← exit focus
+        </button>
+      )}
+      <svg
+        width="100%"
         height={height}
-        fill="url(#constellation-canvas-glow)"
-      />
+        viewBox={`0 0 ${width} ${height}`}
+        style={{ display: "block", cursor: hover !== null ? "pointer" : "default" }}
+      >
+        <defs>
+          <radialGradient id="constellation-hot-glow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="#9d83ff" stopOpacity="0.5" />
+            <stop offset="100%" stopColor="#9d83ff" stopOpacity="0" />
+          </radialGradient>
+          <radialGradient
+            id="constellation-canvas-glow"
+            cx="50%"
+            cy="50%"
+            r="50%"
+          >
+            <stop offset="0%" stopColor="rgba(130,97,255,0.10)" />
+            <stop offset="100%" stopColor="rgba(130,97,255,0)" />
+          </radialGradient>
+        </defs>
+        <rect
+          x="0"
+          y="0"
+          width={width}
+          height={height}
+          fill="url(#constellation-canvas-glow)"
+          onClick={() => setFocused(null)}
+          style={{ cursor: focused !== null ? "pointer" : "default" }}
+        />
 
-      {/* Edges */}
-      {edges.map((e, i) => {
-        const a = positions.get(e.source);
-        const b = positions.get(e.target);
-        if (!a || !b) return null;
-        const isHot = e.source === hottestId || e.target === hottestId;
-        const opacity = Math.min(1, 0.25 + e.weight * 0.04);
-        return (
-          <line
-            key={i}
-            x1={a.x}
-            y1={a.y}
-            x2={b.x}
-            y2={b.y}
-            stroke={`rgba(157,131,255,${opacity})`}
-            strokeWidth={isHot ? 1 : 0.6}
-          />
-        );
-      })}
-
-      {/* Hot-node glow */}
-      {hottestId !== null &&
-        (() => {
-          const node = nodes.find((n) => n.id === hottestId);
-          const pos = positions.get(hottestId);
-          if (!node || !pos) return null;
-          const r = 8 + (node.mentions / maxMentions) * 22;
+        {/* Edges */}
+        {filteredEdges.map((e, i) => {
+          const a = positions.get(e.source);
+          const b = positions.get(e.target);
+          if (!a || !b) return null;
+          const isActiveEdge =
+            activeId !== null &&
+            (e.source === activeId || e.target === activeId);
+          const dimmed =
+            activeId !== null && !isActiveEdge ? 0.06 : Math.min(1, 0.25 + e.weight * 0.04);
           return (
-            <circle
-              cx={pos.x}
-              cy={pos.y}
-              r={r * 2.4}
-              fill="url(#constellation-hot-glow)"
+            <line
+              key={i}
+              x1={a.x}
+              y1={a.y}
+              x2={b.x}
+              y2={b.y}
+              stroke={
+                isActiveEdge
+                  ? "rgba(157,131,255,0.9)"
+                  : `rgba(157,131,255,${dimmed})`
+              }
+              strokeWidth={isActiveEdge ? 1.5 : 0.8}
             />
           );
-        })()}
+        })}
 
-      {/* Nodes */}
-      {nodes.map((n) => {
-        const pos = positions.get(n.id);
-        if (!pos) return null;
-        const r = 8 + (n.mentions / maxMentions) * 22;
-        const cat = TYPE_TO_CATEGORY[n.type] || "projects";
-        const color = CATEGORY_COLOR[cat];
-        const isHot = n.id === hottestId;
-        const isHover = hover === n.id;
-        return (
-          <g
-            key={n.id}
-            style={{ cursor: "pointer" }}
-            onMouseEnter={() => setHover(n.id)}
-            onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
-          >
-            <circle
-              cx={pos.x}
-              cy={pos.y}
-              r={r}
-              fill={color}
-              fillOpacity={isHot ? 0.25 : 0.15}
-              stroke={color}
-              strokeWidth={isHot || isHover ? 1.5 : 1}
-            />
-            <circle
-              cx={pos.x}
-              cy={pos.y}
-              r={Math.max(2, r * 0.25)}
-              fill={color}
-            />
-            <text
-              x={pos.x}
-              y={pos.y + r + 14}
-              textAnchor="middle"
-              fill={isHot ? "var(--fg)" : "var(--fg-3)"}
-              fontSize={isHot ? 12 : 10.5}
-              fontWeight={isHot ? 500 : 400}
+        {/* Hot-node glow */}
+        {hottestId !== null &&
+          (() => {
+            const node = nodes.find((n) => n.id === hottestId);
+            const pos = positions.get(hottestId);
+            if (!node || !pos) return null;
+            return (
+              <circle
+                cx={pos.x}
+                cy={pos.y}
+                r={pos.r * 2.4}
+                fill="url(#constellation-hot-glow)"
+                opacity={isDimmed(hottestId) ? 0.15 : 1}
+              />
+            );
+          })()}
+
+        {/* Nodes */}
+        {nodes.map((n) => {
+          const pos = positions.get(n.id);
+          if (!pos) return null;
+          const cat = TYPE_TO_CATEGORY[n.type] || "projects";
+          const color = CATEGORY_COLOR[cat];
+          const isHot = n.id === hottestId;
+          const isActive = n.id === activeId;
+          const dimmed = isDimmed(n.id);
+          const showLabel = !dimmed && visibleLabels.has(n.id);
+          const labelEmphasis = isActive || isHot;
+
+          const NodeContent = (
+            <g
+              onMouseEnter={() => setHover(n.id)}
+              onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
+              onClick={(e) => handleNodeClick(n, e)}
+              opacity={dimmed ? 0.18 : 1}
+              style={{ cursor: "pointer", transition: "opacity 160ms" }}
             >
-              {n.label}
-            </text>
-            {isHot && (
-              <text
-                x={pos.x}
-                y={pos.y + 4}
-                textAnchor="middle"
-                fill="var(--fg)"
-                fontSize="13"
-                fontWeight="600"
-              >
-                {n.mentions}
-              </text>
-            )}
-            {isHover && !isHot && (
-              <title>{`${n.label} · ${n.mentions} mentions`}</title>
-            )}
-          </g>
-        );
-      })}
-    </svg>
+              <circle
+                cx={pos.x}
+                cy={pos.y}
+                r={pos.r}
+                fill={color}
+                fillOpacity={isActive ? 0.32 : isHot ? 0.25 : 0.15}
+                stroke={color}
+                strokeWidth={isActive ? 2 : isHot ? 1.5 : 1}
+              />
+              <circle
+                cx={pos.x}
+                cy={pos.y}
+                r={Math.max(2, pos.r * 0.25)}
+                fill={color}
+              />
+              {showLabel && (
+                <text
+                  x={pos.x}
+                  y={pos.y + pos.r + 14}
+                  textAnchor="middle"
+                  fill={labelEmphasis ? "var(--fg)" : "var(--fg-3)"}
+                  fontSize={labelEmphasis ? 12 : 10.5}
+                  fontWeight={labelEmphasis ? 500 : 400}
+                  style={{ pointerEvents: "none" }}
+                >
+                  {n.label}
+                </text>
+              )}
+              {isHot && !isActive && (
+                <text
+                  x={pos.x}
+                  y={pos.y + 4}
+                  textAnchor="middle"
+                  fill="var(--fg)"
+                  fontSize="13"
+                  fontWeight="600"
+                  style={{ pointerEvents: "none" }}
+                >
+                  {n.mentions}
+                </text>
+              )}
+              <title>{`${n.label} · ${n.mentions} mentions${
+                n.slug ? " · click to open wiki, ⇧-click to focus" : " · click to focus"
+              }`}</title>
+            </g>
+          );
+
+          // Wrap in <a> when slug exists so plain click navigates
+          return n.slug ? (
+            <a
+              key={n.id}
+              href={`/wiki?slug=${n.slug}`}
+              onClick={(e) => {
+                if (e.shiftKey || e.metaKey || e.ctrlKey) {
+                  e.preventDefault();
+                  setFocused((f) => (f === n.id ? null : n.id));
+                }
+              }}
+            >
+              {NodeContent}
+            </a>
+          ) : (
+            <g key={n.id}>{NodeContent}</g>
+          );
+        })}
+      </svg>
+      <div
+        style={{
+          position: "absolute",
+          bottom: 8,
+          left: 12,
+          fontSize: 10,
+          color: "var(--fg-4)",
+          fontFamily: "var(--font-mono)",
+          pointerEvents: "none",
+        }}
+      >
+        click → wiki · ⇧-click → focus · click empty → reset
+      </div>
+    </div>
   );
 }

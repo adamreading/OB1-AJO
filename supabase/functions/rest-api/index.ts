@@ -999,11 +999,26 @@ app.get("/constellation", async (c) => {
     }
   }
 
+  // Resolve wiki slugs for the top entities so the dashboard can deep-link
+  // each node directly into the wiki page.
+  const slugMap = new Map<number, string>();
+  if (top.length > 0) {
+    const ids = top.map(([id]) => id);
+    const { data: wikiRows } = await supabase
+      .from("wiki_pages")
+      .select("entity_id, slug")
+      .in("entity_id", ids);
+    for (const row of wikiRows || []) {
+      if (row.entity_id) slugMap.set(row.entity_id, row.slug);
+    }
+  }
+
   const nodes = top.map(([id, v]) => ({
     id,
     label: v.name,
     type: v.type,
     mentions: v.count,
+    slug: slugMap.get(id) ?? null,
   }));
   const edges = Array.from(edgeWeight.entries())
     .filter(([, w]) => w >= minWeight)

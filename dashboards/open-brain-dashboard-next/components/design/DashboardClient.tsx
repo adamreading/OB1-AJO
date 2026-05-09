@@ -68,6 +68,7 @@ export function DashboardClient({
     strongest: { source: string; target: string; weight: number } | null;
   }>({ nodes: [], edges: [], strongest: null });
   const [graphLoading, setGraphLoading] = useState(true);
+  const [minWeight, setMinWeight] = useState(2);
 
   // Reflect filter changes in the URL so server-rendered KPIs update on hard nav
   useEffect(() => {
@@ -96,7 +97,9 @@ export function DashboardClient({
             : "90";
     params.set("days", days);
     params.set("limit", "30");
-    params.set("min_weight", "2");
+    // Always fetch with min_weight=1 so the client-side slider can tighten the
+    // graph without re-fetching from the server every adjustment.
+    params.set("min_weight", "1");
     if (contextSel !== "All") params.set("classification", contextSel.toLowerCase());
 
     fetch(`/api/constellation?${params}`)
@@ -346,11 +349,52 @@ export function DashboardClient({
               ))}
             </div>
           </div>
-          <div style={{ padding: "12px 12px 24px" }}>
+          {/* Edge-weight slider — thin out weak connections without a refetch */}
+          {!graphLoading && graph.edges.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+                padding: "10px 24px 0",
+                fontSize: 11,
+                color: "var(--fg-3)",
+              }}
+            >
+              <span className="eyebrow">Min co-occurrence</span>
+              <input
+                type="range"
+                min={1}
+                max={Math.max(2, Math.min(15, ...graph.edges.map((e) => e.weight + 1)))}
+                value={minWeight}
+                onChange={(e) => setMinWeight(parseInt(e.target.value, 10))}
+                style={{
+                  flex: 1,
+                  maxWidth: 240,
+                  accentColor: "var(--violet-400)",
+                }}
+              />
+              <span
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  color: "var(--fg-2)",
+                  minWidth: 24,
+                }}
+              >
+                {minWeight}
+              </span>
+              <span style={{ color: "var(--fg-4)" }}>
+                showing{" "}
+                {graph.edges.filter((e) => e.weight >= minWeight).length} of{" "}
+                {graph.edges.length} edges
+              </span>
+            </div>
+          )}
+          <div style={{ padding: "12px 12px 28px" }}>
             {graphLoading ? (
               <div
                 style={{
-                  height: 400,
+                  height: 600,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -365,7 +409,8 @@ export function DashboardClient({
                 nodes={graph.nodes}
                 edges={graph.edges}
                 width={1100}
-                height={400}
+                height={600}
+                minWeight={minWeight}
               />
             )}
           </div>
