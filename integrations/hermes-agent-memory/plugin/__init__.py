@@ -89,7 +89,11 @@ def _default_config() -> dict:
         "max_recall_results": _DEFAULT_MAX_RECALL_RESULTS,
         "api_timeout": _DEFAULT_API_TIMEOUT,
         "default_confidence": _DEFAULT_CONFIDENCE,
-        "include_unconfirmed_recall": False,
+        # Default-on: an agent's own writes land as review_status="pending" by
+        # default (governance); recall must include unconfirmed or the agent
+        # never sees its own prior memories. Pending memories are still ranked
+        # lower than confirmed ones via the Edge Function's scoring.
+        "include_unconfirmed_recall": True,
         "require_review_by_default": True,
     }
 
@@ -431,14 +435,22 @@ class _OB1Client:
                task_id: Optional[str] = None,
                flow_id: Optional[str] = None,
                model_intent: Optional[dict] = None) -> dict:
-        # The Edge Function defaults `scope` and `limits` if omitted, but they
-        # have specific shapes; we always pass explicit values to make the
-        # request shape stable.
+        # The Edge Function's writeback path stores memories with
+        # visibility="personal" by default, and its scopeMatches() filter at
+        # /recall drops personal memories unless scope.visibility="personal" is
+        # passed. So we always set scope.visibility="personal" to match what
+        # we wrote — without this, recall returns zero results despite
+        # match_thoughts finding the thought correctly.
         body: dict = {
             "schema_version": _RECALL_SCHEMA_VERSION,
             "workspace_id": workspace_id,
             "query": query,
-            "scope": scope or {"project_only": True, "include_unconfirmed": False, "include_stale": False},
+            "scope": scope or {
+                "visibility": "personal",
+                "project_only": True,
+                "include_unconfirmed": False,
+                "include_stale": False,
+            },
             "limits": limits or {"max_items": 10, "max_tokens": 4000},
         }
         if project_id:
@@ -877,7 +889,10 @@ class OB1MemoryProvider(MemoryProvider):
         if not q:
             return "", None
         try:
+            # visibility="personal" matches the Edge Function writeback default —
+            # without it, recall drops every personal-visibility memory we wrote.
             scope: Dict[str, Any] = {
+                "visibility": "personal",
                 "project_only": bool(self._project_id),
                 "include_unconfirmed": self._config["include_unconfirmed_recall"],
                 "include_stale": False,
@@ -1225,6 +1240,7 @@ class OB1MemoryProvider(MemoryProvider):
         except Exception:
             limit = self._max_recall_results
         scope = {
+            "visibility": "personal",
             "project_only": bool(args.get("project_only", True)) and bool(self._project_id),
             "include_unconfirmed": self._config["include_unconfirmed_recall"],
             "include_stale": False,
