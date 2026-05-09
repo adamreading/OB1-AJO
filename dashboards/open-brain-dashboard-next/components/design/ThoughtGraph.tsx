@@ -24,6 +24,8 @@ interface Props {
   height?: number;
   /** Minimum edge weight to render. Nodes with no surviving edges still appear. */
   minWeight?: number;
+  /** Categories to hide (clicking the legend toggles these). */
+  hiddenCategories?: Set<string>;
 }
 
 const TYPE_TO_CATEGORY: Record<string, "people" | "projects" | "orgs" | "tools"> = {
@@ -221,41 +223,67 @@ export function ThoughtGraph({
   width = 1100,
   height = 600,
   minWeight = 1,
+  hiddenCategories,
 }: Props) {
   const router = useRouter();
   const [hover, setHover] = useState<number | null>(null);
   const [focused, setFocused] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Apply min-weight filter
+  // Filter nodes by category visibility
+  const visibleNodes = useMemo(() => {
+    if (!hiddenCategories || hiddenCategories.size === 0) return nodes;
+    return nodes.filter((n) => {
+      const cat = TYPE_TO_CATEGORY[n.type] || "projects";
+      return !hiddenCategories.has(cat);
+    });
+  }, [nodes, hiddenCategories]);
+
+  const visibleNodeIds = useMemo(
+    () => new Set(visibleNodes.map((n) => n.id)),
+    [visibleNodes]
+  );
+
+  // Apply min-weight + hidden-category filters to edges
   const filteredEdges = useMemo(
-    () => edges.filter((e) => e.weight >= minWeight),
-    [edges, minWeight]
+    () =>
+      edges.filter(
+        (e) =>
+          e.weight >= minWeight &&
+          visibleNodeIds.has(e.source) &&
+          visibleNodeIds.has(e.target)
+      ),
+    [edges, minWeight, visibleNodeIds]
   );
 
   // Adjacency for hover/focus dimming
   const adjacency = useMemo(() => {
     const map = new Map<number, Set<number>>();
-    for (const n of nodes) map.set(n.id, new Set());
+    for (const n of visibleNodes) map.set(n.id, new Set());
     for (const e of filteredEdges) {
       map.get(e.source)?.add(e.target);
       map.get(e.target)?.add(e.source);
     }
     return map;
-  }, [nodes, filteredEdges]);
-
-  const positions = useMemo(
-    () => layout(nodes, filteredEdges, width, height, focused),
-    [nodes, filteredEdges, width, height, focused]
-  );
+  }, [visibleNodes, filteredEdges]);
 
   const hottestId = useMemo(
     () =>
-      nodes.length === 0
+      visibleNodes.length === 0
         ? null
-        : nodes.reduce((best, n) => (n.mentions > best.mentions ? n : best))
-            .id,
-    [nodes]
+        : visibleNodes.reduce((best, n) =>
+            n.mentions > best.mentions ? n : best
+          ).id,
+    [visibleNodes]
+  );
+
+  // Always anchor a node at the center: focused (user-selected) or the hottest
+  // node by default, so the layout doesn't fly apart at low min-weights.
+  const pinnedId = focused ?? hottestId;
+
+  const positions = useMemo(
+    () => layout(visibleNodes, filteredEdges, width, height, pinnedId),
+    [visibleNodes, filteredEdges, width, height, pinnedId]
   );
 
   // Active node = focused (locked) > hover (transient) > hottest
@@ -275,8 +303,8 @@ export function ThoughtGraph({
       force.add(activeId);
       activeNeighbors?.forEach((n) => force.add(n));
     }
-    return pickVisibleLabels(nodes, positions, force);
-  }, [nodes, positions, hottestId, activeId, activeNeighbors]);
+    return pickVisibleLabels(visibleNodes, positions, force);
+  }, [visibleNodes, positions, hottestId, activeId, activeNeighbors]);
 
   function handleNodeClick(node: ConstellationNode, e: React.MouseEvent) {
     e.preventDefault();
@@ -294,7 +322,7 @@ export function ThoughtGraph({
     setFocused((f) => (f === node.id ? null : node.id));
   }
 
-  if (!nodes.length) {
+  if (!visibleNodes.length) {
     return (
       <div
         style={{
@@ -404,7 +432,7 @@ export function ThoughtGraph({
         {/* Hot-node glow */}
         {hottestId !== null &&
           (() => {
-            const node = nodes.find((n) => n.id === hottestId);
+            const node = visibleNodes.find((n) => n.id === hottestId);
             const pos = positions.get(hottestId);
             if (!node || !pos) return null;
             return (
@@ -419,7 +447,7 @@ export function ThoughtGraph({
           })()}
 
         {/* Nodes */}
-        {nodes.map((n) => {
+        {visibleNodes.map((n) => {
           const pos = positions.get(n.id);
           if (!pos) return null;
           const cat = TYPE_TO_CATEGORY[n.type] || "projects";

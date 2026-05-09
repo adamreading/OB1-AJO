@@ -69,6 +69,18 @@ export function DashboardClient({
   }>({ nodes: [], edges: [], strongest: null });
   const [graphLoading, setGraphLoading] = useState(true);
   const [minWeight, setMinWeight] = useState(2);
+  const [hiddenCategories, setHiddenCategories] = useState<Set<string>>(
+    new Set()
+  );
+
+  function toggleCategory(cat: string) {
+    setHiddenCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat);
+      else next.add(cat);
+      return next;
+    });
+  }
 
   // Reflect filter changes in the URL so server-rendered KPIs update on hard nav
   useEffect(() => {
@@ -325,71 +337,96 @@ export function DashboardClient({
                   ["#ff9650", "orgs"],
                   ["#50c8c8", "tools"],
                 ] as const
-              ).map(([c, l]) => (
-                <div
-                  key={l}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 5,
-                    fontSize: 11,
-                    color: "var(--fg-3)",
-                  }}
-                >
-                  <span
+              ).map(([c, l]) => {
+                const hidden = hiddenCategories.has(l);
+                return (
+                  <button
+                    key={l}
+                    type="button"
+                    onClick={() => toggleCategory(l)}
+                    title={
+                      hidden
+                        ? `Show ${l}`
+                        : `Hide ${l} — click to filter the graph`
+                    }
                     style={{
-                      width: 7,
-                      height: 7,
-                      borderRadius: "50%",
-                      background: c,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                      fontSize: 11,
+                      color: hidden ? "var(--fg-4)" : "var(--fg-3)",
+                      background: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      padding: "2px 4px",
+                      fontFamily: "inherit",
+                      opacity: hidden ? 0.4 : 1,
+                      textDecoration: hidden ? "line-through" : "none",
+                      transition: "opacity 120ms",
                     }}
-                  />
-                  {l}
-                </div>
-              ))}
+                  >
+                    <span
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        background: c,
+                        opacity: hidden ? 0.3 : 1,
+                      }}
+                    />
+                    {l}
+                  </button>
+                );
+              })}
             </div>
           </div>
           {/* Edge-weight slider — thin out weak connections without a refetch */}
-          {!graphLoading && graph.edges.length > 0 && (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-                padding: "10px 24px 0",
-                fontSize: 11,
-                color: "var(--fg-3)",
-              }}
-            >
-              <span className="eyebrow">Min co-occurrence</span>
-              <input
-                type="range"
-                min={1}
-                max={Math.max(2, Math.min(15, ...graph.edges.map((e) => e.weight + 1)))}
-                value={minWeight}
-                onChange={(e) => setMinWeight(parseInt(e.target.value, 10))}
+          {!graphLoading && graph.edges.length > 0 && (() => {
+            const sliderMax = Math.max(
+              5,
+              Math.min(20, Math.max(...graph.edges.map((e) => e.weight)))
+            );
+            return (
+              <div
                 style={{
-                  flex: 1,
-                  maxWidth: 240,
-                  accentColor: "var(--violet-400)",
-                }}
-              />
-              <span
-                style={{
-                  fontFamily: "var(--font-mono)",
-                  color: "var(--fg-2)",
-                  minWidth: 24,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: "10px 24px 0",
+                  fontSize: 11,
+                  color: "var(--fg-3)",
                 }}
               >
-                {minWeight}
-              </span>
-              <span style={{ color: "var(--fg-4)" }}>
-                showing{" "}
-                {graph.edges.filter((e) => e.weight >= minWeight).length} of{" "}
-                {graph.edges.length} edges
-              </span>
-            </div>
-          )}
+                <span className="eyebrow">Min co-occurrence</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={sliderMax}
+                  value={minWeight}
+                  onChange={(e) => setMinWeight(parseInt(e.target.value, 10))}
+                  style={{
+                    flex: 1,
+                    maxWidth: 240,
+                    accentColor: "var(--violet-400)",
+                  }}
+                />
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--fg-2)",
+                    minWidth: 24,
+                  }}
+                >
+                  {minWeight}
+                </span>
+                <span style={{ color: "var(--fg-4)" }}>
+                  showing{" "}
+                  {graph.edges.filter((e) => e.weight >= minWeight).length} of{" "}
+                  {graph.edges.length} edges
+                </span>
+              </div>
+            );
+          })()}
           <div style={{ padding: "12px 12px 28px" }}>
             {graphLoading ? (
               <div
@@ -411,6 +448,7 @@ export function DashboardClient({
                 width={1100}
                 height={600}
                 minWeight={minWeight}
+                hiddenCategories={hiddenCategories}
               />
             )}
           </div>
