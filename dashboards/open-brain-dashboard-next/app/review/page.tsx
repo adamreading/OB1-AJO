@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { TypeBadge } from "@/components/ThoughtCard";
@@ -53,6 +53,14 @@ type EditState = {
 };
 
 export default function ReviewPage() {
+  return (
+    <Suspense fallback={null}>
+      <ReviewPageInner />
+    </Suspense>
+  );
+}
+
+function ReviewPageInner() {
   const searchParams = useSearchParams();
   const classification = searchParams.get("classification");
 

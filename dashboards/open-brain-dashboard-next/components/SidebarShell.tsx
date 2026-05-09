@@ -9,18 +9,40 @@ export function SidebarShell() {
   return (
     <>
       {/* Mobile top bar */}
-      <div className="md:hidden fixed top-0 left-0 right-0 z-50 h-12 bg-bg-surface border-b border-border flex items-center px-4 gap-3">
+      <div
+        className="md:hidden fixed top-0 left-0 right-0 z-50 h-12 flex items-center px-4 gap-3"
+        style={{
+          background: "var(--bg-1)",
+          borderBottom: "1px solid var(--line)",
+        }}
+      >
         <button
           type="button"
           onClick={() => setIsOpen(true)}
-          className="text-text-secondary hover:text-text-primary transition-colors"
           aria-label="Open menu"
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "var(--fg-3)",
+            cursor: "pointer",
+            display: "flex",
+            padding: 0,
+          }}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
         </button>
-        <span className="text-text-primary font-semibold text-base tracking-tight">Open Brain</span>
+        <span
+          style={{
+            color: "var(--fg)",
+            fontWeight: 600,
+            fontSize: 15,
+            letterSpacing: "-0.01em",
+          }}
+        >
+          Open Brain
+        </span>
       </div>
 
       {/* Backdrop */}

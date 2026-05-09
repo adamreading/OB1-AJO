@@ -902,6 +902,129 @@ app.delete("/entity-blocklist", async (c) => {
   return c.json({ unblocked: true, entity_type, normalized_name }, 200, corsHeaders);
 });
 
+// Distinct source_type values currently in the thoughts table — used to populate
+// the Source filter dropdown without hard-coding values that may drift.
+app.get("/sources", async (c) => {
+  const { data, error } = await supabase
+    .from("thoughts")
+    .select("source_type")
+    .not("source_type", "is", null)
+    .limit(50000);
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  const counts = new Map<string, number>();
+  for (const row of data || []) {
+    const s = (row as any).source_type as string | null;
+    if (!s) continue;
+    counts.set(s, (counts.get(s) ?? 0) + 1);
+  }
+  const sources = Array.from(counts.entries())
+    .map(([source_type, count]) => ({ source_type, count }))
+    .sort((a, b) => b.count - a.count);
+  return c.json({ sources }, 200, corsHeaders);
+});
+
+// Constellation — top N entities by mention count, plus co-occurrence edges
+// (number of thoughts mentioning both endpoints) for the dashboard hero graph.
+// Days defaults to 90 to keep the graph current; pass 0 for all-time.
+app.get("/constellation", async (c) => {
+  const limit = Math.min(60, Math.max(5, Number(c.req.query("limit")) || 30));
+  const days = c.req.query("days") === undefined ? 90 : Number(c.req.query("days"));
+  const minWeight = Math.max(1, Number(c.req.query("min_weight")) || 2);
+  const classification = c.req.query("classification") || "";
+
+  // Pull thought_entities joined to thoughts (for created_at filter + classification)
+  // and entities (for name + type). Cap at a sane row count to keep the function fast.
+  let q = supabase
+    .from("thought_entities")
+    .select(
+      "thought_id, entity_id, thoughts!inner(created_at, metadata, status), entities!inner(canonical_name, entity_type)"
+    )
+    .limit(8000);
+
+  if (days > 0) {
+    const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
+    q = q.gte("thoughts.created_at", since);
+  }
+
+  const { data, error } = await q;
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+
+  type Row = {
+    thought_id: number;
+    entity_id: number;
+    thoughts: { created_at: string; metadata: any; status: string | null };
+    entities: { canonical_name: string; entity_type: string };
+  };
+
+  const rows = ((data || []) as unknown as Row[]).filter((r) => {
+    if (!classification) return true;
+    return r.thoughts?.metadata?.classification === classification;
+  });
+
+  // Aggregate mentions
+  const mentionsByEntity = new Map<number, { name: string; type: string; count: number }>();
+  const thoughtToEntities = new Map<number, Set<number>>();
+  for (const r of rows) {
+    const m = mentionsByEntity.get(r.entity_id);
+    if (m) m.count += 1;
+    else mentionsByEntity.set(r.entity_id, {
+      name: r.entities.canonical_name,
+      type: r.entities.entity_type,
+      count: 1,
+    });
+    let bucket = thoughtToEntities.get(r.thought_id);
+    if (!bucket) {
+      bucket = new Set();
+      thoughtToEntities.set(r.thought_id, bucket);
+    }
+    bucket.add(r.entity_id);
+  }
+
+  // Top N
+  const top = Array.from(mentionsByEntity.entries())
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, limit);
+  const topIds = new Set(top.map((t) => t[0]));
+
+  // Co-occurrence edges among top N
+  const edgeKey = (a: number, b: number) => (a < b ? `${a}:${b}` : `${b}:${a}`);
+  const edgeWeight = new Map<string, number>();
+  for (const ents of thoughtToEntities.values()) {
+    const arr = Array.from(ents).filter((e) => topIds.has(e));
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        const k = edgeKey(arr[i], arr[j]);
+        edgeWeight.set(k, (edgeWeight.get(k) ?? 0) + 1);
+      }
+    }
+  }
+
+  const nodes = top.map(([id, v]) => ({
+    id,
+    label: v.name,
+    type: v.type,
+    mentions: v.count,
+  }));
+  const edges = Array.from(edgeWeight.entries())
+    .filter(([, w]) => w >= minWeight)
+    .map(([k, w]) => {
+      const [a, b] = k.split(":").map(Number);
+      return { source: a, target: b, weight: w };
+    })
+    .sort((a, b) => b.weight - a.weight);
+
+  // Strongest cluster — the heaviest edge
+  const strongest = edges[0]
+    ? {
+        source: nodes.find((n) => n.id === edges[0].source)?.label ?? `#${edges[0].source}`,
+        target: nodes.find((n) => n.id === edges[0].target)?.label ?? `#${edges[0].target}`,
+        weight: edges[0].weight,
+      }
+    : null;
+
+  return c.json({ nodes, edges, strongest, days, total_thoughts: thoughtToEntities.size }, 200, corsHeaders);
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 // Edges — read, delete (with auto-blocklist), and edge_blocklist management
 // ────────────────────────────────────────────────────────────────────────────

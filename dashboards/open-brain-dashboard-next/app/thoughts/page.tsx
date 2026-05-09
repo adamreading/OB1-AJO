@@ -1,162 +1,79 @@
-import Link from "next/link";
-import { fetchThoughts } from "@/lib/api";
-import { requireSessionOrRedirect, getSession } from "@/lib/auth";
-import { TypeBadge } from "@/components/ThoughtCard";
-import { ThoughtsFilter } from "@/components/ThoughtsFilter";
-import { FormattedDate } from "@/components/FormattedDate";
+import { fetchDuplicates, fetchThoughts } from "@/lib/api";
+import { requireSessionOrRedirect } from "@/lib/auth";
+import { ThoughtsPageClient } from "@/components/design/ThoughtsPageClient";
 
 export const dynamic = "force-dynamic";
 
-const TYPES = [
-  "idea",
-  "task",
-  "person_note",
-  "reference",
-  "decision",
-  "lesson",
-  "meeting",
-  "journal",
-];
+const API_URL = process.env.NEXT_PUBLIC_API_URL!;
 
-export default async function ThoughtsPage({
-  searchParams,
-}: {
+async function fetchSources(apiKey: string): Promise<
+  { source_type: string; count: number }[]
+> {
+  try {
+    const res = await fetch(`${API_URL}/sources`, {
+      headers: { "x-brain-key": apiKey },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.sources ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export default async function ThoughtsPage(props: {
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
   const { apiKey } = await requireSessionOrRedirect();
+  const sp = await props.searchParams;
 
-  const params = await searchParams;
-  const page = parseInt(params.page || "1", 10);
-  const type = params.type || "";
-  const source_type = params.source_type || "";
-  const importance_min = params.importance_min
-    ? parseInt(params.importance_min, 10)
-    : undefined;
-  const classification = params.classification || params.context || "";
+  const initialQuery = sp.q || "";
+  const initialMode = sp.mode === "text" ? ("Full-text" as const) : ("Semantic" as const);
+  const initialContext =
+    sp.classification === "work" || sp.context === "work"
+      ? ("Work" as const)
+      : sp.classification === "personal" || sp.context === "personal"
+        ? ("Personal" as const)
+        : ("All" as const);
+  const initialType = sp.type || "";
+  const initialSource = sp.source_type || "";
+  const initialMaxScore = sp.score_max
+    ? parseInt(sp.score_max, 10)
+    : sp.audit
+      ? 15
+      : 100;
+  const initialDuplicatesOnly = sp.duplicates === "1";
+  const initialCompose = sp.compose === "1";
 
-  let data;
-  try {
-    data = await fetchThoughts(apiKey, {
-      page,
-      per_page: 25,
-      type: type || undefined,
-      source_type: source_type || undefined,
-      importance_min,
-
-      classification: classification || undefined,
-    });
-  } catch (err) {
-    return (
-      <div className="space-y-6">
-        <h1 className="text-2xl font-semibold">Thoughts</h1>
-        <p className="text-danger text-sm">
-          Failed to load thoughts.{" "}
-          {err instanceof Error ? err.message : ""}
-        </p>
-      </div>
-    );
-  }
-
-  const totalPages = Math.ceil(data.total / data.per_page);
-
-  function pageUrl(p: number) {
-    const sp = new URLSearchParams();
-    sp.set("page", String(p));
-    if (type) sp.set("type", type);
-    if (source_type) sp.set("source_type", source_type);
-    if (importance_min) sp.set("importance_min", String(importance_min));
-    if (classification) sp.set("classification", classification);
-    return `/thoughts?${sp.toString()}`;
-  }
+  // Fetch counts in parallel
+  const [totalRes, lowScoreRes, dupRes, sources] = await Promise.all([
+    fetchThoughts(apiKey, { per_page: 1 }).catch(() => null),
+    fetchThoughts(apiKey, {
+      per_page: 1,
+      quality_score_max: 15,
+    }).catch(() => null),
+    fetchDuplicates(apiKey, { threshold: 0.85, limit: 100, offset: 0 }).catch(
+      () => null
+    ),
+    fetchSources(apiKey),
+  ]);
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-text-primary tracking-tight">
-            Thoughts
-          </h1>
-          <p className="text-sm text-text-muted mt-1">
-            {data.total.toLocaleString()} total items in your memory
-          </p>
-        </div>
-      </div>
-
-      {/* Filters */}
-      <ThoughtsFilter
-        types={TYPES}
-        currentType={type}
-        currentSource={source_type}
-        currentImportance={importance_min}
-        currentClassification={classification}
-      />
-
-      {/* Table */}
-      <div className="bg-bg-surface border border-border rounded-lg overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-border text-text-muted text-xs uppercase tracking-wider">
-              <th className="text-left px-4 py-3 font-medium">Content</th>
-              <th className="text-left px-4 py-3 font-medium w-24">Type</th>
-              <th className="text-left px-4 py-3 font-medium w-20">Imp.</th>
-              <th className="text-left px-4 py-3 font-medium w-40">Date</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border-subtle">
-            {data.data.map((t) => (
-              <tr
-                key={t.id}
-                className="hover:bg-bg-hover transition-colors"
-              >
-                <td className="px-4 py-3">
-                  <Link
-                    href={`/thoughts/${t.id}`}
-                    className="text-text-primary hover:text-violet transition-colors"
-                  >
-                    {t.content.length > 120
-                      ? t.content.slice(0, 120) + "..."
-                      : t.content}
-                  </Link>
-                </td>
-                <td className="px-4 py-3">
-                  <TypeBadge type={t.type} />
-                </td>
-                <td className="px-4 py-3 text-text-muted">{t.importance}</td>
-                <td className="px-4 py-3 text-text-muted text-xs whitespace-nowrap">
-                  <FormattedDate date={t.created_at} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-text-muted">
-            Page {page} of {totalPages}
-          </p>
-          <div className="flex gap-2">
-            {page > 1 && (
-              <Link
-                href={pageUrl(page - 1)}
-                className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
-              >
-                Previous
-              </Link>
-            )}
-            {page < totalPages && (
-              <Link
-                href={pageUrl(page + 1)}
-                className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
-              >
-                Next
-              </Link>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
+    <ThoughtsPageClient
+      initial={{
+        total: totalRes?.total ?? 0,
+        sources,
+        lowScoreCount: lowScoreRes?.total ?? 0,
+        duplicatesCount: dupRes?.pairs?.length ?? 0,
+      }}
+      initialQuery={initialQuery}
+      initialMode={initialMode}
+      initialContext={initialContext}
+      initialType={initialType}
+      initialSource={initialSource}
+      initialMaxScore={initialMaxScore}
+      initialDuplicatesOnly={initialDuplicatesOnly}
+      initialCompose={initialCompose}
+    />
   );
 }

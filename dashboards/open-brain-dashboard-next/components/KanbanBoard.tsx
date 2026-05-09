@@ -312,30 +312,82 @@ export function KanbanBoard() {
       )}
 
       {/* Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-        <div className="flex items-center gap-6">
-          <div className="flex bg-bg-primary border border-border rounded-lg p-1">
-            {(["all", "work", "personal"] as const).map((ctx) => (
-              <button
-                key={ctx}
-                onClick={() => setContextFilter(ctx)}
-                className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
-                  contextFilter === ctx
-                    ? "bg-bg-surface text-text-primary shadow-sm"
-                    : "text-text-muted hover:text-text-secondary"
-                }`}
-              >
-                {ctx.charAt(0).toUpperCase() + ctx.slice(1)}
-              </button>
-            ))}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+          marginBottom: 18,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 16,
+            flexWrap: "wrap",
+          }}
+        >
+          <div
+            style={{
+              display: "inline-flex",
+              padding: 3,
+              gap: 2,
+              background: "var(--bg-3)",
+              border: "1px solid var(--line)",
+              borderRadius: 8,
+            }}
+          >
+            {(["all", "work", "personal"] as const).map((ctx) => {
+              const isActive = contextFilter === ctx;
+              return (
+                <button
+                  key={ctx}
+                  type="button"
+                  onClick={() => setContextFilter(ctx)}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    fontSize: 12,
+                    color: isActive ? "var(--fg)" : "var(--fg-3)",
+                    background: isActive
+                      ? "rgba(130,97,255,0.18)"
+                      : "transparent",
+                    border: isActive
+                      ? "1px solid rgba(157,131,255,0.25)"
+                      : "1px solid transparent",
+                    fontWeight: isActive ? 500 : 400,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  {ctx.charAt(0).toUpperCase() + ctx.slice(1)}
+                </button>
+              );
+            })}
           </div>
 
-          <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+          <span
+            style={{ width: 1, height: 24, background: "var(--line)" }}
+          />
+
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 12,
+              color: "var(--fg-3)",
+              cursor: "pointer",
+            }}
+          >
             <input
               type="checkbox"
               checked={showArchived}
               onChange={(e) => setShowArchived(e.target.checked)}
-              className="rounded border-border bg-bg-surface"
+              style={{ accentColor: "var(--violet-400)" }}
             />
             Show archived
           </label>
@@ -347,7 +399,16 @@ export function KanbanBoard() {
             setIsLoading(true);
             fetchData();
           }}
-          className="text-xs text-text-muted hover:text-text-primary transition-colors flex items-center gap-1.5"
+          style={{
+            padding: "7px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--line-strong)",
+            background: "var(--bg-2)",
+            color: "var(--fg-2)",
+            fontSize: 12,
+            cursor: "pointer",
+            fontFamily: "inherit",
+          }}
         >
           ↻ Refresh
         </button>

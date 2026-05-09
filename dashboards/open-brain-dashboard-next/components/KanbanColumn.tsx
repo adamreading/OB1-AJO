@@ -7,13 +7,14 @@ import type { Thought, KanbanStatus } from "@/lib/types";
 import { KANBAN_LABELS } from "@/lib/types";
 import { KanbanCard } from "@/components/KanbanCard";
 
-const COLUMN_ACCENT: Record<string, string> = {
-  new: "border-t-slate-500",
-  planning: "border-t-violet",
-  active: "border-t-blue-500",
-  review: "border-t-amber-500",
-  done: "border-t-emerald-500",
-  archived: "border-t-slate-600",
+const COLUMN_DOT_COLOR: Record<string, string> = {
+  backlog: "#8aa0c8",
+  new: "#8aa0c8",
+  planning: "#b8a6ff",
+  active: "#6ca6ff",
+  review: "#f0b450",
+  done: "#50c8c8",
+  archived: "#5a5a6e",
 };
 
 function collapseKey(status: string): string {
@@ -37,7 +38,6 @@ export function KanbanColumn({
 }: KanbanColumnProps) {
   const [isCollapsed, setIsCollapsed] = useState(false);
 
-  // Load collapse state from localStorage
   useEffect(() => {
     const stored = localStorage.getItem(collapseKey(status));
     if (stored === "true") setIsCollapsed(true);
@@ -50,32 +50,65 @@ export function KanbanColumn({
   }
 
   const { setNodeRef, isOver } = useDroppable({ id: status });
-  const accentClass = COLUMN_ACCENT[status] || COLUMN_ACCENT.new;
+  const dotColor = COLUMN_DOT_COLOR[status] || COLUMN_DOT_COLOR.new;
   const label = KANBAN_LABELS[status as KanbanStatus] ?? status;
 
-  // Collapsed: slim vertical bar with rotated label
   if (isCollapsed) {
     return (
       <div
         ref={setNodeRef}
-        className={`flex flex-col items-center rounded-lg border border-border border-t-2 ${accentClass} bg-bg-primary shrink-0 transition-all w-10 min-w-10 cursor-pointer max-h-[calc(100vh-130px)] md:max-h-[calc(100vh-220px)] ${
-          isOver ? "bg-violet/5 border-violet/20" : "hover:border-violet/20"
-        }`}
         onClick={toggleCollapse}
         title={`Expand ${label} column`}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          width: 40,
+          minWidth: 40,
+          padding: "12px 0",
+          borderRadius: 12,
+          background: isOver
+            ? "rgba(157,131,255,0.06)"
+            : "rgba(255,255,255,0.015)",
+          border: `1px solid ${isOver ? "rgba(157,131,255,0.25)" : "var(--line)"}`,
+          cursor: "pointer",
+          gap: 8,
+          maxHeight: "calc(100vh - 220px)",
+          flexShrink: 0,
+        }}
       >
-        <div className="py-3 flex flex-col items-center gap-2">
-          <span className="text-xs text-text-muted">▶</span>
-          <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-bg-hover text-text-muted text-xs font-medium">
-            {thoughts.length}
-          </span>
-          <span
-            className="text-xs font-medium text-text-secondary"
-            style={{ writingMode: "vertical-lr" }}
-          >
-            {label}
-          </span>
-        </div>
+        <span style={{ color: "var(--fg-4)", fontSize: 11 }}>▶</span>
+        <span
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: 2,
+            background: dotColor,
+            boxShadow: `0 0 8px ${dotColor}`,
+          }}
+        />
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--fg-3)",
+            padding: "1px 6px",
+            background: "var(--bg-3)",
+            borderRadius: 4,
+          }}
+        >
+          {thoughts.length}
+        </span>
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 500,
+            color: "var(--fg-2)",
+            writingMode: "vertical-lr",
+          }}
+        >
+          {label}
+        </span>
       </div>
     );
   }
@@ -83,40 +116,111 @@ export function KanbanColumn({
   return (
     <div
       ref={setNodeRef}
-      className={`flex flex-col rounded-lg border border-border border-t-2 ${accentClass} bg-bg-primary flex-1 min-w-[120px] md:min-w-0 transition-colors max-h-[calc(100vh-130px)] md:max-h-[calc(100vh-220px)] ${
-        isOver ? "bg-violet/5 border-violet/20" : ""
-      }`}
+      style={{
+        minWidth: 0,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+        padding: "14px 12px",
+        borderRadius: 12,
+        background: isOver
+          ? "rgba(157,131,255,0.04)"
+          : "rgba(255,255,255,0.015)",
+        border: `1px solid ${isOver ? "rgba(157,131,255,0.25)" : "var(--line)"}`,
+        flex: 1,
+        maxHeight: "calc(100vh - 220px)",
+        overflow: "hidden",
+      }}
     >
-      {/* Column header */}
-      <div className="flex items-center justify-between px-3 py-2.5 border-b border-border">
-        <div className="flex items-center gap-2">
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0 4px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <button
             type="button"
             onClick={toggleCollapse}
-            className="text-text-muted hover:text-text-primary transition-colors text-xs"
             title="Collapse"
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "var(--fg-4)",
+              cursor: "pointer",
+              fontSize: 11,
+              padding: 0,
+            }}
           >
             ◀
           </button>
-          <span className="text-sm font-medium text-text-primary">
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 2,
+              background: dotColor,
+              boxShadow: `0 0 8px ${dotColor}`,
+            }}
+          />
+          <span
+            style={{
+              fontSize: 13,
+              fontWeight: 500,
+              color: "var(--fg)",
+            }}
+          >
             {label}
           </span>
-          <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-bg-hover text-text-muted text-xs font-medium">
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--fg-3)",
+              padding: "1px 6px",
+              background: "var(--bg-3)",
+              borderRadius: 4,
+            }}
+          >
             {thoughts.length}
           </span>
         </div>
       </div>
 
-      {/* Cards */}
       <SortableContext
         items={thoughts.map((t) => t.id)}
         strategy={verticalListSortingStrategy}
       >
-        <div className="flex-1 overflow-y-auto p-2 space-y-2 min-h-[100px]">
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+            overflowY: "auto",
+            flex: 1,
+            minHeight: 100,
+          }}
+        >
           {thoughts.length === 0 ? (
-            <p className="text-xs text-text-muted text-center py-8">
-              No items
-            </p>
+            <div
+              style={{
+                padding: "32px 12px",
+                textAlign: "center",
+                color: "var(--fg-4)",
+                fontSize: 12,
+                border: "1px dashed var(--line)",
+                borderRadius: 8,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <span style={{ fontSize: 18, opacity: 0.5 }}>○</span>
+              Drop a card here…
+            </div>
           ) : (
             thoughts.map((thought) => (
               <KanbanCard

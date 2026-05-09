@@ -4,8 +4,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { getThoughtContext } from "@/lib/types";
 import type { Thought } from "@/lib/types";
-import { TypeBadge } from "@/components/ThoughtCard";
-import { PriorityDot } from "@/components/PriorityDot";
+import { TypeChip } from "@/components/design/Atoms";
 
 function formatAge(dateString: string): string {
   const diffMs = Date.now() - new Date(dateString).getTime();
@@ -18,6 +17,19 @@ function formatAge(dateString: string): string {
   return `${Math.floor(diffDays / 365)}y`;
 }
 
+// Map 0..100 importance to design's high/medium/low priority bucket
+function priorityFromImportance(importance: number): "high" | "medium" | "low" {
+  if (importance >= 60) return "high";
+  if (importance >= 30) return "medium";
+  return "low";
+}
+
+const PRIO_COLOR: Record<string, string> = {
+  high: "#ff7894",
+  medium: "#f0b450",
+  low: "#8a8a9b",
+};
+
 interface KanbanCardProps {
   thought: Thought;
   onCardClick: (thought: Thought) => void;
@@ -29,7 +41,7 @@ interface KanbanCardProps {
 export function KanbanCard({
   thought,
   onCardClick,
-  onPriorityChange,
+  onPriorityChange: _onPriorityChange,
   showArchiveButton = false,
   onArchive,
 }: KanbanCardProps) {
@@ -42,21 +54,41 @@ export function KanbanCard({
     isDragging,
   } = useSortable({ id: thought.id });
 
-  const style = {
+  const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     touchAction: "pan-y pinch-zoom",
+    padding: "10px 12px",
+    borderRadius: 10,
+    background: "var(--bg-2)",
+    border: isDragging
+      ? "1px solid rgba(157,131,255,0.4)"
+      : "1px solid var(--line)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+    position: "relative",
+    cursor: "pointer",
+    userSelect: "none",
+    boxShadow: isDragging ? "0 8px 24px rgba(0,0,0,0.4)" : "none",
+    opacity: isDragging ? 0.85 : 1,
   };
 
-  const title = thought.content.split("\n")[0].slice(0, 60);
+  const title = thought.content.split("\n")[0].slice(0, 240);
   const topics = Array.isArray(thought.metadata?.topics)
-    ? (thought.metadata.topics as string[]).slice(0, 2)
+    ? (thought.metadata.topics as string[])
     : [];
+  const primaryEntity = topics[0] || null;
+  const restTags = topics.slice(1, 4);
   const sourceThoughtId = thought.metadata?.source_thought_id;
   const hasSource = sourceThoughtId !== undefined && sourceThoughtId !== null;
+  const blocked = typeof thought.metadata?.blocked_reason === "string"
+    ? (thought.metadata.blocked_reason as string)
+    : null;
 
   const context = getThoughtContext(thought);
-  const isWork = context === "work";
+  const priority = priorityFromImportance(thought.importance);
+  const prioColor = PRIO_COLOR[priority];
 
   return (
     <div
@@ -65,63 +97,144 @@ export function KanbanCard({
       {...attributes}
       {...listeners}
       onClick={() => onCardClick(thought)}
-      className={`bg-bg-surface border rounded-lg p-3 cursor-pointer select-none transition-all ${
-        isDragging
-          ? "border-violet/40 shadow-lg opacity-80 scale-[1.02]"
-          : isWork
-          ? "border-work-border bg-work-surface hover:border-work/50"
-          : "border-personal-border/50 bg-personal-surface/30 hover:border-personal/40"
-      }`}
     >
-      <div className="flex items-start justify-between gap-2 mb-1.5">
-        <div className="flex items-center gap-2">
-          <PriorityDot
-            importance={thought.importance}
-            onPriorityChange={(val) => onPriorityChange(thought.id, val)}
-          />
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span
+          style={{
+            width: 5,
+            height: 5,
+            borderRadius: "50%",
+            background: prioColor,
+            boxShadow: `0 0 5px ${prioColor}`,
+            flexShrink: 0,
+          }}
+        />
+        {primaryEntity ? (
           <span
-            className={`text-[9px] font-bold tracking-wider uppercase px-1.5 py-0.5 rounded ${
-              isWork
-                ? "bg-work text-white"
-                : "bg-personal/20 text-personal"
-            }`}
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              color: "var(--violet-300)",
+              padding: "1px 6px",
+              borderRadius: 3,
+              background: "rgba(157,131,255,0.10)",
+              border: "1px solid rgba(157,131,255,0.2)",
+              whiteSpace: "nowrap",
+              maxWidth: 140,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+            title={primaryEntity}
           >
-            {context}
+            @{primaryEntity}
           </span>
-        </div>
-        <TypeBadge type={thought.type} />
+        ) : (
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              color: "var(--fg-4)",
+            }}
+          >
+            — unlinked
+          </span>
+        )}
+        <span
+          style={{
+            marginLeft: "auto",
+            display: "flex",
+            gap: 6,
+            alignItems: "center",
+          }}
+        >
+          <TypeChip type={thought.type} />
+        </span>
       </div>
 
-      <p className="text-sm text-text-primary leading-snug mb-2 line-clamp-2">
+      <div
+        style={{
+          fontSize: 12,
+          color: "var(--fg)",
+          lineHeight: 1.45,
+          fontWeight: 400,
+          display: "-webkit-box",
+          WebkitLineClamp: 6,
+          WebkitBoxOrient: "vertical",
+          overflow: "hidden",
+        }}
+      >
         {title}
-      </p>
+      </div>
 
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
-          {topics.map((topic) => (
+      {restTags.length > 0 && (
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {restTags.map((t) => (
             <span
-              key={topic}
-              className="text-[10px] px-1.5 py-0.5 rounded bg-bg-hover text-text-muted truncate"
+              key={t}
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 9.5,
+                color: "var(--fg-4)",
+              }}
             >
-              {topic}
+              #{t}
             </span>
           ))}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+      )}
+
+      {blocked && (
+        <div
+          style={{
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+            color: "#ff9650",
+            padding: "3px 6px",
+            background: "rgba(255,150,80,0.08)",
+            borderRadius: 4,
+            border: "1px solid rgba(255,150,80,0.2)",
+            display: "inline-flex",
+            alignSelf: "flex-start",
+          }}
+        >
+          ⊘ {blocked}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginTop: 2,
+          fontSize: 10,
+          color: "var(--fg-4)",
+          fontFamily: "var(--font-mono)",
+          gap: 8,
+        }}
+      >
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+          {context}
           {hasSource && (
-            <a
-              href={`/thoughts/${sourceThoughtId}`}
-              onClick={(e) => e.stopPropagation()}
-              onPointerDown={(e) => e.stopPropagation()}
-              title={`From action item on thought #${sourceThoughtId}`}
-              className="text-[10px] text-violet/70 hover:text-violet hover:underline font-mono"
-            >
-              ← #{String(sourceThoughtId)}
-            </a>
+            <>
+              {" · "}
+              <a
+                href={`/thoughts/${sourceThoughtId}`}
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+                title={`From action item on thought #${sourceThoughtId}`}
+                style={{
+                  color: "var(--violet-300)",
+                  textDecoration: "none",
+                }}
+              >
+                ←#{String(sourceThoughtId)}
+              </a>
+            </>
           )}
-          <span className="text-[10px] text-text-muted">
-            {formatAge(thought.created_at)}
-          </span>
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span>{formatAge(thought.created_at)}</span>
           {showArchiveButton && onArchive && (
             <button
               type="button"
@@ -129,13 +242,21 @@ export function KanbanCard({
                 e.stopPropagation();
                 onArchive(thought.id);
               }}
-              className="text-[10px] text-text-muted hover:text-text-secondary transition-colors"
               title="Archive"
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "var(--fg-4)",
+                cursor: "pointer",
+                fontSize: 11,
+                padding: 0,
+                fontFamily: "inherit",
+              }}
             >
               ✓
             </button>
           )}
-        </div>
+        </span>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 @theme {
+  /* Legacy tokens — still used by Wiki, Actions, Review pages */
   --color-bg-primary: #0a0a0f;
   --color-bg-surface: #111118;
   --color-bg-elevated: #1a1a24;
@@ -23,7 +24,7 @@
   --color-work: #6366f1;
   --color-work-surface: rgba(99, 102, 241, 0.08);
   --color-work-border: rgba(99, 102, 241, 0.3);
-  
+
   --color-personal: #10b981;
   --color-personal-surface: rgba(16, 185, 129, 0.08);
   --color-personal-border: rgba(16, 185, 129, 0.3);
@@ -32,10 +33,92 @@
   --font-mono: var(--font-geist-mono), monospace;
 }
 
+/* OB1 redesign tokens — used by Dashboard, Thoughts, Workflow, Sidebar */
+:root {
+  /* Canvas / surfaces */
+  --bg-0: #07070a;
+  --bg-1: #0c0c12;
+  --bg-2: #11111a;
+  --bg-3: #171724;
+  --bg-4: #1e1e2d;
+  --line: rgba(255, 255, 255, 0.06);
+  --line-strong: rgba(255, 255, 255, 0.10);
+
+  /* Text */
+  --fg: #f4f4f7;
+  --fg-2: #c5c5d2;
+  --fg-3: #8a8a9b;
+  --fg-4: #5a5a6e;
+
+  /* Violet (primary accent) */
+  --violet-50: #f3f0ff;
+  --violet-200: #d4c8ff;
+  --violet-300: #b8a6ff;
+  --violet-400: #9d83ff;
+  --violet-500: #8261ff;
+  --violet-600: #6b46e5;
+  --violet-700: #553aba;
+  --violet-glow: oklch(70% 0.18 290);
+
+  /* Status */
+  --ok: oklch(72% 0.14 150);
+  --warn: oklch(75% 0.15 75);
+  --crit: oklch(70% 0.18 25);
+
+  /* Radii */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+}
+
 body {
   background: var(--color-bg-primary);
   color: var(--color-text-primary);
   font-family: var(--font-sans);
+}
+
+/* Legacy page wrapper — applied by app/layout.tsx.
+   New design pages (Dashboard, Thoughts, Workflow) opt-out by wrapping
+   their content in <div className="ob1-fullbleed">. */
+.legacy-wrapper {
+  max-width: 72rem;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 1rem;
+}
+@media (min-width: 768px) {
+  .legacy-wrapper {
+    padding: 2rem;
+  }
+}
+.ob1-fullbleed {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+.ob1-fullbleed.from-legacy {
+  margin: -1rem;
+}
+@media (min-width: 768px) {
+  .ob1-fullbleed.from-legacy {
+    margin: -2rem;
+  }
+}
+
+/* Reusable atoms */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-4);
+  font-weight: 500;
+}
+
+.num {
+  font-feature-settings: "tnum", "ss01";
+  letter-spacing: -0.02em;
 }
 
 /* Scrollbar */
