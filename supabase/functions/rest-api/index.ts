@@ -999,20 +999,15 @@ app.delete("/entity-blocklist", async (c) => {
 // Distinct entity_type values currently in the entities table, with a count
 // and a stable color per type. Used by the dashboard + wiki constellation to
 // generate filter chips dynamically — adding a new entity_type lights up a
-// new chip everywhere automatically.
+// new chip everywhere automatically. Backed by entity_types_summary() RPC so
+// counting is GROUP BY in SQL — no row cap regardless of brain size.
 app.get("/entity-types", async (c) => {
-  const { data, error } = await supabase
-    .from("entities")
-    .select("entity_type")
-    .not("entity_type", "is", null)
-    .limit(50000);
+  const { data, error } = await supabase.rpc("entity_types_summary");
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
 
   const counts = new Map<string, number>();
-  for (const row of data || []) {
-    const t = (row as { entity_type: string | null }).entity_type;
-    if (!t) continue;
-    counts.set(t, (counts.get(t) ?? 0) + 1);
+  for (const row of (data ?? []) as { entity_type: string; count: number | string }[]) {
+    counts.set(row.entity_type, Number(row.count));
   }
 
   // Seed palette for the historical types so existing screens don't reshuffle
