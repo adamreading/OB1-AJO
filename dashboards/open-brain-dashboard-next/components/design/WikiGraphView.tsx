@@ -106,10 +106,81 @@ function parseSections(markdown: string): SectionMap {
 // Render markdown with #N citation chips, [Entity Name] auto-linking, lists,
 // **bold**. Mirrors the existing wiki MarkdownContent but trimmed for
 // section bodies rather than full pages.
+//
+// Plain-text segments are passed through `linkifyEntities` so bare entity
+// references like "Adam Ososki" or "Promptinator" become clickable, not just
+// the few cases where the LLM emitted markdown links. `selfSlug`, when given,
+// is the slug of the entity being viewed — we skip auto-linking it to itself.
+function linkifyEntities(
+  text: string,
+  entityMap: Map<string, string>,
+  onWikiLink: (slug: string) => void,
+  selfSlug: string | null,
+  keyBase: string
+): React.ReactNode[] {
+  if (!entityMap || entityMap.size === 0 || !text) return [text];
+  // Build a regex from entity names sorted longest-first so multi-word matches
+  // like "AWS EC2" win over the substring "AWS". Escape regex metachars so a
+  // canonical_name with "(" or "." doesn't blow up the pattern.
+  const names = Array.from(entityMap.keys())
+    .filter((n) => n.length > 1)
+    .sort((a, b) => b.length - a.length);
+  if (names.length === 0) return [text];
+  const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // \b word boundaries on either side. Case-insensitive so we match the user's
+  // capitalization in prose ("Adam Ososki", "ADAM OSOSKI", etc.).
+  const pattern = new RegExp(`\\b(?:${escaped.join("|")})\\b`, "gi");
+
+  const out: React.ReactNode[] = [];
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = pattern.exec(text)) !== null) {
+    if (m.index > lastIdx) out.push(text.slice(lastIdx, m.index));
+    const matched = m[0];
+    const slug = entityMap.get(matched.toLowerCase());
+    if (slug && slug !== selfSlug) {
+      out.push(
+        <button
+          key={`${keyBase}-${i++}`}
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onWikiLink(slug);
+          }}
+          style={{
+            color: "var(--violet-300)",
+            background: "transparent",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
+            fontFamily: "inherit",
+            fontSize: "inherit",
+            fontWeight: "inherit",
+            textDecoration: "underline",
+            textUnderlineOffset: 2,
+            textDecorationColor: "rgba(157,131,255,0.4)",
+          }}
+        >
+          {matched}
+        </button>
+      );
+    } else {
+      out.push(matched);
+    }
+    lastIdx = m.index + matched.length;
+    // Defensive: if regex fails to advance (e.g. zero-width match), break
+    if (m.index === pattern.lastIndex) pattern.lastIndex++;
+  }
+  if (lastIdx < text.length) out.push(text.slice(lastIdx));
+  return out;
+}
+
 function renderMarkdownInline(
   text: string,
   entityMap: Map<string, string>,
-  onWikiLink: (slug: string) => void
+  onWikiLink: (slug: string) => void,
+  selfSlug: string | null = null
 ): React.ReactNode {
   const elements: React.ReactNode[] = [];
   const lines = text.split("\n");
@@ -201,19 +272,28 @@ function renderMarkdownInline(
         remaining = remaining.slice(boldMatch[0].length);
         key++;
       } else {
-        // Take everything up to the next special char
+        // Plain text run — pass through linkifyEntities so bare entity names
+        // become clickable links against the entityMap.
         const next = remaining.search(/[\[*]/);
+        let chunk: string;
         if (next === -1) {
-          out.push(remaining);
+          chunk = remaining;
           remaining = "";
         } else if (next === 0) {
-          // Fallback — single char then continue
-          out.push(remaining[0]);
+          chunk = remaining[0];
           remaining = remaining.slice(1);
         } else {
-          out.push(remaining.slice(0, next));
+          chunk = remaining.slice(0, next);
           remaining = remaining.slice(next);
         }
+        const linked = linkifyEntities(
+          chunk,
+          entityMap,
+          onWikiLink,
+          selfSlug,
+          `auto-${key++}`
+        );
+        for (const node of linked) out.push(node);
       }
     }
     return out;
@@ -890,22 +970,22 @@ export function WikiGraphView({
             >
               {sections?.summary && (
                 <Section title="Summary">
-                  {renderMarkdownInline(sections.summary, entityMap, onSelectSlug)}
+                  {renderMarkdownInline(sections.summary, entityMap, onSelectSlug, selected.slug)}
                 </Section>
               )}
               {sections?.keyFacts && (
                 <Section title="Key Facts">
-                  {renderMarkdownInline(sections.keyFacts, entityMap, onSelectSlug)}
+                  {renderMarkdownInline(sections.keyFacts, entityMap, onSelectSlug, selected.slug)}
                 </Section>
               )}
               {sections?.timeline && (
                 <Section title="Timeline">
-                  {renderMarkdownInline(sections.timeline, entityMap, onSelectSlug)}
+                  {renderMarkdownInline(sections.timeline, entityMap, onSelectSlug, selected.slug)}
                 </Section>
               )}
               {sections?.rest.map((s) => (
                 <Section key={s.heading} title={s.heading}>
-                  {renderMarkdownInline(s.body, entityMap, onSelectSlug)}
+                  {renderMarkdownInline(s.body, entityMap, onSelectSlug, selected.slug)}
                 </Section>
               ))}
               {!sections?.summary &&
@@ -932,7 +1012,8 @@ export function WikiGraphView({
                   {renderMarkdownInline(
                     sections.openQuestions,
                     entityMap,
-                    onSelectSlug
+                    onSelectSlug,
+                    selected.slug
                   )}
                 </Card>
               )}

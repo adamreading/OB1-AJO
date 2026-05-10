@@ -87,11 +87,54 @@ function TypeBadge({ page }: { page: WikiPageSummary }) {
   );
 }
 
-function MarkdownContent({ content, onWikiLink, entityMap }: { content: string; onWikiLink?: (slug: string) => void; entityMap?: Map<string, string> }) {
+function MarkdownContent({
+  content,
+  onWikiLink,
+  entityMap,
+  selfSlug,
+}: {
+  content: string;
+  onWikiLink?: (slug: string) => void;
+  entityMap?: Map<string, string>;
+  selfSlug?: string;
+}) {
   const lines = content.split("\n");
   const elements: React.ReactNode[] = [];
   let listItems: string[] = [];
   let key = 0;
+
+  // Build the auto-link regex once per render. Names sorted longest-first so
+  // multi-word matches ("AWS EC2") win over substring matches ("AWS").
+  const autolinkPattern = (() => {
+    if (!entityMap || entityMap.size === 0) return null;
+    const names = Array.from(entityMap.keys())
+      .filter((n) => n.length > 1)
+      .sort((a, b) => b.length - a.length);
+    if (names.length === 0) return null;
+    const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    return new RegExp(`\\b(?:${escaped.join("|")})\\b`, "gi");
+  })();
+
+  // Auto-link bare entity names in HTML, but skip text already inside <a> tags
+  // so we don't produce nested anchors. Self-references are also skipped.
+  function autolinkEntities(html: string): string {
+    if (!autolinkPattern || !entityMap) return html;
+    const anchorRe = /<a\b[^>]*>[\s\S]*?<\/a>/gi;
+    const linkText = (chunk: string) =>
+      chunk.replace(autolinkPattern, (matched) => {
+        const slug = entityMap.get(matched.toLowerCase());
+        if (!slug || slug === selfSlug) return matched;
+        return `<a href="/wiki?slug=${slug}" data-wiki-slug="true" class="text-violet hover:underline">${matched}</a>`;
+      });
+    let out = "";
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = anchorRe.exec(html)) !== null) {
+      out += linkText(html.slice(last, m.index)) + m[0];
+      last = m.index + m[0].length;
+    }
+    return out + linkText(html.slice(last));
+  }
 
   function flushList() {
     if (listItems.length === 0) return;
@@ -106,6 +149,10 @@ function MarkdownContent({ content, onWikiLink, entityMap }: { content: string; 
   }
 
   function inlineFormat(text: string): string {
+    return autolinkEntities(rawInlineFormat(text));
+  }
+
+  function rawInlineFormat(text: string): string {
     return text
       // Markdown links [text](url) — relative paths and https/http only
       .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => {
@@ -1441,7 +1488,7 @@ function WikiPageInner() {
 
               {/* Content area */}
               <div className="flex-1 overflow-y-auto px-6 py-4">
-                <MarkdownContent content={selected.content} onWikiLink={loadDetail} entityMap={entityMap} />
+                <MarkdownContent content={selected.content} onWikiLink={loadDetail} entityMap={entityMap} selfSlug={selected.slug} />
 
                 {/* Curator notes section */}
                 <div className="mt-6 border-t border-border pt-4">
