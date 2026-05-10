@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { WikiGraphView } from "@/components/design/WikiGraphView";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -1307,62 +1308,16 @@ function WikiPageInner() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto">
-            {loading && (
-              <div className="flex items-center gap-2 px-4 py-6 text-text-muted text-sm">
-                <div className="w-4 h-4 border-2 border-violet/30 border-t-violet rounded-full animate-spin" />
-                Loading…
-              </div>
-            )}
-
-            {error && !loading && (
-              <p className="px-4 py-6 text-sm text-danger">{error}</p>
-            )}
-
-            {!loading && !error && pages.length === 0 && (
-              <p className="px-4 py-6 text-sm text-text-muted">
-                No wiki pages yet. Run the entity wiki compiler to generate pages.
-              </p>
-            )}
-
-            {!loading && !error && pages.length > 0 && filteredPages.length === 0 && (
-              <p className="px-4 py-6 text-sm text-text-muted">
-                No matches for &ldquo;{search}&rdquo;
-              </p>
-            )}
-
-            {entityPages.length > 0 && (
-              <div>
-                <div className="px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted border-b border-border bg-bg-surface sticky top-0">
-                  Entities ({entityPages.length})
-                </div>
-                {entityPages.map((p) => (
-                  <WikiListItem
-                    key={p.slug}
-                    page={p}
-                    active={selected?.slug === p.slug}
-                    onClick={() => loadDetail(p.slug)}
-                  />
-                ))}
-              </div>
-            )}
-
-            {topicPages.length > 0 && (
-              <div>
-                <div className="px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted border-b border-border bg-bg-surface sticky top-0">
-                  Topics ({topicPages.length})
-                </div>
-                {topicPages.map((p) => (
-                  <WikiListItem
-                    key={p.slug}
-                    page={p}
-                    active={selected?.slug === p.slug}
-                    onClick={() => loadDetail(p.slug)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
+          <VirtualWikiList
+            loading={loading}
+            error={error}
+            pagesTotal={pages.length}
+            search={search}
+            entityPages={entityPages}
+            topicPages={topicPages}
+            selectedSlug={selected?.slug}
+            onSelect={loadDetail}
+          />
         </div>
 
         {/* Right panel — detail */}
@@ -1561,6 +1516,123 @@ export default function WikiPage() {
     <Suspense fallback={null}>
       <WikiPageInner />
     </Suspense>
+  );
+}
+
+// Virtualized wiki list. Flattens entity + topic groups into a single
+// indexed row array (group headers + items), then renders only the rows
+// inside the scroll viewport via @tanstack/react-virtual. Memory + render
+// cost stay constant whether the user has 50 or 50,000 wiki pages.
+type VirtualRow =
+  | { kind: "header"; label: string; count: number }
+  | { kind: "item"; page: WikiPageSummary };
+
+function VirtualWikiList({
+  loading,
+  error,
+  pagesTotal,
+  search,
+  entityPages,
+  topicPages,
+  selectedSlug,
+  onSelect,
+}: {
+  loading: boolean;
+  error: string | null;
+  pagesTotal: number;
+  search: string;
+  entityPages: WikiPageSummary[];
+  topicPages: WikiPageSummary[];
+  selectedSlug?: string;
+  onSelect: (slug: string) => void;
+}) {
+  const parentRef = useRef<HTMLDivElement>(null);
+
+  const rows = useMemo<VirtualRow[]>(() => {
+    const out: VirtualRow[] = [];
+    if (entityPages.length > 0) {
+      out.push({ kind: "header", label: "Entities", count: entityPages.length });
+      for (const p of entityPages) out.push({ kind: "item", page: p });
+    }
+    if (topicPages.length > 0) {
+      out.push({ kind: "header", label: "Topics", count: topicPages.length });
+      for (const p of topicPages) out.push({ kind: "item", page: p });
+    }
+    return out;
+  }, [entityPages, topicPages]);
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: (i) => (rows[i]?.kind === "header" ? 32 : 60),
+    overscan: 8,
+  });
+
+  const filtered = entityPages.length + topicPages.length;
+  const empty =
+    !loading && !error && pagesTotal > 0 && filtered === 0;
+
+  return (
+    <div ref={parentRef} className="flex-1 overflow-y-auto">
+      {loading && (
+        <div className="flex items-center gap-2 px-4 py-6 text-text-muted text-sm">
+          <div className="w-4 h-4 border-2 border-violet/30 border-t-violet rounded-full animate-spin" />
+          Loading…
+        </div>
+      )}
+      {error && !loading && (
+        <p className="px-4 py-6 text-sm text-danger">{error}</p>
+      )}
+      {!loading && !error && pagesTotal === 0 && (
+        <p className="px-4 py-6 text-sm text-text-muted">
+          No wiki pages yet. Run the entity wiki compiler to generate pages.
+        </p>
+      )}
+      {empty && (
+        <p className="px-4 py-6 text-sm text-text-muted">
+          No matches for &ldquo;{search}&rdquo;
+        </p>
+      )}
+      {!loading && !error && rows.length > 0 && (
+        <div
+          style={{
+            height: virtualizer.getTotalSize(),
+            position: "relative",
+            width: "100%",
+          }}
+        >
+          {virtualizer.getVirtualItems().map((vi) => {
+            const row = rows[vi.index];
+            return (
+              <div
+                key={vi.key}
+                ref={virtualizer.measureElement}
+                data-index={vi.index}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  transform: `translateY(${vi.start}px)`,
+                }}
+              >
+                {row.kind === "header" ? (
+                  <div className="px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted border-b border-border bg-bg-surface">
+                    {row.label} ({row.count})
+                  </div>
+                ) : (
+                  <WikiListItem
+                    page={row.page}
+                    active={selectedSlug === row.page.slug}
+                    onClick={() => onSelect(row.page.slug)}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
