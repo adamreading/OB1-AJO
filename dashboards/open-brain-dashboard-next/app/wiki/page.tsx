@@ -929,7 +929,10 @@ function WikiPageInner() {
   const [selected, setSelected] = useState<WikiPageDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
+  // List-load error (shown in the list panel). Detail errors live in
+  // `detailError` so a stale slug 404 doesn't obscure the list.
   const [error, setError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [showAliasModal, setShowAliasModal] = useState(false);
   const [showEdgesModal, setShowEdgesModal] = useState(false);
@@ -972,6 +975,7 @@ function WikiPageInner() {
 
   const loadDetail = useCallback((slug: string) => {
     setDetailLoading(true);
+    setDetailError(null);
     setEditingNotes(false);
     setNotesError(null);
     window.history.replaceState(null, "", `/wiki?slug=${encodeURIComponent(slug)}`);
@@ -985,7 +989,14 @@ function WikiPageInner() {
         setSelected({ ...d, aliases: listEntry?.aliases ?? [] });
         setNotesContent(d.notes ?? "");
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => {
+        // Detail errors stay in the detail panel — don't poison the list.
+        // Most common: stale ?slug= in URL pointing at a page that was
+        // deleted (e.g. via merge/absorb). Clear `selected` so the user
+        // can pick a different one.
+        setDetailError(e.message);
+        setSelected(null);
+      })
       .finally(() => setDetailLoading(false));
   }, [pages]);
 
@@ -1376,7 +1387,31 @@ function WikiPageInner() {
             </div>
           )}
 
-          {!detailLoading && !selected && (
+          {!detailLoading && !selected && detailError && (
+            <div className="flex-1 flex items-center justify-center px-6 py-8">
+              <div className="max-w-sm text-center">
+                <p className="text-sm text-danger mb-2">
+                  Couldn&apos;t load that wiki page ({detailError}).
+                </p>
+                <p className="text-xs text-text-muted mb-3">
+                  The slug in the URL may point to a page that was merged or
+                  deleted. Pick another from the list.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDetailError(null);
+                    window.history.replaceState(null, "", "/wiki");
+                  }}
+                  className="px-3 py-1.5 text-xs bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
+                >
+                  Clear URL
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!detailLoading && !selected && !detailError && (
             <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
               Select a wiki page from the list
             </div>
