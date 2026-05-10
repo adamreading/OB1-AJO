@@ -1067,103 +1067,60 @@ app.get("/constellation", async (c) => {
   const limit = Math.min(60, Math.max(5, Number(c.req.query("limit")) || 30));
   const days = c.req.query("days") === undefined ? 90 : Number(c.req.query("days"));
   const minWeight = Math.max(1, Number(c.req.query("min_weight")) || 2);
-  const classification = c.req.query("classification") || "";
+  const classification = c.req.query("classification") || null;
 
-  // Pull thought_entities joined to thoughts (for created_at filter + classification)
-  // and entities (for name + type). Cap at a sane row count to keep the function fast.
-  let q = supabase
-    .from("thought_entities")
-    .select(
-      "thought_id, entity_id, thoughts!inner(created_at, metadata, status), entities!inner(canonical_name, entity_type)"
-    )
-    .limit(8000);
+  // Two RPC calls. Each runs in Postgres (GROUP BY / self-join) so no row
+  // cap matters regardless of how big the brain gets.
+  const { data: topData, error: topErr } = await supabase.rpc(
+    "constellation_top_entities",
+    { p_days: days, p_limit: limit, p_classification: classification }
+  );
+  if (topErr) return c.json({ error: topErr.message }, 500, corsHeaders);
 
-  if (days > 0) {
-    const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
-    q = q.gte("thoughts.created_at", since);
-  }
+  type TopRow = { entity_id: number; canonical_name: string; entity_type: string; mentions: number | string };
+  const top = (topData ?? []) as TopRow[];
+  const entityIds = top.map((r) => r.entity_id);
 
-  const { data, error } = await q;
-  if (error) return c.json({ error: error.message }, 500, corsHeaders);
-
-  type Row = {
-    thought_id: number;
-    entity_id: number;
-    thoughts: { created_at: string; metadata: any; status: string | null };
-    entities: { canonical_name: string; entity_type: string };
-  };
-
-  const rows = ((data || []) as unknown as Row[]).filter((r) => {
-    if (!classification) return true;
-    return r.thoughts?.metadata?.classification === classification;
-  });
-
-  // Aggregate mentions
-  const mentionsByEntity = new Map<number, { name: string; type: string; count: number }>();
-  const thoughtToEntities = new Map<number, Set<number>>();
-  for (const r of rows) {
-    const m = mentionsByEntity.get(r.entity_id);
-    if (m) m.count += 1;
-    else mentionsByEntity.set(r.entity_id, {
-      name: r.entities.canonical_name,
-      type: r.entities.entity_type,
-      count: 1,
-    });
-    let bucket = thoughtToEntities.get(r.thought_id);
-    if (!bucket) {
-      bucket = new Set();
-      thoughtToEntities.set(r.thought_id, bucket);
-    }
-    bucket.add(r.entity_id);
-  }
-
-  // Top N
-  const top = Array.from(mentionsByEntity.entries())
-    .sort((a, b) => b[1].count - a[1].count)
-    .slice(0, limit);
-  const topIds = new Set(top.map((t) => t[0]));
-
-  // Co-occurrence edges among top N
-  const edgeKey = (a: number, b: number) => (a < b ? `${a}:${b}` : `${b}:${a}`);
-  const edgeWeight = new Map<string, number>();
-  for (const ents of thoughtToEntities.values()) {
-    const arr = Array.from(ents).filter((e) => topIds.has(e));
-    for (let i = 0; i < arr.length; i++) {
-      for (let j = i + 1; j < arr.length; j++) {
-        const k = edgeKey(arr[i], arr[j]);
-        edgeWeight.set(k, (edgeWeight.get(k) ?? 0) + 1);
+  let edgesRaw: { source: number; target: number; weight: number | string }[] = [];
+  if (entityIds.length > 0) {
+    const { data: edgeData, error: edgeErr } = await supabase.rpc(
+      "constellation_co_occurrence",
+      {
+        p_entity_ids: entityIds,
+        p_days: days,
+        p_classification: classification,
+        p_min_weight: minWeight,
       }
-    }
+    );
+    if (edgeErr) return c.json({ error: edgeErr.message }, 500, corsHeaders);
+    edgesRaw = (edgeData ?? []) as typeof edgesRaw;
   }
 
   // Resolve wiki slugs for the top entities so the dashboard can deep-link
   // each node directly into the wiki page.
   const slugMap = new Map<number, string>();
-  if (top.length > 0) {
-    const ids = top.map(([id]) => id);
+  if (entityIds.length > 0) {
     const { data: wikiRows } = await supabase
       .from("wiki_pages")
       .select("entity_id, slug")
-      .in("entity_id", ids);
+      .in("entity_id", entityIds);
     for (const row of wikiRows || []) {
       if (row.entity_id) slugMap.set(row.entity_id, row.slug);
     }
   }
 
-  const nodes = top.map(([id, v]) => ({
-    id,
-    label: v.name,
-    type: v.type,
-    mentions: v.count,
-    slug: slugMap.get(id) ?? null,
+  const nodes = top.map((r) => ({
+    id: r.entity_id,
+    label: r.canonical_name,
+    type: r.entity_type,
+    mentions: Number(r.mentions),
+    slug: slugMap.get(r.entity_id) ?? null,
   }));
-  const edges = Array.from(edgeWeight.entries())
-    .filter(([, w]) => w >= minWeight)
-    .map(([k, w]) => {
-      const [a, b] = k.split(":").map(Number);
-      return { source: a, target: b, weight: w };
-    })
-    .sort((a, b) => b.weight - a.weight);
+  const edges = edgesRaw.map((e) => ({
+    source: e.source,
+    target: e.target,
+    weight: Number(e.weight),
+  }));
 
   // Strongest cluster — the heaviest edge
   const strongest = edges[0]
@@ -1174,7 +1131,7 @@ app.get("/constellation", async (c) => {
       }
     : null;
 
-  return c.json({ nodes, edges, strongest, days, total_thoughts: thoughtToEntities.size }, 200, corsHeaders);
+  return c.json({ nodes, edges, strongest, days }, 200, corsHeaders);
 });
 
 // ────────────────────────────────────────────────────────────────────────────
