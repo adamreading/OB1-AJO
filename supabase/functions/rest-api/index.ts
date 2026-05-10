@@ -785,16 +785,25 @@ app.get("/wiki-pages", async (c) => {
   return c.json({ data: pages }, 200, corsHeaders);
 });
 
-// Entities — list all (optionally only those without a wiki page)
+// Entities — list all (optionally only those without a wiki page).
+// `limit` defaults to 2000 and caps at 10000 — large enough that the dashboard
+// MergeModal sees every orphan entity, small enough to keep the payload sane.
+// Was previously hard-coded at 200, which made entities sorted past that point
+// invisible to the merge/absorb picker.
 app.get("/entities", async (c) => {
   const noWiki = c.req.query("no_wiki") === "true";
   const search = c.req.query("search") || "";
+  const limitParam = Number(c.req.query("limit"));
+  const limit = Math.min(
+    10000,
+    Math.max(50, Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 2000)
+  );
 
   let q = supabase
     .from("entities")
     .select("id, canonical_name, entity_type, aliases, normalized_name")
     .order("canonical_name")
-    .limit(200);
+    .limit(limit);
 
   if (search) q = q.ilike("canonical_name", `%${search}%`);
 
