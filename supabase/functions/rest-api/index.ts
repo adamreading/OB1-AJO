@@ -1052,24 +1052,16 @@ app.get("/entity-types", async (c) => {
   return c.json({ types }, 200, corsHeaders);
 });
 
-// Distinct source_type values currently in the thoughts table — used to populate
-// the Source filter dropdown without hard-coding values that may drift.
+// Distinct source_type values from the thoughts table with counts. Backed by
+// the sources_summary() Postgres RPC so the heavy lifting is GROUP BY in SQL
+// (returns ~10 rows). No row cap to worry about as the brain grows.
 app.get("/sources", async (c) => {
-  const { data, error } = await supabase
-    .from("thoughts")
-    .select("source_type")
-    .not("source_type", "is", null)
-    .limit(50000);
+  const { data, error } = await supabase.rpc("sources_summary");
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
-  const counts = new Map<string, number>();
-  for (const row of data || []) {
-    const s = (row as any).source_type as string | null;
-    if (!s) continue;
-    counts.set(s, (counts.get(s) ?? 0) + 1);
-  }
-  const sources = Array.from(counts.entries())
-    .map(([source_type, count]) => ({ source_type, count }))
-    .sort((a, b) => b.count - a.count);
+  const sources = (data ?? []).map((r: { source_type: string; count: number | string }) => ({
+    source_type: r.source_type,
+    count: Number(r.count),
+  }));
   return c.json({ sources }, 200, corsHeaders);
 });
 
