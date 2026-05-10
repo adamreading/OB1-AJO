@@ -973,11 +973,22 @@ app.patch("/entities/:id/aliases", async (c) => {
   const current: string[] = entity.aliases ?? [];
 
   let updated: string[];
+  let absorbed: { id: number; canonical_name: string }[] = [];
+
   if (body.action === "remove") {
     updated = current.filter((a: string) => a !== alias);
   } else {
-    if (current.includes(alias)) return c.json({ aliases: current }, 200, corsHeaders);
-    updated = [...current, alias];
+    // Auto-absorb runs whether or not the alias is already in the list. Why:
+    // a duplicate may have been created AFTER the alias was added, so the
+    // alias being there doesn't guarantee absorption already happened.
+    // Loose normalization (lowercase, hyphen↔space, trim) catches "EU-locked
+    // Gemini" matching alias "EU Locked Gemini".
+    absorbed = await absorbDuplicatesByName(id, alias);
+
+    // Pull aliases from absorbed rows so they survive into the surviving entity
+    const extraAliases = absorbed.flatMap((d) => d.aliases ?? []);
+    const merged = new Set([...current, alias, ...extraAliases]);
+    updated = Array.from(merged);
   }
 
   const { error: updateErr } = await supabase
@@ -985,8 +996,117 @@ app.patch("/entities/:id/aliases", async (c) => {
     .update({ aliases: updated, updated_at: new Date().toISOString() })
     .eq("id", id);
   if (updateErr) return c.json({ error: updateErr.message }, 500, corsHeaders);
-  return c.json({ aliases: updated }, 200, corsHeaders);
+  return c.json({
+    aliases: updated,
+    absorbed: absorbed.map((a) => ({ id: a.id, canonical_name: a.canonical_name })),
+  }, 200, corsHeaders);
 });
+
+// Loose normalization used for alias-driven duplicate detection. Stricter than
+// `normalized_name` (which keeps hyphens) — collapses any of [-_ ] runs to a
+// single space so "EU-locked Gemini" and "EU Locked Gemini" match.
+function looseNormalize(s: string): string {
+  return String(s || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\s\-_]+/g, " ")
+    .replace(/[.,;!?]+$/, "");
+}
+
+interface AbsorbedEntity {
+  id: number;
+  canonical_name: string;
+  aliases: string[];
+}
+
+// Find any other entity whose canonical_name OR any of its aliases looses-
+// matches the given name, and absorb each one into `survivorId`. Returns the
+// list of absorbed entities so the caller can report them.
+async function absorbDuplicatesByName(
+  survivorId: number,
+  matchName: string
+): Promise<AbsorbedEntity[]> {
+  const target = looseNormalize(matchName);
+  if (!target) return [];
+
+  // Pull a candidate set: any entity whose canonical_name OR alias contains the
+  // first significant word of the match (cheap pre-filter via ilike), then
+  // verify with full loose normalization in JS.
+  const word = target.split(" ").reduce((longest, w) =>
+    w.length > longest.length ? w : longest, ""
+  );
+  if (!word) return [];
+
+  const { data: candidates } = await supabase
+    .from("entities")
+    .select("id, canonical_name, aliases, entity_type")
+    .neq("id", survivorId)
+    .or(`canonical_name.ilike.%${word}%,aliases.cs.{${word}}`)
+    .limit(50);
+
+  const matches: AbsorbedEntity[] = [];
+  for (const c of candidates || []) {
+    if (looseNormalize(c.canonical_name) === target) {
+      matches.push({ id: c.id, canonical_name: c.canonical_name, aliases: c.aliases ?? [] });
+      continue;
+    }
+    if ((c.aliases ?? []).some((a: string) => looseNormalize(a) === target)) {
+      matches.push({ id: c.id, canonical_name: c.canonical_name, aliases: c.aliases ?? [] });
+    }
+  }
+
+  // Absorb each match into the survivor. Mirror the logic from PATCH
+  // /entities/:id absorbDuplicate(): move thought_entities, dedupe edges, drop
+  // wiki page + entity row.
+  for (const dupe of matches) {
+    await supabase
+      .from("thought_entities")
+      .update({ entity_id: survivorId })
+      .eq("entity_id", dupe.id);
+
+    const { data: fromEdges } = await supabase
+      .from("edges")
+      .select("id, to_entity_id, relation")
+      .eq("from_entity_id", dupe.id);
+    for (const edge of fromEdges || []) {
+      const { data: dup } = await supabase
+        .from("edges")
+        .select("id")
+        .eq("from_entity_id", survivorId)
+        .eq("to_entity_id", edge.to_entity_id)
+        .eq("relation", edge.relation)
+        .maybeSingle();
+      if (!dup) {
+        await supabase.from("edges").update({ from_entity_id: survivorId }).eq("id", edge.id);
+      } else {
+        await supabase.from("edges").delete().eq("id", edge.id);
+      }
+    }
+
+    const { data: toEdges } = await supabase
+      .from("edges")
+      .select("id, from_entity_id, relation")
+      .eq("to_entity_id", dupe.id);
+    for (const edge of toEdges || []) {
+      const { data: dup } = await supabase
+        .from("edges")
+        .select("id")
+        .eq("from_entity_id", edge.from_entity_id)
+        .eq("to_entity_id", survivorId)
+        .eq("relation", edge.relation)
+        .maybeSingle();
+      if (!dup) {
+        await supabase.from("edges").update({ to_entity_id: survivorId }).eq("id", edge.id);
+      } else {
+        await supabase.from("edges").delete().eq("id", edge.id);
+      }
+    }
+
+    await supabase.from("wiki_pages").delete().eq("entity_id", dupe.id);
+    await supabase.from("entities").delete().eq("id", dupe.id);
+  }
+  return matches;
+}
 
 // Entities — rename and/or reclassify (slug preserved to keep existing links)
 app.patch("/entities/:id", async (c) => {
