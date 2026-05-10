@@ -45,16 +45,27 @@ export default async function ThoughtsPage(props: {
   const initialDuplicatesOnly = sp.duplicates === "1";
   const initialCompose = sp.compose === "1";
 
-  // Fetch counts in parallel
+  // KPI counts apply the active context filter so the strip reflects what's
+  // actually being browsed (Total in Personal etc.).
+  const classification =
+    initialContext === "Work"
+      ? "work"
+      : initialContext === "Personal"
+        ? "personal"
+        : undefined;
   const [totalRes, lowScoreRes, dupRes, sources] = await Promise.all([
-    fetchThoughts(apiKey, { per_page: 1 }).catch(() => null),
+    fetchThoughts(apiKey, { per_page: 1, classification }).catch(() => null),
     fetchThoughts(apiKey, {
       per_page: 1,
       quality_score_max: 15,
+      classification,
     }).catch(() => null),
-    fetchDuplicates(apiKey, { threshold: 0.85, limit: 100, offset: 0 }).catch(
-      () => null
-    ),
+    fetchDuplicates(apiKey, {
+      threshold: 0.85,
+      limit: 100,
+      offset: 0,
+      classification,
+    }).catch(() => null),
     fetchSources(apiKey),
   ]);
 

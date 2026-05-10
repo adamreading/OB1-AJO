@@ -66,7 +66,11 @@ export function ThoughtsPageClient({
   const isAuditMode = maxScore < 100;
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync state to URL so deep links + back/forward work
+  // Sync state to URL so deep links + back/forward work. Lightweight filters
+  // (search, type, source, score, duplicates) only update the URL — the table
+  // refetches client-side. Context changes additionally trigger a server
+  // re-render via router.replace so the KPI strip recomputes against the new
+  // classification.
   useEffect(() => {
     const sp = new URLSearchParams();
     if (searchQuery) sp.set("q", searchQuery);
@@ -79,10 +83,32 @@ export function ThoughtsPageClient({
     if (duplicatesOnly) sp.set("duplicates", "1");
     const qs = sp.toString();
     const target = `/thoughts${qs ? `?${qs}` : ""}`;
-    if (typeof window !== "undefined" && window.location.pathname + window.location.search !== target) {
+    if (
+      typeof window !== "undefined" &&
+      window.location.pathname + window.location.search !== target
+    ) {
       window.history.replaceState(null, "", target);
     }
   }, [searchQuery, searchMode, contextFilter, typeFilter, sourceFilter, maxScore, duplicatesOnly]);
+
+  // Context changes hit the server so the KPI strip reflows. Skip the first
+  // mount — initialContext already came from the URL, so re-issuing the same
+  // navigation would be a wasted round-trip.
+  const firstContextSync = useRef(true);
+  useEffect(() => {
+    if (firstContextSync.current) {
+      firstContextSync.current = false;
+      return;
+    }
+    const sp = new URLSearchParams(
+      typeof window !== "undefined" ? window.location.search : ""
+    );
+    if (contextFilter === "All") sp.delete("classification");
+    else sp.set("classification", contextFilter.toLowerCase());
+    const qs = sp.toString();
+    router.replace(`/thoughts${qs ? `?${qs}` : ""}`, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextFilter]);
 
   // Fetch handler
   const fetchData = useCallback(async () => {

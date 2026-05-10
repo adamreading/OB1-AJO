@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ThoughtGraph,
   type ConstellationNode,
@@ -64,8 +65,16 @@ export function DashboardClient({
   workflowBreakdown,
   recent,
 }: DashboardClientProps) {
+  const router = useRouter();
   const [windowSel, setWindowSel] = useState<Window>(initialWindow);
   const [contextSel, setContextSel] = useState<Context>(initialContext);
+
+  // Keep local state in sync if the server re-renders with new props (e.g.
+  // back/forward navigation)
+  useEffect(() => {
+    setWindowSel(initialWindow);
+    setContextSel(initialContext);
+  }, [initialWindow, initialContext]);
 
   const [graph, setGraph] = useState<{
     nodes: ConstellationNode[];
@@ -101,7 +110,8 @@ export function DashboardClient({
     };
   }, []);
 
-  // Reflect filter changes in the URL so server-rendered KPIs update on hard nav
+  // Reflect filter changes in the URL via router.replace so the server
+  // component re-renders and stats / donut / workflow / recent all reflow.
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
     sp.set("window", windowSel === "All" ? "all" : windowSel.replace("d", ""));
@@ -110,9 +120,9 @@ export function DashboardClient({
     const qs = sp.toString();
     const target = `/${qs ? `?${qs}` : ""}`;
     if (window.location.pathname + window.location.search !== target) {
-      window.history.replaceState(null, "", target);
+      router.replace(target, { scroll: false });
     }
-  }, [windowSel, contextSel]);
+  }, [windowSel, contextSel, router]);
 
   useEffect(() => {
     let cancelled = false;

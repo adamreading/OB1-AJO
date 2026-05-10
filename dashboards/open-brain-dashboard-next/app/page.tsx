@@ -66,7 +66,9 @@ export default async function DashboardPage(props: {
       fetchKanbanThoughts(apiKey, { classification: context }),
       jsonOrNull(`${API_URL}/wiki-pages`, apiKey),
       jsonOrNull(
-        `${API_URL}/thoughts?review_status=pending_review&source_type=plaud&per_page=1`,
+        `${API_URL}/thoughts?review_status=pending_review&source_type=plaud&per_page=1${
+          context ? `&classification=${encodeURIComponent(context)}` : ""
+        }`,
         apiKey
       ),
     ]);
