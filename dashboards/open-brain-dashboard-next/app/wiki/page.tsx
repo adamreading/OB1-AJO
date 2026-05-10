@@ -379,29 +379,54 @@ function AliasModal({
     }
   }, [input, aliases, page.entity_id, onAliasAdded]);
 
-  const handleRemove = useCallback(async (alias: string) => {
-    if (!page.entity_id) return;
-    setRemoving(alias);
-    setError(null);
-    try {
-      const res = await fetch(`/api/entities/${page.entity_id}/aliases`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ alias, action: "remove" }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+  const handleRemove = useCallback(
+    async (alias: string, resplit: boolean) => {
+      if (!page.entity_id) return;
+      // Resplit is destructive-ish (re-extracts every linked thought) — confirm
+      // first so it's not a one-click misclick.
+      if (resplit) {
+        const ok = window.confirm(
+          `Remove "${alias}" AND re-extract every thought linked to this entity?\n\n` +
+            `This is the way to undo a bad auto-absorb. The worker will re-read each thought ` +
+            `and recreate any entity that the alias was masking. Edges and the wiki page will ` +
+            `regenerate from scratch on the next worker run.`
+        );
+        if (!ok) return;
       }
-      const { aliases: updated } = await res.json() as { aliases: string[] };
-      setAliases(updated);
-      onAliasRemoved(alias);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to remove alias");
-    } finally {
-      setRemoving(null);
-    }
-  }, [page.entity_id, onAliasRemoved]);
+      setRemoving(alias);
+      setError(null);
+      try {
+        const res = await fetch(`/api/entities/${page.entity_id}/aliases`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            alias,
+            action: resplit ? "remove_and_resplit" : "remove",
+          }),
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+        }
+        const data = (await res.json()) as {
+          aliases: string[];
+          resplit_queued?: number;
+        };
+        setAliases(data.aliases);
+        onAliasRemoved(alias);
+        if (resplit && data.resplit_queued) {
+          setError(
+            `Re-queued ${data.resplit_queued} thoughts. Worker will reprocess them shortly.`
+          );
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to remove alias");
+      } finally {
+        setRemoving(null);
+      }
+    },
+    [page.entity_id, onAliasRemoved]
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -421,28 +446,40 @@ function AliasModal({
         {aliases.length === 0 ? (
           <p className="text-xs text-text-muted mb-4">No aliases yet.</p>
         ) : (
-          <div className="flex flex-wrap gap-1.5 mb-4">
+          <div className="flex flex-col gap-1.5 mb-4">
             {aliases.map((a) => (
-              <span
+              <div
                 key={a}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-elevated border border-border text-xs text-text-secondary"
+                className="inline-flex items-center gap-2 px-2 py-1 rounded-lg bg-bg-elevated border border-border text-xs text-text-secondary"
               >
-                {a}
+                <span className="flex-1">{a}</span>
                 <button
-                  onClick={() => handleRemove(a)}
+                  onClick={() => handleRemove(a, false)}
                   disabled={removing === a}
-                  className="text-text-muted hover:text-danger transition-colors leading-none ml-0.5 disabled:opacity-50"
-                  title={`Remove "${a}"`}
+                  className="text-text-muted hover:text-text-secondary transition-colors disabled:opacity-50 px-1"
+                  title={`Remove "${a}" — keeps absorbed thoughts attached`}
                 >
-                  {removing === a ? "…" : "×"}
+                  Remove
                 </button>
-              </span>
+                <button
+                  onClick={() => handleRemove(a, true)}
+                  disabled={removing === a}
+                  className="text-text-muted hover:text-warning transition-colors disabled:opacity-50 px-1 border-l border-border pl-2"
+                  title={`Remove "${a}" AND re-extract every thought — use this to undo a bad auto-absorb`}
+                >
+                  {removing === a ? "…" : "Remove & resplit"}
+                </button>
+              </div>
             ))}
           </div>
         )}
 
         <p className="text-xs text-text-muted mb-2">
           Aliases are matched during entity extraction — adding one here prevents future duplicates.
+          {" "}
+          <span className="text-text-muted/80">
+            <strong>Remove & resplit</strong> undoes a bad absorb by re-extracting every linked thought.
+          </span>
         </p>
 
         <div className="flex gap-2">

@@ -974,9 +974,43 @@ app.patch("/entities/:id/aliases", async (c) => {
 
   let updated: string[];
   let absorbed: { id: number; canonical_name: string }[] = [];
+  let resplitQueued = 0;
 
-  if (body.action === "remove") {
+  if (body.action === "remove" || body.action === "remove_and_resplit") {
     updated = current.filter((a: string) => a !== alias);
+    // remove_and_resplit: undo a bad auto-absorb. Re-queue every thought
+    // currently linked to this entity for re-extraction, so the worker can
+    // re-derive entity bindings from content. Thoughts that mention the
+    // removed alias name will get a fresh entity created (since the alias is
+    // gone, no match exists), splitting the merged data back apart.
+    if (body.action === "remove_and_resplit") {
+      const { data: links } = await supabase
+        .from("thought_entities")
+        .select("thought_id")
+        .eq("entity_id", id);
+      const thoughtIds = Array.from(
+        new Set((links ?? []).map((l: { thought_id: string }) => l.thought_id))
+      );
+      if (thoughtIds.length > 0) {
+        const nowIso = new Date().toISOString();
+        const rows = thoughtIds.map((thought_id) => ({
+          thought_id,
+          status: "pending",
+          attempt_count: 0,
+          last_error: null,
+          queued_at: nowIso,
+        }));
+        await supabase
+          .from("entity_extraction_queue")
+          .upsert(rows, { onConflict: "thought_id" });
+        resplitQueued = rows.length;
+      }
+      // Mark wiki page stale so the regen picks it up first.
+      await supabase
+        .from("wiki_pages")
+        .update({ generated_at: null })
+        .eq("entity_id", id);
+    }
   } else {
     // Auto-absorb runs whether or not the alias is already in the list. Why:
     // a duplicate may have been created AFTER the alias was added, so the
@@ -999,6 +1033,7 @@ app.patch("/entities/:id/aliases", async (c) => {
   return c.json({
     aliases: updated,
     absorbed: absorbed.map((a) => ({ id: a.id, canonical_name: a.canonical_name })),
+    resplit_queued: resplitQueued,
   }, 200, corsHeaders);
 });
 

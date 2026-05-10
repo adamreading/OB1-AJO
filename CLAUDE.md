@@ -67,6 +67,11 @@ When working in this repo as the AJO maintainer, be aware:
 
 **Thoughts table IDs**: The `id` column is UUID (DB primary key). `serial_id` is an auto-increment integer. The dashboard and all citations use `serial_id`. The Edge Function `mapThought()` exposes `serial_id` as `id` to the dashboard.
 
+**Alias auto-absorb + undo**:
+- Adding an alias to an entity (`PATCH /entities/:id/aliases { alias }`) loose-normalizes the alias (lowercase, hyphen↔space) and absorbs any other entity whose canonical_name OR existing alias matches. Absorbed entity's `thought_entities` move to the survivor, edges merge, wiki page is deleted, aliases merge in. Response includes `absorbed: [{ id, canonical_name }]` so the dashboard can confirm.
+- **Undoing a bad absorb**: there's no audit log to reverse the merge directly. Instead use `PATCH /entities/:id/aliases { alias, action: "remove_and_resplit" }` — this removes the alias AND re-queues every thought currently linked to the entity into `entity_extraction_queue`. The worker re-reads each thought, sees the names in content, and re-derives entities from scratch. Thoughts that mention the removed alias get a fresh entity created (since the alias is gone, no match), splitting the merged data back apart. Response includes `resplit_queued: N`. Surfaced in the wiki dashboard as a "Remove & resplit" button next to each alias.
+- After absorb, the survivor's wiki page is marked stale (`generated_at = NULL`) and one of its thoughts re-queued so the next worker tick + wiki compile reflect the merged content.
+
 **Wiki pipeline**:
 - Compiler (`generate-wiki.mjs`) always regenerates all pages — `manually_edited` is ignored.
 - Curator notes → `wiki_pages.notes` column. Treated as **HIGHEST AUTHORITY** in the regen prompt: explicit override of conflicting thought snippets, drop-the-thought conflict-resolution rule, plus a tail reminder appended to the user message when notes are present (sits in the model's recency window). The wiki UI surfaces this in a violet-bordered "curator note" panel — the only writable surface on the wiki page.
