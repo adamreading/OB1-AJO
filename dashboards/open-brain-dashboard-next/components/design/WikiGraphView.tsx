@@ -193,10 +193,19 @@ function renderMarkdownInline(
     let key = 0;
     while (remaining.length > 0) {
       const citationMatch = remaining.match(/^\[(#?\d+(?:\s*,\s*#?\d+)*)\]/);
+      // Full markdown link: [Name](url). Optional whitespace between ] and (
+      // because the LLM occasionally inserts a space.
+      const mdLinkMatch =
+        !citationMatch && remaining.match(/^\[([^\]]+)\]\s*\(([^)]+)\)/);
+      // Bare bracket fallback: [Name] without (url) — used when the LLM
+      // emits an entity reference without the markdown link.
       const linkMatch =
-        !citationMatch && remaining.match(/^\[([^\]]+)\]/);
+        !citationMatch && !mdLinkMatch && remaining.match(/^\[([^\]]+)\]/);
       const boldMatch =
-        !citationMatch && !linkMatch && remaining.match(/^\*\*([^*]+)\*\*/);
+        !citationMatch &&
+        !mdLinkMatch &&
+        !linkMatch &&
+        remaining.match(/^\*\*([^*]+)\*\*/);
 
       if (citationMatch) {
         const ids = citationMatch[1]
@@ -229,6 +238,83 @@ function renderMarkdownInline(
           if (i < ids.length - 1) out.push(", ");
         });
         remaining = remaining.slice(citationMatch[0].length);
+        key++;
+      } else if (mdLinkMatch) {
+        const label = mdLinkMatch[1];
+        const url = mdLinkMatch[2].trim();
+        // /wiki?slug=foo or /wiki/foo → in-page entity navigation
+        const slugMatch =
+          url.match(/^\/wiki\?slug=([^&#]+)/) ||
+          url.match(/^\/wiki\/([^/?#]+)/);
+        if (slugMatch && slugMatch[1] !== selfSlug) {
+          const slug = decodeURIComponent(slugMatch[1]);
+          out.push(
+            <button
+              key={`md-${key}`}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onWikiLink(slug);
+              }}
+              style={{
+                display: "inline-flex",
+                padding: "0px 6px",
+                margin: "0 1px",
+                borderRadius: 4,
+                background: "rgba(157,131,255,0.10)",
+                border: "1px solid rgba(157,131,255,0.2)",
+                color: "var(--violet-200)",
+                fontSize: "inherit",
+                fontFamily: "inherit",
+                cursor: "pointer",
+              }}
+            >
+              {label}
+            </button>
+          );
+        } else if (/^\/thoughts\/(\d+)/.test(url)) {
+          // /thoughts/N — render as a thought citation chip
+          const id = url.match(/^\/thoughts\/(\d+)/)![1];
+          out.push(
+            <a
+              key={`md-t-${key}`}
+              href={`/thoughts/${id}`}
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                display: "inline-flex",
+                padding: "0 6px",
+                borderRadius: 4,
+                background: "rgba(157,131,255,0.10)",
+                border: "1px solid rgba(157,131,255,0.2)",
+                color: "var(--violet-200)",
+                fontSize: "inherit",
+                textDecoration: "none",
+              }}
+            >
+              {label}
+            </a>
+          );
+        } else {
+          // External / unknown — plain link
+          const safe =
+            url.startsWith("/") ||
+            url.startsWith("https://") ||
+            url.startsWith("http://")
+              ? url
+              : "#";
+          out.push(
+            <a
+              key={`md-x-${key}`}
+              href={safe}
+              target={safe.startsWith("http") ? "_blank" : undefined}
+              rel={safe.startsWith("http") ? "noreferrer" : undefined}
+              style={{ color: "var(--violet-300)", textDecoration: "underline" }}
+            >
+              {label}
+            </a>
+          );
+        }
+        remaining = remaining.slice(mdLinkMatch[0].length);
         key++;
       } else if (linkMatch) {
         const inner = linkMatch[1];
