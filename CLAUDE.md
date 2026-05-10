@@ -103,10 +103,41 @@ The dashboard absorbed Search, Audit, Duplicates, and Add into the Thoughts page
 Anywhere entity types are surfaced in the UI — dashboard legend, wiki graph filter rail, wiki list-view sidebar chips — they must come from `GET /entity-types` (Edge Function) → `/api/entity-types` (Next proxy). The endpoint returns `[{ entity_type, label, color, count }]` with a seed palette for known types (person, project, organization, tool, topic, place) and a deterministic hashed-hue color for any new type. **Never hard-code the type list** — adding a new `entity_type` to the DB must light up a chip everywhere automatically.
 
 **Dashboard REST endpoints (added during redesign)**:
-- `GET /entity-types` — distinct entity_types with color + count.
-- `GET /sources` — distinct source_type values from thoughts (count desc), powers Source dropdown.
-- `GET /constellation?days=&limit=&min_weight=&classification=` — top-N entities by mention count + co-occurrence edges among them. Each node carries its wiki `slug` for click-through.
+- `GET /entity-types` — distinct entity_types with color + count. RPC-backed via `entity_types_summary()`.
+- `GET /sources` — distinct source_type values from thoughts (count desc), powers Source dropdown. RPC-backed via `sources_summary()`.
+- `GET /constellation?days=&limit=&min_weight=&classification=` — top-N entities by mention count + co-occurrence edges among them. Each node carries its wiki `slug` for click-through. RPC-backed (`constellation_top_entities` + `constellation_co_occurrence`).
+- `GET /entities` — list / search entities. Backed by `search_entities()` RPC so `?search=` matches canonical_name OR any alias (case-insensitive, ilike). Default returns 200 rows; `?limit=N` up to 5000.
 - `GET /entities/:id/edges` — edges touching the entity, with each row now including `other_slug` so the wiki Relationships card can navigate without a second round-trip.
+- `GET /wiki-pages?page=N&per_page=M` — paginated explicitly (default per_page=5000, max 10000). Returns `{ data, total, page, per_page }`.
+- `GET /health/quotas` — for each cap-bound table, reports current row count vs cap + utilization. Aggregations report cap as null/∞ (RPC-backed, no row cap). Dashboard's `<QuotaBanner />` polls this on mount and surfaces a fixed-top warning at >80% utilization.
+
+**No-cap aggregation principle (REQUIRED)**:
+Endpoints that aggregate counts (sources, entity-types, constellation top-N + co-occurrence, entity search) MUST do GROUP BY in Postgres via an RPC. **Never** "fetch a slab of rows and aggregate in JS" — that pattern silently truncates as the brain grows. Migration `20260510000100_aggregation_rpcs.sql` defines the RPCs; `20260510000200_search_entities_rpc.sql` adds alias-aware entity search. Add new aggregation endpoints the same way.
+
+**MergeModal search-on-input**:
+The wiki page's merge/absorb picker (`MergeModal` in `app/wiki/page.tsx`) refetches `/api/entities?search=…&no_wiki=true` on every keystroke (debounced 200ms) instead of pre-loading and filtering client-side. Alias matches work because the underlying RPC checks both `canonical_name` and any alias. Don't revert to fetch-once-and-filter.
+
+**Wiki list virtual scroll**:
+The wiki List view uses `@tanstack/react-virtual` (`VirtualWikiList` in `app/wiki/page.tsx`). Entity + topic groups are flattened into a single indexed row array (headers + items); only rows in the viewport render. Render cost stays flat regardless of page count.
+
+**Constellation interactivity**:
+- 30/60/100 top-N chooser next to the min-weight slider. Wiki defaults to 60 (it's the nav surface there); Dashboard defaults to 30 (hero context). Refetches on change.
+- Search filters the displayed nodes to matches PLUS their first-degree neighbors (so "search → see neighborhood" instead of one floating dot).
+- Click → wiki nav (or in-page select on Wiki view via `onNodeClick`); shift/cmd-click → focus mode (filters to neighborhood).
+- Auto-fit sizing scales node radii up when fewer entities are shown so the canvas always fills usefully.
+
+**Dashboard edits trigger entity re-extraction**:
+`PUT /thought/:id` recomputes `content_fingerprint` when content changes, archives the prior `thought_versions` row, force-upserts an `entity_extraction_queue` row with `status=pending`, and re-embeds in the background. Same applies to MCP `update_thought`. Without the fingerprint recompute the DB trigger sees a no-op and the worker never re-extracts.
+
+**Auto-link bare entity names in wiki articles**:
+The LLM emits `[Name](/wiki?slug=…)` only in the Relationships section; everywhere else (Summary / Key Facts / Timeline / Open Questions) it writes entity names as plain prose. Both renderers (Graph view's `WikiGraphView` `renderMarkdownInline` AND the legacy `MarkdownContent` in `app/wiki/page.tsx`) auto-link bare entity-name occurrences against the entityMap. Word-boundaries, longest-first sorting, case-insensitive, skips self-references and existing `<a>` tags. Don't break this.
+
+**Themes cover the whole UI**:
+`ThemeProvider` swaps both legacy `--color-*` tokens AND the new `--bg-*`, `--fg-*`, `--line` design tokens via `theme.designVars`. Six themes: Coal (default), Midnight, Slate, Ocean, Forest, Light. Each has a `scheme: "dark" | "light"` field that sets `color-scheme` on the root. Constellation hero gradients and overlay pills use `color-mix(in srgb, var(--bg-0) 80%, transparent)` so they track the theme.
+
+**Sidebar collapse + Work/Personal page filter**:
+- Click the OB·1 logo → sidebar collapses to 64px icon-only (state in localStorage). `--sidebar-width` CSS var on root drives the main content margin so it reflows.
+- Work/Personal segment on Dashboard + Thoughts uses `router.replace()` (not just `window.history.replaceState`) so the server component re-renders and KPIs/donut/workflow/recent reflow against the new classification.
 
 **Maintainer scripts** (all in `scripts/`):
 - `score-thoughts.mjs` — heuristic quality scoring backfill

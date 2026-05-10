@@ -480,14 +480,20 @@ Two Edge Functions serve the AJO fork. Both are in this repo and must be deploye
 | POST | `/ingestion-jobs/:id/execute` | Execute a pending job's items |
 | GET | `/thoughts` | Now also accepts `review_status` (`pending_review` / `approved`) and `source_type` query filters |
 | GET | `/action-items` | Thoughts with non-empty `metadata.action_items`; supports `classification`, `since_hours`, `limit` |
-| GET | `/wiki-pages` | List all wiki pages (no content, includes entity aliases) |
+| GET | `/wiki-pages?page=&per_page=` | List wiki pages, paginated (default per_page 5000, max 10000). Returns `{ data, total, page, per_page }` |
 | GET | `/wiki-pages/:slug` | Single wiki page with full content |
 | PUT | `/wiki-pages/:slug` | Update wiki page content |
-| PATCH | `/wiki-pages/:slug/notes` | Update curator notes only (never overwritten by compiler) |
-| PATCH | `/entities/:id` | Rename entity (`canonical_name`) and/or reclassify (`entity_type`) |
-| PATCH | `/entities/:id/aliases` | Append or remove an alias (`action: "add"` / `action: "remove"`) |
+| PATCH | `/wiki-pages/:slug/notes` | Update curator notes only (never overwritten by compiler). Treated as HIGHEST AUTHORITY by the regen prompt. |
+| GET | `/entities` | Search entities. `?search=` matches canonical_name OR any alias (case-insensitive). RPC-backed. `?no_wiki=true` filters to entities without a wiki page. |
+| GET | `/entities/:id/edges` | Edges touching the entity, with `other_slug` joined for one-click navigation. |
+| PATCH | `/entities/:id` | Rename entity (`canonical_name`) and/or reclassify (`entity_type`). Auto-absorbs invisible duplicates by `(entity_type, normalized_name)`. |
+| PATCH | `/entities/:id/aliases` | Add or remove an alias. **Add** auto-absorbs any other entity whose canonical_name OR existing alias matches under loose normalization (lowercase, hyphen↔space). **Remove** options: `action: "remove"` drops the alias only; `action: "remove_and_resplit"` ALSO re-queues every linked thought into `entity_extraction_queue` so the worker re-derives entities and recreates anything the alias was masking — use this to undo a bad auto-absorb. |
 | POST | `/entities/:id/merge` | Merge source entity into target (moves all thoughts + edges) |
 | DELETE | `/entities/:id` | Delete entity + wiki page (thought_entities and edges cascade) |
+| GET | `/entity-types` | Distinct entity_types with color + count. RPC-backed (`entity_types_summary()`) — no row cap. |
+| GET | `/sources` | Distinct source_type values from thoughts with counts. RPC-backed (`sources_summary()`) — no row cap. |
+| GET | `/constellation?days=&limit=&min_weight=&classification=` | Top-N entities by mention count + co-occurrence edges (RPC-backed via `constellation_top_entities` + `constellation_co_occurrence`). Each node carries its wiki `slug`. |
+| GET | `/health/quotas` | For each cap-bound table, reports current row count vs cap + utilization. Aggregations report cap as null/∞ (RPC-backed, no row cap). The dashboard polls this and shows a warning banner at >80% utilization. |
 
 ### Deploy via CLI
 
@@ -711,7 +717,10 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 *   **Edge relation vocabulary**: The worker uses a typed relation vocabulary (`works_on`, `uses`, `collaborates_with`, `integrates_with`, `alternative_to`, `evaluates`, `member_of`, `located_in`, `related_to`, `co_occurs_with`). Directional edges require explicit textual evidence (min confidence 0.65). Co-occurrence without stated relationship produces `co_occurs_with` only. Symmetric relations are canonicalized by entity ID ordering to prevent duplicates.
 *   **Wiki always regenerates**: All pages are regenerated on every compiler run. Use the `notes` column (editable in the dashboard) for curator content that survives regeneration — the compiler reads it and incorporates it before calling the LLM. The `manually_edited` column still exists in the DB but is no longer used by the compiler.
 *   **Wiki deep-linking**: The wiki page is always at `/wiki`. Entity cross-links use `?slug=` query params (e.g. `/wiki?slug=person-adam-ososki`) and are intercepted client-side. Clicking a link in wiki content navigates to that entity's page without a full reload.
-*   **Wiki entity management**: The detail header has inline controls for Rename, Aliases (add/remove), Merge, entity Type (inline dropdown that writes to `entities.entity_type` immediately), and Delete (two-step confirm; removes entity + wiki page from DB). The sidebar filter is by entity type (All / Person / Org / Project / Tool / Place / Topic), not Work/Personal.
+*   **Wiki entity management**: The detail header has inline controls for Rename, Aliases (add/remove + "remove & resplit" to undo a bad auto-absorb), Merge, Absorb, entity Type (inline dropdown), and Delete. Adding an alias auto-absorbs duplicate entities by loose-name match (lowercase, hyphen↔space) — moves their thought_entities + edges to the survivor and deletes the duplicate. The "Remove & resplit" alias action undoes a bad absorb by re-queueing every linked thought for re-extraction so the worker can recreate any entity the alias was masking.
+*   **Wiki view modes**: Two views toggleable from the header. **Graph** (default) — collapsible constellation hero + 2-col body (Summary/Key Facts/Timeline left, Relationships/Open Questions/Curator Note right). Bare entity names auto-link in prose against the entity-name→slug map, so the LLM emitting "Adam Ososki" as plain text still becomes a clickable link. **List** — alphabetical sidebar (virtualised via `@tanstack/react-virtual`) + side-panel detail. Filter chips on the sidebar are dynamic from `/entity-types`.
+*   **Constellation interactivity**: Top-N chooser (30/60/100) — Wiki defaults to 60, Dashboard to 30. Min co-occurrence slider thins weak edges client-side. Search filters to matches PLUS first-degree neighbors. Click → wiki nav (or in-page select on Wiki), shift/cmd-click → focus mode (filters to neighborhood with the focused node centred).
+*   **No-cap aggregation principle**: All endpoints that aggregate counts (`/sources`, `/entity-types`, `/constellation`, `/entities` search) use Postgres `GROUP BY` via RPCs — never "fetch a slab and aggregate in JS". `/health/quotas` reports utilization on remaining cap-bound tables; the dashboard banner warns at 80%.
 *   **Heuristic quality scoring**: `quality_score` is populated at creation time (default 50) and can be backfilled with `scripts/score-thoughts.mjs`. The Audit page threshold is configurable in the UI (default < 30).
 *   **Kanban card-to-card drag**: Cards can be dragged between existing cards in any column, not just to empty space. Uses `@dnd-kit/sortable` with per-column `SortableContext`.
 *   **Action Items pipeline**: The enrichment worker extracts `action_items` from every thought into metadata. The `/actions` dashboard page surfaces these as a triage inbox — each item can be dismissed (Done) or promoted to a Kanban task (→ Kanban, which creates a `type=task, status=backlog` thought). Action items are the discovery layer; Kanban is the execution layer. Also available via the `list_action_items` MCP tool.

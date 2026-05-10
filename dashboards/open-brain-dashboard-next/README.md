@@ -182,16 +182,19 @@ The dashboard calls these endpoints on your Open Brain REST API:
 | `/wiki-pages/:slug/notes` | PATCH | Curator note save (highest-authority for next regen) |
 | `/entities` | GET | Entity merge / alias / type management |
 | `/entities/:id` | PATCH, DELETE | Rename / retype / delete |
+| `/entities` | GET | Entity search/list. `?search=` matches canonical_name OR any alias (RPC-backed). Used by MergeModal search-on-input. |
 | `/entities/:id/edges` | GET | Wiki Relationships card (each edge includes `other_slug`) |
-| `/entities/:id/aliases` | PATCH | Alias add / remove |
+| `/entities/:id/aliases` | PATCH | Alias add / remove. Add auto-absorbs duplicates by loose-name match. `action: "remove_and_resplit"` undoes a bad absorb by re-queueing all linked thoughts. |
 | `/entities/:id/merge` | POST | Merge two entities |
 | `/edges`, `/edge-blocklist` | GET, DELETE | Edit Relationships modal |
-| **`/entity-types`** | GET | **Dynamic legend + filter chips** (Dashboard, Wiki). Returns `[{ entity_type, label, color, count }]`. |
-| **`/sources`** | GET | **Dynamic Source dropdown** on Thoughts page. |
-| **`/constellation?days=&limit=&min_weight=`** | GET | **Dashboard hero + Wiki graph view**. Returns top entities by mention + co-occurrence edges, with each node carrying its wiki `slug`. |
+| **`/entity-types`** | GET | **Dynamic legend + filter chips** (Dashboard, Wiki). RPC-backed (`entity_types_summary`) — no row cap. Returns `[{ entity_type, label, color, count }]`. |
+| **`/sources`** | GET | **Dynamic Source dropdown** on Thoughts page. RPC-backed (`sources_summary`) — no row cap. |
+| **`/constellation?days=&limit=&min_weight=`** | GET | **Dashboard hero + Wiki graph view**. RPC-backed (`constellation_top_entities` + `constellation_co_occurrence`) — no row cap. Returns top-N entities by mention + co-occurrence edges, with each node carrying its wiki `slug`. |
+| `/wiki-pages?page=&per_page=` | GET | Explicit pagination (default per_page 5000, max 10000). Returns `{ data, total, page, per_page }`. |
+| `/health/quotas` | GET | Dashboard `<QuotaBanner />` polls this on mount; warns at >80% utilization on remaining cap-bound tables. |
 | `/action-items` | GET | Actions page |
 
-The three bolded endpoints were added during the OB1 redesign and must be present for Dashboard / Thoughts / Wiki to render correctly.
+The bolded endpoints are RPC-backed aggregations — DB does GROUP BY in SQL so the Edge Function ships only the aggregated answer regardless of brain size. **Never replace these with a "fetch a slab and aggregate in JS" implementation** — that pattern silently truncates as the brain grows. Same rule applies to any new aggregation endpoint: write a Postgres function and call it via `supabase.rpc()`.
 
 > [!NOTE]
 > If your Open Brain instance doesn't have all these endpoints (e.g., no smart-ingest or duplicates), those pages will show errors but the core pages (dashboard, browse, search, detail) will still work.
@@ -214,11 +217,12 @@ No API key is stored in environment variables or exposed to the browser.
 
 - **Next.js 16** (App Router, Turbopack)
 - **React 19** with TypeScript
-- **Tailwind CSS 4** (dark theme) + a parallel design-token layer in `globals.css` for the redesigned pages
+- **Tailwind CSS 4** + a parallel design-token layer in `globals.css` for the redesigned pages. `ThemeProvider` swaps both legacy `--color-*` tokens AND the new `--bg-*`, `--fg-*`, `--line` design tokens. Six themes including a Light mode (`scheme: "light"` sets `color-scheme` on root).
 - **iron-session 8** (encrypted cookies)
 - **@dnd-kit** (drag-and-drop for the Workflow board)
-- The constellation graph in `components/design/ThoughtGraph.tsx` is a hand-rolled SVG force layout — no d3-force or external graph library, keeps the bundle slim.
-- Zero external runtime dependencies beyond these
+- **@tanstack/react-virtual** (virtual scrolling for the wiki List view — render cost stays constant regardless of page count)
+- The constellation graph in `components/design/ThoughtGraph.tsx` is a hand-rolled SVG force layout (sunflower-seed init, auto-fit zoom, smart 4-position label placement) — no d3-force, keeps the bundle slim.
+- `<QuotaBanner />` in the root layout polls `/api/quotas` and warns at >80% utilization on any remaining cap-bound endpoint.
 
 ## Troubleshooting
 
