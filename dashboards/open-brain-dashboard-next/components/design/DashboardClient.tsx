@@ -83,6 +83,7 @@ export function DashboardClient({
   }>({ nodes: [], edges: [], strongest: null });
   const [graphLoading, setGraphLoading] = useState(true);
   const [minWeight, setMinWeight] = useState(2);
+  const [topN, setTopN] = useState<"30" | "60" | "100">("30");
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [entityTypes, setEntityTypes] = useState<EntityTypeInfo[]>([]);
 
@@ -137,7 +138,7 @@ export function DashboardClient({
             ? "30"
             : "90";
     params.set("days", days);
-    params.set("limit", "30");
+    params.set("limit", topN);
     // Always fetch with min_weight=1 so the client-side slider can tighten the
     // graph without re-fetching from the server every adjustment.
     params.set("min_weight", "1");
@@ -161,7 +162,7 @@ export function DashboardClient({
     return () => {
       cancelled = true;
     };
-  }, [windowSel, contextSel]);
+  }, [windowSel, contextSel, topN]);
 
   return (
     <div
@@ -453,6 +454,17 @@ export function DashboardClient({
                     }
                     return `showing ${liveNodes.size} entities · ${liveEdges.length} of ${graph.edges.length} links`;
                   })()}
+                </span>
+                {/* Top-N chooser. Server returns top N entities by mention
+                    count; raise to see more of the brain. */}
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span className="eyebrow">Top</span>
+                  <SegBar
+                    options={["30", "60", "100"] as const}
+                    active={topN}
+                    onChange={setTopN}
+                    size="sm"
+                  />
                 </span>
               </div>
             );

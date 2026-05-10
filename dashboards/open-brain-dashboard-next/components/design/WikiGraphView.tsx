@@ -506,6 +506,7 @@ export function WikiGraphView({
   }>({ nodes: [], edges: [] });
   const [graphLoading, setGraphLoading] = useState(true);
   const [minWeight, setMinWeight] = useState(2);
+  const [topN, setTopN] = useState<"30" | "60" | "100">("60");
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [entityTypes, setEntityTypes] = useState<EntityTypeInfo[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -523,11 +524,12 @@ export function WikiGraphView({
       .catch(() => {});
   }, []);
 
-  // Pull constellation
+  // Pull constellation. Refetches when the user changes the Top-N
+  // chooser (server returns top-N entities by mention count).
   useEffect(() => {
     let cancelled = false;
     setGraphLoading(true);
-    fetch("/api/constellation?days=90&limit=60&min_weight=1")
+    fetch(`/api/constellation?days=90&limit=${topN}&min_weight=1`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data) return;
@@ -540,7 +542,7 @@ export function WikiGraphView({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [topN]);
 
   // Build entity-name → slug map for [Entity Name] resolution in markdown
   useEffect(() => {
@@ -590,13 +592,27 @@ export function WikiGraphView({
     });
   }
 
-  // Apply search filter to nodes (parent does it so the constellation
-  // doesn't need to know about searchQuery internals)
+  // Apply search filter to nodes. When searching, keep matches PLUS their
+  // first-degree neighbors so the user can see what the matched entity is
+  // connected to — searching "gemini" alone with no neighbors is just a
+  // single floating node, useless for navigation.
   const filteredNodes = useMemo(() => {
     if (!searchQuery.trim()) return graph.nodes;
     const q = searchQuery.trim().toLowerCase();
-    return graph.nodes.filter((n) => n.label.toLowerCase().includes(q));
-  }, [graph.nodes, searchQuery]);
+    const matchIds = new Set(
+      graph.nodes
+        .filter((n) => n.label.toLowerCase().includes(q))
+        .map((n) => n.id)
+    );
+    if (matchIds.size === 0) return [];
+    // Pull in any node connected to a match by an edge
+    const keep = new Set(matchIds);
+    for (const e of graph.edges) {
+      if (matchIds.has(e.source)) keep.add(e.target);
+      if (matchIds.has(e.target)) keep.add(e.source);
+    }
+    return graph.nodes.filter((n) => keep.has(n.id));
+  }, [graph.nodes, graph.edges, searchQuery]);
 
   const selectedNode = useMemo(() => {
     if (!selected) return null;
@@ -678,6 +694,23 @@ export function WikiGraphView({
             >
               {minWeight}
             </span>
+          </div>
+
+          {/* Top-N — server returns top-N entities by mention count */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <span className="eyebrow">top</span>
+            <SegBar
+              options={["30", "60", "100"] as const}
+              active={topN}
+              onChange={setTopN}
+              size="sm"
+            />
           </div>
 
           {/* Type toggle chips */}

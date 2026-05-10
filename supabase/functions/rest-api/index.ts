@@ -1105,6 +1105,40 @@ async function absorbDuplicatesByName(
     await supabase.from("wiki_pages").delete().eq("entity_id", dupe.id);
     await supabase.from("entities").delete().eq("id", dupe.id);
   }
+
+  // Trigger downstream refresh on the survivor:
+  //   1. Re-queue ONE of its thoughts for entity extraction so the
+  //      thought_entity_edges trigger refreshes provenance / edge support.
+  //   2. Mark the survivor's wiki page stale (generated_at = NULL) so the
+  //      next compile picks it up first. The wiki compiler always
+  //      regenerates everything but this lets a partial-regen script
+  //      filter to "needs_regen" pages and act fast.
+  if (matches.length > 0) {
+    const { data: link } = await supabase
+      .from("thought_entities")
+      .select("thought_id")
+      .eq("entity_id", survivorId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (link?.thought_id) {
+      await supabase.from("entity_extraction_queue").upsert(
+        {
+          thought_id: link.thought_id,
+          status: "pending",
+          attempt_count: 0,
+          last_error: null,
+          queued_at: new Date().toISOString(),
+        },
+        { onConflict: "thought_id" }
+      );
+    }
+    await supabase
+      .from("wiki_pages")
+      .update({ generated_at: null })
+      .eq("entity_id", survivorId);
+  }
+
   return matches;
 }
 
