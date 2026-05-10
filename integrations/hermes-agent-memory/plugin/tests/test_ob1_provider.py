@@ -244,6 +244,48 @@ class TestExtractFindings:
         assert "lessons" not in findings
 
 
+class TestResolveWorkspaceId:
+    """Per-agent workspace mode resolution (mirrors OpenClaw plugin's workspaceMode)."""
+
+    def test_shared_mode_returns_fallback(self):
+        from __init__ import _resolve_workspace_id
+        assert _resolve_workspace_id(
+            mode="shared", prefix="ignored-", agent_identity="nina", fallback="fleet",
+        ) == "fleet"
+
+    def test_per_agent_mode_uses_agent_identity(self):
+        from __init__ import _resolve_workspace_id
+        assert _resolve_workspace_id(
+            mode="per-agent", prefix="", agent_identity="nina", fallback="fleet",
+        ) == "nina"
+
+    def test_per_agent_with_prefix(self):
+        from __init__ import _resolve_workspace_id
+        assert _resolve_workspace_id(
+            mode="per-agent", prefix="hermes-", agent_identity="nina", fallback="fleet",
+        ) == "hermes-nina"
+
+    def test_per_agent_falls_back_when_identity_is_default(self):
+        # "default" is the placeholder when no agent identity is set —
+        # must fall back to the configured workspace, not "default" the literal.
+        from __init__ import _resolve_workspace_id
+        assert _resolve_workspace_id(
+            mode="per-agent", prefix="", agent_identity="default", fallback="fleet",
+        ) == "fleet"
+
+    def test_per_agent_falls_back_when_identity_empty(self):
+        from __init__ import _resolve_workspace_id
+        assert _resolve_workspace_id(
+            mode="per-agent", prefix="", agent_identity="", fallback="fleet",
+        ) == "fleet"
+
+    def test_unknown_mode_treated_as_shared(self):
+        from __init__ import _resolve_workspace_id
+        assert _resolve_workspace_id(
+            mode="garbage", prefix="x-", agent_identity="nina", fallback="fleet",
+        ) == "fleet"
+
+
 class TestReadHermesActiveModel:
     """Regression tests for the bug where a line-scan matched stt.local.model."""
 

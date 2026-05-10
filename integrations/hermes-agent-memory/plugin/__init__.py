@@ -95,6 +95,13 @@ def _default_config() -> dict:
         # lower than confirmed ones via the Edge Function's scoring.
         "include_unconfirmed_recall": True,
         "require_review_by_default": True,
+        # Multi-tenant per-agent workspace (mirrors the OpenClaw plugin's
+        # workspaceMode option for symmetry across runtimes). When "shared",
+        # every Hermes session uses workspace_id from config. When
+        # "per-agent", workspace_id = workspace_prefix + agent_identity, so
+        # each Hermes agent identity gets its own isolated OB1 workspace.
+        "workspace_mode": "shared",
+        "workspace_prefix": "",
     }
 
 
@@ -135,6 +142,14 @@ def _load_ob1_config(hermes_home: str) -> dict:
     if env_project:
         config["project_id"] = env_project
 
+    env_mode = os.environ.get("OPENBRAIN_WORKSPACE_MODE", "").strip()
+    if env_mode:
+        config["workspace_mode"] = env_mode
+
+    env_prefix = os.environ.get("OPENBRAIN_WORKSPACE_PREFIX", "").strip()
+    if env_prefix:
+        config["workspace_prefix"] = env_prefix
+
     config["endpoint"] = str(config.get("endpoint") or "").rstrip("/")
     config["workspace_id"] = str(config.get("workspace_id") or _DEFAULT_WORKSPACE_ID)
     project_id = config.get("project_id")
@@ -143,6 +158,9 @@ def _load_ob1_config(hermes_home: str) -> dict:
     config["auto_capture"] = _as_bool(config.get("auto_capture"), True)
     config["include_unconfirmed_recall"] = _as_bool(config.get("include_unconfirmed_recall"), False)
     config["require_review_by_default"] = _as_bool(config.get("require_review_by_default"), True)
+    mode = str(config.get("workspace_mode") or "shared").strip().lower()
+    config["workspace_mode"] = mode if mode in ("shared", "per-agent") else "shared"
+    config["workspace_prefix"] = str(config.get("workspace_prefix") or "")
 
     try:
         config["max_recall_results"] = max(1, min(50, int(config.get("max_recall_results", _DEFAULT_MAX_RECALL_RESULTS))))
@@ -160,6 +178,23 @@ def _load_ob1_config(hermes_home: str) -> dict:
         config["default_confidence"] = _DEFAULT_CONFIDENCE
 
     return config
+
+
+def _resolve_workspace_id(*, mode: str, prefix: str, agent_identity: str, fallback: str) -> str:
+    """Return the OB1 workspace_id to use, applying workspaceMode rules.
+
+    "shared" (default) → fallback (the configured workspace_id).
+    "per-agent" → prefix + agent_identity, unless the agent identity is empty
+    or the placeholder "default", in which case fall back to the configured
+    workspace so we never send an empty workspace_id.
+    """
+    fb = str(fallback or _DEFAULT_WORKSPACE_ID)
+    if str(mode).lower() != "per-agent":
+        return fb
+    ident = str(agent_identity or "").strip()
+    if not ident or ident == "default":
+        return fb
+    return f"{str(prefix or '')}{ident}"
 
 
 def _save_ob1_config(values: dict, hermes_home: str) -> None:
@@ -770,7 +805,6 @@ class OB1MemoryProvider(MemoryProvider):
         self._config = _load_ob1_config(self._hermes_home)
         self._access_key = os.environ.get("OPENBRAIN_KEY", "").strip()
         self._endpoint = self._config["endpoint"]
-        self._workspace_id = self._config["workspace_id"]
         self._project_id = self._config["project_id"]
         self._auto_recall = self._config["auto_recall"]
         self._auto_capture = self._config["auto_capture"]
@@ -778,9 +812,22 @@ class OB1MemoryProvider(MemoryProvider):
         self._api_timeout = self._config["api_timeout"]
         self._default_confidence = self._config["default_confidence"]
 
-        # Identity / runtime metadata for OB1 writes.
+        # Identity / runtime metadata for OB1 writes. Capture agent_identity
+        # BEFORE workspace resolution so per-agent mode can use it.
         self._agent_identity = kwargs.get("agent_identity", "default")
         self._platform = kwargs.get("platform", "cli")
+
+        # Workspace resolution (per-agent vs shared). Mirrors the OpenClaw
+        # plugin's workspaceMode option so both runtimes have symmetric
+        # multi-tenant semantics. In per-agent mode an empty/default agent
+        # identity falls back to the configured workspace so we never send
+        # an empty workspace_id.
+        self._workspace_id = _resolve_workspace_id(
+            mode=self._config["workspace_mode"],
+            prefix=self._config["workspace_prefix"],
+            agent_identity=self._agent_identity,
+            fallback=self._config["workspace_id"],
+        )
         try:
             from hermes_constants import VERSION as _hermes_version
             self._runtime_version = str(_hermes_version)
