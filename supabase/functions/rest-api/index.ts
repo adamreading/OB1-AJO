@@ -785,41 +785,30 @@ app.get("/wiki-pages", async (c) => {
   return c.json({ data: pages }, 200, corsHeaders);
 });
 
-// Entities — list all (optionally only those without a wiki page).
-// `limit` defaults to 2000 and caps at 10000 — large enough that the dashboard
-// MergeModal sees every orphan entity, small enough to keep the payload sane.
-// Was previously hard-coded at 200, which made entities sorted past that point
-// invisible to the merge/absorb picker.
+// Entities — list / search. Backed by search_entities() RPC so the search
+// term matches canonical_name OR any alias in SQL. Default returns 200 rows
+// (enough for the merge picker's initial render); when the user types a
+// search term, the RPC narrows server-side and returns up to `limit` matches.
+//   ?search=eu      — match canonical_name or any alias
+//   ?no_wiki=true   — only entities without a wiki page
+//   ?limit=N        — cap returned rows (default 200, max 5000)
 app.get("/entities", async (c) => {
   const noWiki = c.req.query("no_wiki") === "true";
   const search = c.req.query("search") || "";
   const limitParam = Number(c.req.query("limit"));
   const limit = Math.min(
-    10000,
-    Math.max(50, Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 2000)
+    5000,
+    Math.max(20, Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 200)
   );
 
-  let q = supabase
-    .from("entities")
-    .select("id, canonical_name, entity_type, aliases, normalized_name")
-    .order("canonical_name")
-    .limit(limit);
-
-  if (search) q = q.ilike("canonical_name", `%${search}%`);
-
-  const { data, error } = await q;
+  const { data, error } = await supabase.rpc("search_entities", {
+    p_search: search || null,
+    p_no_wiki: noWiki,
+    p_limit: limit,
+  });
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
 
-  let entities = data || [];
-
-  if (noWiki) {
-    const { data: wikiRows } = await supabase
-      .from("wiki_pages").select("entity_id").not("entity_id", "is", null);
-    const wikiIds = new Set((wikiRows || []).map((w: any) => w.entity_id));
-    entities = entities.filter((e: any) => !wikiIds.has(e.id));
-  }
-
-  return c.json({ entities }, 200, corsHeaders);
+  return c.json({ entities: data ?? [] }, 200, corsHeaders);
 });
 
 // Entities — add or remove an alias

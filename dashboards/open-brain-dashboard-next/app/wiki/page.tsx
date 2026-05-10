@@ -698,12 +698,27 @@ function MergeModal({
   const [merging, setMerging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Search-on-input: every keystroke (debounced 200ms) refetches orphan
+  // entities from the DB with the search filter applied. No client-side
+  // truncation — every entity that matches comes back regardless of how
+  // many entities exist in total.
   useEffect(() => {
-    fetch("/api/entities?no_wiki=true")
-      .then((r) => r.json())
-      .then((d: { entities?: OrphanEntity[] }) => setOrphans(d.entities ?? []))
-      .catch(() => {});
-  }, []);
+    const handle = setTimeout(() => {
+      const params = new URLSearchParams({ no_wiki: "true" });
+      if (search.trim()) params.set("search", search.trim());
+      // When no search term, cap returned rows to keep the initial render
+      // payload sane. Once the user types, server-side ilike narrows the set.
+      params.set("limit", search.trim() ? "500" : "100");
+      fetch(`/api/entities?${params}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d) return;
+          setOrphans((d.entities as OrphanEntity[]) ?? []);
+        })
+        .catch(() => {});
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [search]);
 
   const wikiCandidates: MergeCandidate[] = pages
     .filter((p) => p.entity_id && p.entity_id !== source.entity_id)
