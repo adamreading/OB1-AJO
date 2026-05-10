@@ -294,26 +294,111 @@ app.put("/thought/:id", async (c) => {
   const id = c.req.param("id");
   const body = await c.req.json();
   const filter = getIdentityFilter(id);
-  const updates: any = { updated_at: new Date().toISOString() };
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (body.status !== undefined) {
     updates.status = body.status;
     updates.status_updated_at = new Date().toISOString();
   }
   if (body.type !== undefined) updates.type = body.type;
   if (body.importance !== undefined) updates.importance = body.importance;
-  if (body.content) updates.content = body.content;
+
+  // Content edits need to flow through the same downstream pipeline as a fresh
+  // capture: recompute the fingerprint, re-embed, archive the old version into
+  // thought_versions, and force-requeue entity extraction. The DB trigger only
+  // requeues when content_fingerprint changes — without an explicit recompute
+  // here, the worker would skip the edited thought.
+  let triggerRequeue = false;
+  let updatedThoughtId: string | null = null;
+  if (body.content !== undefined && typeof body.content === "string") {
+    const newContent = body.content;
+    updates.content = newContent;
+
+    // Pull the current row so we can archive + know the old fingerprint
+    const { data: existing } = await supabase
+      .from("thoughts")
+      .select("id, content, content_fingerprint, metadata, version")
+      .match(filter)
+      .single();
+
+    if (existing) {
+      updatedThoughtId = existing.id;
+      const newFp = await fingerprint(newContent);
+      if (newFp !== existing.content_fingerprint) {
+        updates.content_fingerprint = newFp;
+        triggerRequeue = true;
+      }
+      updates.version = (existing.version || 1) + 1;
+
+      // Archive previous version (best-effort — table may not exist)
+      try {
+        await supabase.from("thought_versions").insert({
+          thought_id: existing.id,
+          version: existing.version || 1,
+          content: existing.content,
+          metadata: existing.metadata,
+        });
+      } catch {
+        // ignore — table optional
+      }
+    }
+  }
+
   if (body.classification) {
     updates.classification = body.classification;
     body.metadata = { ...(body.metadata || {}), classification: body.classification };
   }
   if (body.metadata) {
-    const { data: existing } = await supabase.from("thoughts").select("metadata").match(filter).single();
-    updates.metadata = { ...(existing?.metadata || {}), ...body.metadata };
+    const { data: existingMeta } = await supabase
+      .from("thoughts")
+      .select("metadata")
+      .match(filter)
+      .single();
+    updates.metadata = {
+      ...((existingMeta?.metadata as Record<string, unknown>) || {}),
+      ...body.metadata,
+    };
   }
 
-  const { data, error } = await supabase.from("thoughts").update(updates).match(filter).select().single();
+  const { data, error } = await supabase
+    .from("thoughts")
+    .update(updates)
+    .match(filter)
+    .select()
+    .single();
   if (error) return c.json({ error: error.message }, 500);
-  return c.json({ id: data.serial_id, action: "updated", message: "Saved" });
+
+  // Force-requeue extraction so the worker re-runs entity extraction + edge
+  // graph + wiki regen on the edited content. Belt-and-braces: the trigger
+  // SHOULD have done this when content_fingerprint changed, but the upsert
+  // here also covers the case where the trigger's WHERE guard considered the
+  // change a no-op (rare but possible after manual DB tinkering).
+  if (triggerRequeue && updatedThoughtId) {
+    await supabase.from("entity_extraction_queue").upsert({
+      thought_id: updatedThoughtId,
+      status: "pending",
+      attempt_count: 0,
+      last_error: null,
+      queued_at: new Date().toISOString(),
+      source_fingerprint: updates.content_fingerprint as string,
+      source_updated_at: updates.updated_at as string,
+    }, { onConflict: "thought_id" });
+
+    // Re-embed in the background — don't block the PUT response
+    getEmbedding(body.content as string)
+      .then((emb) => {
+        if (emb) {
+          return supabase.from("thoughts").update({ embedding: emb }).match(filter);
+        }
+      })
+      .catch(() => {});
+  }
+
+  return c.json({
+    id: data.serial_id,
+    action: "updated",
+    requeued: triggerRequeue,
+    message: "Saved",
+  });
 });
 
 // Delete thought

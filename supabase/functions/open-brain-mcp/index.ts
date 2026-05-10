@@ -27,6 +27,15 @@ function thoughtUrl(serialId: number | string): string {
   return `${CITATION_BASE_URL.replace(/\/$/, "")}/${serialId}`;
 }
 
+// 16-char SHA-256 prefix of normalized content. MUST match the format used
+// by the rest-api capture path so the entity-extraction trigger sees an
+// edited thought as having a different fingerprint and re-queues it.
+async function fingerprint(text: string): Promise<string> {
+  const normalized = String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalized));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+}
+
 async function getEmbedding(text: string): Promise<number[] | null> {
   if (!OPENROUTER_API_KEY) return null;
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
@@ -410,17 +419,38 @@ function createServer(): McpServer {
         const embedding = await getEmbedding(content);
         const metadata = { ...(current.metadata || {}), classification: classification || current.metadata?.classification };
 
+        // Recompute content_fingerprint so the entity-extraction trigger
+        // notices the edit and the worker re-runs entity/wiki extraction.
+        const newFp = await fingerprint(content);
+        const fingerprintChanged = newFp !== current.content_fingerprint;
+
         const updatePayload: Record<string, unknown> = {
           content,
           metadata,
           version: (current.version || 1) + 1,
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         };
+        if (fingerprintChanged) updatePayload.content_fingerprint = newFp;
         if (embedding) updatePayload.embedding = embedding;
 
         const { error } = await supabase.from("thoughts").update(updatePayload).match(filter);
 
         if (error) return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+
+        // Force-requeue extraction explicitly (belt + braces alongside the
+        // DB trigger). Worker picks up status='pending' rows and re-extracts.
+        if (fingerprintChanged) {
+          await supabase.from("entity_extraction_queue").upsert({
+            thought_id: current.id,
+            status: "pending",
+            attempt_count: 0,
+            last_error: null,
+            queued_at: new Date().toISOString(),
+            source_fingerprint: newFp,
+            source_updated_at: updatePayload.updated_at as string,
+          }, { onConflict: "thought_id" });
+        }
+
         return { content: [{ type: "text", text: "Updated successfully." }] };
       } catch (err: unknown) {
         return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
