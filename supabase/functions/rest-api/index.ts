@@ -771,18 +771,42 @@ async function executeJob(jobId: number): Promise<number> {
 }
 
 // Wiki pages — list (no content field), includes entity aliases for search
+// Wiki pages — list. Explicit pagination so we don't silently rely on
+// PostgREST's db-default-rows (1000) ceiling. Returns the page slice + total
+// count so the dashboard can show "N of M" and trigger fetch-more.
+//   ?page=1          (1-based)
+//   ?per_page=N      (default 5000, max 10000 — covers any realistic brain
+//                     in one round-trip; bump only if needed)
 app.get("/wiki-pages", async (c) => {
-  const { data, error } = await supabase
+  const page = Math.max(1, Number(c.req.query("page")) || 1);
+  const perPageParam = Number(c.req.query("per_page"));
+  const perPage = Math.min(
+    10000,
+    Math.max(1, Number.isFinite(perPageParam) && perPageParam > 0 ? perPageParam : 5000)
+  );
+  const from = (page - 1) * perPage;
+  const to = from + perPage - 1;
+
+  const { data, error, count } = await supabase
     .from("wiki_pages")
-    .select("id, slug, type, entity_id, title, generated_at, thought_count, manually_edited, metadata, entities(aliases)")
+    .select(
+      "id, slug, type, entity_id, title, generated_at, thought_count, manually_edited, metadata, entities(aliases)",
+      { count: "exact" }
+    )
     .order("type", { ascending: true })
-    .order("title", { ascending: true });
+    .order("title", { ascending: true })
+    .range(from, to);
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
   const pages = (data || []).map((p: Record<string, unknown>) => {
     const ent = p.entities as { aliases?: string[] } | null;
     return { ...p, aliases: ent?.aliases ?? [], entities: undefined };
   });
-  return c.json({ data: pages }, 200, corsHeaders);
+  return c.json({
+    data: pages,
+    total: count ?? pages.length,
+    page,
+    per_page: perPage,
+  }, 200, corsHeaders);
 });
 
 // Entities — list / search. Backed by search_entities() RPC so the search
