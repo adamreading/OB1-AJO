@@ -88,6 +88,127 @@ async function fingerprint(text: string): Promise<string> {
 // Health
 app.get("/health", (c) => c.json({ status: "ok", version: "2.9.0-pro" }));
 
+// Quotas — for each cap-bound endpoint, report current row count vs cap so
+// the dashboard can show a tripwire banner before any silent ceiling bites.
+// Anything over 0.8 utilization is "near_cap"; anything over 1.0 means data
+// is being silently truncated and an immediate fix is required.
+app.get("/health/quotas", async (c) => {
+  // Caps the rest-api currently enforces. Aggregation endpoints (/sources,
+  // /entity-types) and /constellation use SQL GROUP BY now and have no
+  // intrinsic cap — they're absent here intentionally.
+  const checks: Array<{
+    name: string;
+    table: string;
+    cap: number;
+    note: string;
+    countQuery: () => Promise<{ count: number | null; error: string | null }>;
+  }> = [
+    {
+      name: "entities (/entities default per page)",
+      table: "entities",
+      cap: 5000, // search_entities() max p_limit
+      note: "Default /entities returns 200 rows; ?limit=N up to 5000. Past 5000 the modal needs server pagination.",
+      countQuery: async () => {
+        const { count, error } = await supabase
+          .from("entities")
+          .select("id", { count: "exact", head: true });
+        return { count: count ?? null, error: error?.message ?? null };
+      },
+    },
+    {
+      name: "wiki_pages (/wiki-pages per page)",
+      table: "wiki_pages",
+      cap: 10000, // /wiki-pages max per_page
+      note: "Single page caps at 10000. Pagination via ?page= for larger sets.",
+      countQuery: async () => {
+        const { count, error } = await supabase
+          .from("wiki_pages")
+          .select("id", { count: "exact", head: true });
+        return { count: count ?? null, error: error?.message ?? null };
+      },
+    },
+    {
+      name: "search_entities (alias-aware search)",
+      table: "entities",
+      cap: 5000, // search_entities p_limit max
+      note: "Single-call cap — typically narrowed by ?search= so the actual returned set is much smaller.",
+      countQuery: async () => {
+        const { count, error } = await supabase
+          .from("entities")
+          .select("id", { count: "exact", head: true });
+        return { count: count ?? null, error: error?.message ?? null };
+      },
+    },
+    {
+      name: "thoughts (browse pagination)",
+      table: "thoughts",
+      cap: 1000, // PostgREST default. /thoughts uses range() so paged.
+      note: "Browse uses ?page=&per_page= so total count is fine; this only catches a single-call cap.",
+      countQuery: async () => {
+        const { count, error } = await supabase
+          .from("thoughts")
+          .select("id", { count: "exact", head: true });
+        return { count: count ?? null, error: error?.message ?? null };
+      },
+    },
+    {
+      name: "thought_entities (constellation source)",
+      table: "thought_entities",
+      cap: Number.POSITIVE_INFINITY, // RPC-backed — no cap
+      note: "Aggregated via RPC GROUP BY in SQL. No row cap; reported for trend monitoring only.",
+      countQuery: async () => {
+        // thought_entities has a composite PK; count any non-null column.
+        const { count, error } = await supabase
+          .from("thought_entities")
+          .select("thought_id", { count: "exact", head: true });
+        return { count: count ?? null, error: error?.message ?? null };
+      },
+    },
+    {
+      name: "edges",
+      table: "edges",
+      cap: 1000, // PostgREST default for /entities/:id/edges
+      note: "Per-entity edges typically small; project-wide cap not user-facing yet.",
+      countQuery: async () => {
+        const { count, error } = await supabase
+          .from("edges")
+          .select("id", { count: "exact", head: true });
+        return { count: count ?? null, error: error?.message ?? null };
+      },
+    },
+  ];
+
+  const results = await Promise.all(
+    checks.map(async (chk) => {
+      const { count, error } = await chk.countQuery();
+      const utilization =
+        count !== null && Number.isFinite(chk.cap)
+          ? count / chk.cap
+          : null;
+      return {
+        name: chk.name,
+        table: chk.table,
+        current: count,
+        cap: Number.isFinite(chk.cap) ? chk.cap : null,
+        utilization,
+        near_cap: utilization !== null && utilization >= 0.8,
+        over_cap: utilization !== null && utilization >= 1.0,
+        note: chk.note,
+        error,
+      };
+    })
+  );
+
+  const anyNearCap = results.some((r) => r.near_cap);
+  const anyOverCap = results.some((r) => r.over_cap);
+
+  return c.json(
+    { checks: results, near_cap: anyNearCap, over_cap: anyOverCap },
+    200,
+    corsHeaders
+  );
+});
+
 // Stats
 app.get("/stats", async (c) => {
   const days = Number(c.req.query("days") ?? 30);
