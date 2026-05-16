@@ -1,6 +1,15 @@
 import type { NextConfig } from "next";
+import path from "node:path";
 
 const nextConfig: NextConfig = {
+  // Pin the Turbopack workspace root to THIS directory. Without this, Next
+  // walks up the tree looking for a package-lock.json and may pick the one
+  // in C:\Users\JoannaThompson\ (a stray from an unrelated CLI install)
+  // instead of the dashboard's own lockfile.
+  turbopack: {
+    root: path.resolve(__dirname),
+  },
+
   // Origins permitted to POST Server Actions in dev. Without this, the login
   // form silently fails when the dashboard is accessed via any hostname other
   // than localhost (Tailscale, LAN IP, etc.) because Next 16 rejects the

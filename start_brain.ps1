@@ -32,7 +32,40 @@ Write-Host "------------------------------------------------"
 $DashboardPath = Join-Path $ProjectRoot "dashboards\open-brain-dashboard-next"
 $WorkerPath    = Join-Path $ProjectRoot "scripts\local-brain-worker.js"
 
-# Kill any existing session
+# ─── Reap leftover services before launching ───────────────────────────
+# Closing a psmux window with X does NOT always kill the child node
+# processes — they get reparented to the session leader and survive,
+# locking port 3010 (next dev) and double-running the brain worker.
+# Identify and kill them by purpose before psmux respawns the panes.
+Write-Host ""
+Write-Host "Reaping any leftover services..." -ForegroundColor Gray
+
+# 1) Anything listening on port 3010 (old next dev)
+$dashListeners = Get-NetTCPConnection -LocalPort 3010 -State Listen -ErrorAction SilentlyContinue
+foreach ($conn in $dashListeners) {
+    try {
+        $proc = Get-Process -Id $conn.OwningProcess -ErrorAction Stop
+        Write-Host "  Killing PID $($proc.Id) ($($proc.ProcessName)) on :3010" -ForegroundColor Yellow
+        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+    } catch {}
+}
+
+# 2) Any node.exe whose command line points at local-brain-worker.js
+$workerProcs = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*local-brain-worker*" }
+foreach ($wp in $workerProcs) {
+    Write-Host "  Killing PID $($wp.ProcessId) (brain-worker)" -ForegroundColor Yellow
+    try { Stop-Process -Id $wp.ProcessId -Force -ErrorAction Stop } catch {}
+}
+
+if (-not $dashListeners -and -not $workerProcs) {
+    Write-Host "  Nothing to reap. Clean slate." -ForegroundColor Gray
+}
+
+# Brief settle so the OS releases the sockets before next dev tries to bind.
+Start-Sleep -Milliseconds 400
+
+# Kill any existing psmux session
 & $psmux kill-session -t "open-brain" 2>$null
 
 # Step 1: Create session — pane 0 is top (Dashboard)

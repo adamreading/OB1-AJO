@@ -26,7 +26,7 @@ const REDIRECTS: Record<string, (url: URL) => URL> = {
   },
 };
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Allow login page, API routes, and static assets
