@@ -54,7 +54,7 @@ $pane1 = (& $psmux list-panes -t "open-brain" -F "#{pane_id}" | Where-Object { $
 $panes = & $psmux list-panes -t "open-brain" -F "#{pane_id}"
 
 # Step 6: Send commands to each pane by ID
-& $psmux send-keys -t $panes[0] "cd '$DashboardPath'; `$env:PORT=3010; npm.cmd run dev" Enter
+& $psmux send-keys -t $panes[0] "cd '$DashboardPath'; `$env:PORT=3010; `$env:HOST='0.0.0.0'; npm.cmd run dev" Enter
 & $psmux send-keys -t $panes[1] "cd '$ProjectRoot'; node --env-file=.env '$WebhookPath'" Enter
 & $psmux send-keys -t $panes[2] "cd '$ProjectRoot'; node --env-file=.env '$WorkerPath'" Enter
 & $psmux send-keys -t $panes[3] "cd '$ApplaudPath'; pnpm start" Enter
