@@ -31,7 +31,10 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
       suppressHydrationWarning
     >
-      <body className="min-h-screen flex bg-bg-primary text-text-primary">
+      <body
+        className="min-h-screen flex bg-bg-primary text-text-primary"
+        suppressHydrationWarning
+      >
         <ThemeProvider>
           <QuotaBanner />
           <SidebarShell />
