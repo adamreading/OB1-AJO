@@ -116,6 +116,7 @@ export function KanbanColumn({
   return (
     <div
       ref={setNodeRef}
+      className="kanban-col-mobile"
       style={{
         minWidth: 0,
         display: "flex",

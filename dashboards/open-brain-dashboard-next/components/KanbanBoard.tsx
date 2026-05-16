@@ -416,7 +416,7 @@ export function KanbanBoard() {
 
       {/* Board */}
       <DndContext sensors={sensors} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
-        <div className="flex gap-2 md:gap-3 overflow-x-auto pb-2 -mx-4 px-4 md:mx-0 md:px-0 md:overflow-x-visible">
+        <div className="flex gap-2 md:gap-3 overflow-x-auto pb-2 -mx-4 px-4 md:mx-0 md:px-0 md:overflow-x-visible kanban-scroll-mobile">
           {columns.map((status) => (
             <KanbanColumn
               key={status}

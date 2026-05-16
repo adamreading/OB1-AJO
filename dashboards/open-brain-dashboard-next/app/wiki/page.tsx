@@ -1194,6 +1194,7 @@ function WikiPageInner() {
         style={{ background: "var(--bg-0)", minHeight: "100vh" }}
       >
         <div
+          className="mobile-pad"
           style={{
             padding: "32px 40px 56px",
             display: "flex",
@@ -1203,6 +1204,7 @@ function WikiPageInner() {
         >
           {/* Header */}
           <div
+            className="mobile-wrap"
             style={{
               display: "flex",
               alignItems: "flex-start",
@@ -1216,6 +1218,7 @@ function WikiPageInner() {
                 Brain · Wiki
               </div>
               <h1
+                className="mobile-h1"
                 style={{
                   margin: 0,
                   fontSize: 30,
@@ -1349,8 +1352,10 @@ function WikiPageInner() {
       )}
 
       <div className="flex h-[calc(100vh-4rem)] gap-0">
-        {/* Left panel — list */}
-        <div className="w-72 shrink-0 border-r border-border flex flex-col overflow-hidden">
+        {/* Left panel — list. On mobile, hide once a page is selected so the
+            detail pane takes the full viewport. Tap the back arrow in the
+            detail header to return. */}
+        <div className={`${selected ? "hidden md:flex" : "flex"} w-full md:w-72 shrink-0 md:border-r border-border flex-col overflow-hidden`}>
           <div className="px-4 py-3 border-b border-border">
             <div className="flex items-center justify-between gap-2 mb-1">
               <h1 className="text-lg font-semibold text-text-primary">Wiki</h1>
@@ -1415,8 +1420,9 @@ function WikiPageInner() {
           />
         </div>
 
-        {/* Right panel — detail */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Right panel — detail. On mobile, only render when a page is
+            selected (otherwise the list pane fills the viewport). */}
+        <div className={`${selected ? "flex" : "hidden md:flex"} flex-1 flex-col overflow-hidden`}>
           {detailLoading && (
             <div className="flex items-center gap-2 px-6 py-8 text-text-muted text-sm">
               <div className="w-4 h-4 border-2 border-violet/30 border-t-violet rounded-full animate-spin" />
@@ -1460,6 +1466,14 @@ function WikiPageInner() {
               <div className="px-6 py-4 border-b border-border flex items-start justify-between gap-4 shrink-0">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={() => setSelected(null)}
+                      className="md:hidden inline-flex items-center justify-center w-7 h-7 rounded-md bg-bg-elevated border border-border text-text-secondary hover:bg-bg-hover transition-colors shrink-0"
+                      title="Back to list"
+                      aria-label="Back to list"
+                    >
+                      ←
+                    </button>
                     <h2 className="text-xl font-bold text-text-primary truncate">
                       {selected.title}
                     </h2>

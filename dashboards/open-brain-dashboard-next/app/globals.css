@@ -157,3 +157,88 @@ body {
     display: flex !important;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+   Mobile portrait overrides (≤ 768px wide).
+   The redesigned pages use inline style={{}} heavily, which CSS classes
+   can't directly override without !important. These utility classes
+   provide targeted overrides at the mobile breakpoint — sprinkle them
+   onto components alongside the inline grid/padding styles.
+   ───────────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Sidebar: hide entirely on mobile, layout's margin-left collapses */
+  aside {
+    display: none !important;
+  }
+  main {
+    margin-left: 0 !important;
+  }
+
+  /* Force a single-column flow */
+  .mobile-stack {
+    grid-template-columns: 1fr !important;
+    flex-direction: column !important;
+  }
+  /* Force 2-column flow (KPI strips, etc.) */
+  .mobile-half {
+    grid-template-columns: 1fr 1fr !important;
+  }
+  /* Tighten outer padding + gaps for narrow viewports */
+  .mobile-pad {
+    padding: 16px !important;
+    padding-top: 64px !important; /* leave room for mobile topbar */
+    gap: 16px !important;
+  }
+  .mobile-pad-tight {
+    padding: 12px !important;
+    gap: 12px !important;
+  }
+  /* Drop element on mobile (e.g. ornamental hairlines, oversized hero) */
+  .mobile-hide {
+    display: none !important;
+  }
+  /* Allow horizontal overflow children to scroll (kanban columns, wide tables) */
+  .mobile-scroll-x {
+    overflow-x: auto !important;
+    flex-wrap: nowrap !important;
+  }
+  /* Reduce h1/h2 sizes on mobile so they don't dominate */
+  .mobile-h1 {
+    font-size: 22px !important;
+    line-height: 1.2 !important;
+  }
+  .mobile-h2 {
+    font-size: 18px !important;
+  }
+  /* Convert horizontal flex (header rows with controls on the right) to wrap */
+  .mobile-wrap {
+    flex-wrap: wrap !important;
+    gap: 12px !important;
+  }
+  /* Tables → stacked cards. Each row becomes a flex column. */
+  .mobile-cards [role="row"],
+  .mobile-cards .row {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    grid-template-columns: 1fr !important;
+    gap: 6px !important;
+  }
+  /* Touch targets on icons and tiny buttons */
+  .mobile-touch button,
+  .mobile-touch a {
+    min-height: 36px;
+  }
+  /* Kanban: on mobile, columns become snap-scroll cards instead of equal-flex.
+     Each column gets a fixed-ish width and the parent horizontally scrolls. */
+  .kanban-col-mobile {
+    flex: 0 0 280px !important;
+    min-width: 280px !important;
+    max-height: none !important;
+    scroll-snap-align: start;
+  }
+  .kanban-scroll-mobile {
+    scroll-snap-type: x mandatory;
+    scroll-padding-left: 16px;
+  }
+}

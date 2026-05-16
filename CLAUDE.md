@@ -144,6 +144,23 @@ The LLM emits `[Name](/wiki?slug=…)` only in the Relationships section; everyw
 **Themes cover the whole UI**:
 `ThemeProvider` swaps both legacy `--color-*` tokens AND the new `--bg-*`, `--fg-*`, `--line` design tokens via `theme.designVars`. Six themes: Coal (default), Midnight, Slate, Ocean, Forest, Light. Each has a `scheme: "dark" | "light"` field that sets `color-scheme` on the root. Constellation hero gradients and overlay pills use `color-mix(in srgb, var(--bg-0) 80%, transparent)` so they track the theme.
 
+**Mobile / portrait support (≤ 768px viewport)**:
+The dashboard auto-adapts to phone-portrait via CSS media queries — there is no user toggle. Two routes are used in combination:
+- **CSS-only** (preferred for layout) — `app/globals.css` defines a `@media (max-width: 768px)` block with utility classes that override inline styles via `!important`. Sprinkle these alongside the inline `style={{}}` props the redesigned components use heavily:
+  - `mobile-stack` — forces `grid-template-columns: 1fr` (collapses any multi-col grid)
+  - `mobile-half` — forces `1fr 1fr` (2-col for KPI strips)
+  - `mobile-pad` / `mobile-pad-tight` — tighter outer padding + top room (64px) for the mobile topbar
+  - `mobile-h1` / `mobile-h2` — shrinks oversized heroes (22px / 18px)
+  - `mobile-wrap` — adds `flex-wrap` to a row that needs to spill
+  - `mobile-hide` — drop on mobile (decorative hairlines, oversized table headers)
+  - `mobile-scroll-x` — let a wide flex row scroll horizontally
+  - `mobile-cards` — convert `<tr>`/grid rows to stacked cards
+  - `mobile-touch` — bumps button/anchor `min-height` to 36px for thumbs
+  - `kanban-col-mobile` + `kanban-scroll-mobile` — turn the Workflow board into horizontally-snapped 280px columns
+- **JS `matchMedia`** for numeric prop cases — the constellation `<ThoughtGraph>` `width`/`height` cannot be set via CSS. Each redesigned page that hosts one keeps an `isMobile` state hooked to `window.matchMedia("(max-width: 768px)")`. Dashboard hero shrinks 1100×600 → 600×360; Wiki graph view shrinks to 380×320. Don't conflate the two routes — CSS for layout, JS only when a numeric prop crosses the boundary.
+- The Sidebar is `<aside>` and is `display: none !important;` on mobile by default; the mobile topbar in `SidebarShell.tsx` provides a hamburger that toggles `isOpen` → Tailwind's `!flex` (higher specificity than the tag selector) to slide the panel in.
+- The Wiki **List view** switches to single-pane on mobile: the list pane is `hidden md:flex` once `selected != null`, the detail pane is `hidden md:flex` until then. A back-arrow button in the detail header (`md:hidden`) returns to the list. The Graph view stays single-flow on all viewports — `mobile-stack` collapses the 2-col body.
+
 **Sidebar collapse + Work/Personal page filter**:
 - Click the OB·1 logo → sidebar collapses to 64px icon-only (state in localStorage). `--sidebar-width` CSS var on root drives the main content margin so it reflows.
 - Work/Personal segment on Dashboard + Thoughts uses `router.replace()` (not just `window.history.replaceState`) so the server component re-renders and KPIs/donut/workflow/recent reflow against the new classification.

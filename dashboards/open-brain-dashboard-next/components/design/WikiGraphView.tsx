@@ -521,10 +521,19 @@ export function WikiGraphView({
   deleting = false,
 }: WikiGraphViewProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   const [graph, setGraph] = useState<{
     nodes: ConstellationNode[];
     edges: ConstellationEdge[];
   }>({ nodes: [], edges: [] });
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 768px)");
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
   const [graphLoading, setGraphLoading] = useState(true);
   const [minWeight, setMinWeight] = useState(2);
   const [topN, setTopN] = useState<"30" | "60" | "100">("60");
@@ -842,7 +851,7 @@ export function WikiGraphView({
           {graphLoading ? (
             <div
               style={{
-                height: collapsed ? 100 : 480,
+                height: collapsed ? 100 : isMobile ? 320 : 480,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -856,8 +865,8 @@ export function WikiGraphView({
             <ThoughtGraph
               nodes={filteredNodes}
               edges={graph.edges}
-              width={1100}
-              height={collapsed ? 100 : 480}
+              width={isMobile ? 380 : 1100}
+              height={collapsed ? 100 : isMobile ? 320 : 480}
               minWeight={minWeight}
               hiddenTypes={hiddenTypes}
               entityTypes={entityTypes}
@@ -1089,6 +1098,7 @@ export function WikiGraphView({
 
           {/* Two-column body */}
           <div
+            className="mobile-stack"
             style={{
               display: "grid",
               gridTemplateColumns: "1fr 380px",

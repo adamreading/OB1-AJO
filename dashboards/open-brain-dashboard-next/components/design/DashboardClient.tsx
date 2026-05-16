@@ -68,6 +68,15 @@ export function DashboardClient({
   const router = useRouter();
   const [windowSel, setWindowSel] = useState<Window>(initialWindow);
   const [contextSel, setContextSel] = useState<Context>(initialContext);
+  // Track viewport so the constellation can render at a sane size on phone
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 768px)");
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
 
   // Keep local state in sync if the server re-renders with new props (e.g.
   // back/forward navigation)
@@ -174,6 +183,7 @@ export function DashboardClient({
       }}
     >
       <div
+        className="mobile-pad"
         style={{
           padding: "32px 40px 56px",
           display: "flex",
@@ -183,6 +193,7 @@ export function DashboardClient({
       >
         {/* Header */}
         <div
+          className="mobile-wrap"
           style={{
             display: "flex",
             alignItems: "flex-start",
@@ -196,6 +207,7 @@ export function DashboardClient({
               {greeting.eyebrow}
             </div>
             <h1
+              className="mobile-h1"
               style={{
                 margin: 0,
                 fontSize: 32,
@@ -239,6 +251,7 @@ export function DashboardClient({
 
         {/* KPIs */}
         <div
+          className="mobile-half"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(4, 1fr)",
@@ -473,7 +486,7 @@ export function DashboardClient({
             {graphLoading ? (
               <div
                 style={{
-                  height: 600,
+                  height: isMobile ? 360 : 600,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -487,8 +500,10 @@ export function DashboardClient({
               <ThoughtGraph
                 nodes={graph.nodes}
                 edges={graph.edges}
-                width={1100}
-                height={600}
+                // Smaller viewBox on mobile so nodes appear larger when the
+                // SVG scales to the narrow viewport.
+                width={isMobile ? 600 : 1100}
+                height={isMobile ? 360 : 600}
                 minWeight={minWeight}
                 hiddenTypes={hiddenTypes}
                 entityTypes={entityTypes}
@@ -528,6 +543,7 @@ export function DashboardClient({
 
         {/* Donut + Workflow */}
         <div
+          className="mobile-stack"
           style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr",

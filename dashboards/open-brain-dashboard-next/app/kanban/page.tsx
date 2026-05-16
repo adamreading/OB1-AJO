@@ -16,6 +16,7 @@ export default async function KanbanPage() {
       }}
     >
       <div
+        className="mobile-pad"
         style={{
           padding: "32px 32px 56px",
           display: "flex",
@@ -24,6 +25,7 @@ export default async function KanbanPage() {
         }}
       >
         <div
+          className="mobile-wrap"
           style={{
             display: "flex",
             alignItems: "flex-start",
@@ -37,6 +39,7 @@ export default async function KanbanPage() {
               Brain · Workflow
             </div>
             <h1
+              className="mobile-h1"
               style={{
                 margin: 0,
                 fontSize: 30,

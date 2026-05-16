@@ -249,6 +249,7 @@ export function ThoughtsPageClient({
       }}
     >
       <div
+        className="mobile-pad"
         style={{
           padding: "32px 40px 56px",
           display: "flex",
@@ -258,6 +259,7 @@ export function ThoughtsPageClient({
       >
         {/* Header */}
         <div
+          className="mobile-wrap"
           style={{
             display: "flex",
             alignItems: "flex-start",
@@ -271,6 +273,7 @@ export function ThoughtsPageClient({
               Brain · Thoughts
             </div>
             <h1
+              className="mobile-h1"
               style={{
                 margin: 0,
                 fontSize: 30,
@@ -836,6 +839,7 @@ export function ThoughtsPageClient({
           }}
         >
           <div
+            className="mobile-hide"
             style={{
               display: "grid",
               gridTemplateColumns:
@@ -903,6 +907,7 @@ export function ThoughtsPageClient({
               <Link
                 key={r.id}
                 href={`/thoughts/${r.id}`}
+                className="mobile-stack"
                 style={{
                   display: "grid",
                   gridTemplateColumns:

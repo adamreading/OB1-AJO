@@ -288,8 +288,8 @@ function ReviewPageInner() {
 
       {/* Table */}
       {thoughts.length > 0 && (
-        <div className="bg-bg-surface border border-border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-bg-surface border border-border rounded-lg overflow-hidden overflow-x-auto">
+          <table className="w-full text-sm min-w-[640px]">
             <thead>
               <tr className="border-b border-border text-text-muted text-xs uppercase tracking-wider">
                 <th className="px-4 py-3 w-10">
