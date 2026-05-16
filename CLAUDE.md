@@ -170,14 +170,19 @@ The dashboard auto-adapts to phone-portrait via CSS media queries — there is n
 - `wiki-wipe.mjs` — clear wiki_pages + entity health report
 - `reclassify-existing.js` — re-run Work/Personal classification
 - `synthesize-persona.mjs` — generate conceptual `topic-adam-*` wiki pages from semantic clusters; requires `OPENROUTER_API_KEY` + Ollama running. CLI: `node --env-file=.env scripts/synthesize-persona.mjs [--list|--lens <name>|--dry-run]`
-- `plaud-webhook.js` — Applaud → Open Brain webhook receiver (port 4001). Parses `---ENTRY---` blocks from Plaud's custom template, runs Ollama SKIP/NEW/UPDATE decisions per entry, and captures each to `/capture-pending` (pending human review). For UPDATE decisions, synthesises the merge via Ollama at capture time and stores the merged content in the pending thought — the original is never touched until approved in the Review panel.
 
-**Plaud capture pipeline**:
-- `start_brain.ps1` launches 4 processes in a single Windows Terminal window via `psmux` (2×2 pane layout): Dashboard top-left (port 3010), Plaud Webhook top-right (port 4001), Brain Worker bottom-left, Applaud bottom-right (Plaud sync daemon, port 44471). Requires `psmux` + `wt.exe` installed; paths pinned at top of script.
+**Plaud capture pipeline (current, MCP-based — 2026-05-16 onward)**:
+Plaud ingestion happens entirely through the MCP. Plaud's own MCP server exposes transcripts to a separate AI client (Cowork or Claude Desktop); that client distils each transcript into atomic captures + proposed updates and calls Open Brain's MCP tools. There is no local webhook, no Applaud daemon, no port 4001. `start_brain.ps1` therefore launches only 2 panes (Dashboard top + Brain Worker bottom).
+
+Two distinct call shapes flow through the same MCP tools:
+- **Human-attended** (default): the user is in the chat watching every capture. `capture_thought` / `update_thought` write straight through — capture goes via `upsert_thought` RPC + embedding; update overwrites the target in place and re-queues extraction.
+- **Auto-review** (`auto_review: true`): for unattended / scheduled batch imports. The tool does NOT touch the brain — it inserts a `source_type: plaud` thought with `metadata.review_status: "pending_review"` so it shows up in the dashboard `/review` page. For `capture_thought` the row carries `ollama_decision: "NEW"`. For `update_thought` the target is NOT modified — instead a new pending thought is inserted with `ollama_decision: "UPDATE"`, `update_target_id: <serial_id>`, and `original_content: <target's current content>` captured for side-by-side comparison in the dashboard. The pre-existing `/review/approve` handler does the right thing for both decisions.
+
+The review gate and approve handler are unchanged from the old webhook era:
 - `metadata.review_status: "pending_review"` is the review gate — thoughts with this flag are NOT inserted into `entity_extraction_queue` and therefore invisible to the wiki, Kanban, and action items pipeline until approved.
-- Use `POST /capture-pending` (not `/capture`) for any source that requires human triage before entering the brain.
 - `POST /review/approve` batch-approves: NEW decisions queue the thought for extraction + embedding; UPDATE decisions apply the pending thought's merged content to the original target thought, re-queue it, and delete the pending vessel.
 - The Review dashboard page (`/review`) shows all `source_type: plaud` thoughts with `review_status: pending_review`. Each row shows an `ollama_decision` badge (`NEW` or `→ #N` for updates), inline editable content/type/classification, per-row Pass/Delete, and bulk Pass/Delete. For UPDATE entries, the original content is available in a collapsible section for comparison before approving.
+- `/capture-pending` still exists in `rest-api` and is functionally identical to what the MCP auto-review path does — kept so external callers (n8n, Zapier, etc.) without MCP can still queue thoughts for review via plain HTTP.
 
 **Upstream sync — MANDATORY PROCESS**:
 The AJO fork tracks `upstream https://github.com/NateBJones-Projects/OB1`. Never manually port upstream changes — always use git properly:

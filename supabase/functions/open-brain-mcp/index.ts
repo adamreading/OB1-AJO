@@ -111,7 +111,7 @@ function distillHeuristic(text: string): Array<{ content: string; type: string }
 function createServer(): McpServer {
   const server = new McpServer({
     name: "open-brain",
-    version: "1.4.0",
+    version: "1.5.0",
   });
 
   // ChatGPT compatibility aliases — restricted ChatGPT connectors look for exact `search` / `fetch` shapes
@@ -353,23 +353,73 @@ function createServer(): McpServer {
     {
       title: "Capture Thought",
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
-      description: "Save a new thought to the brain. IMPORTANT: Each capture must be ONE atomic idea — aim for 300–500 words of rich context per thought. If you have a transcript, meeting notes, or multiple unrelated ideas, call this tool MULTIPLE TIMES, once per distinct idea. Do NOT save giant blocks of text covering multiple topics as a single thought — splitting them ensures 10x better search quality. You MUST declare your own client name in 'source' — use the actual name of the AI or tool calling this (e.g., 'claude', 'chatgpt', 'perplexity', 'copilot', 'n8n'). Never use another client's name.",
+      description: "Save a new thought to the brain. IMPORTANT: Each capture must be ONE atomic idea — aim for 300–500 words of rich context per thought. If you have a transcript, meeting notes, or multiple unrelated ideas, call this tool MULTIPLE TIMES, once per distinct idea. Do NOT save giant blocks of text covering multiple topics as a single thought — splitting them ensures 10x better search quality. You MUST declare your own client name in 'source' — use the actual name of the AI or tool calling this (e.g., 'claude', 'chatgpt', 'perplexity', 'copilot', 'n8n'). Never use another client's name. Set auto_review=true ONLY for unattended / scheduled batch imports where a human has not personally signed off on this individual capture — those land in the dashboard Review queue instead of going straight into the brain.",
       inputSchema: {
         content: z.string().describe("One atomic thought — around 300–500 words of context. One topic only; use multiple captures for multiple ideas."),
         classification: z.enum(["work", "personal"]).optional().describe("Work or Personal context"),
         type: z.string().optional().describe("e.g. task, idea, reference"),
         source: z.string().optional().describe("REQUIRED: Your actual client name. If you are Claude, pass 'claude'. If ChatGPT, pass 'chatgpt'. If Perplexity, pass 'perplexity'. Use YOUR name — not any other tool's name."),
+        auto_review: z.boolean().optional().describe("If true, this capture is treated as a machine-proposed thought (e.g. a scheduled Plaud transcript processor) and routed into the dashboard Review queue for manual approval. Defaults to false — meaning a human is signing off on this capture in real time."),
       },
     },
-    async ({ content, classification, type, source }) => {
+    async ({ content, classification, type, source, auto_review }) => {
       try {
-        const [embedding, extracted] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-
         const finalSource = source ? `mcp-${source}` : "mcp";
+        const trimmed = content.trim();
+
+        // Auto-review path: no embedding, no extraction queue, lands in
+        // metadata.review_status='pending_review' and surfaces in /review.
+        if (auto_review) {
+          const fp = await fingerprint(trimmed);
+
+          const { data: existing } = await supabase
+            .from("thoughts")
+            .select("serial_id")
+            .eq("metadata->>content_fingerprint", fp)
+            .maybeSingle();
+          if (existing) {
+            return { content: [{ type: "text", text: `Already in brain: #${existing.serial_id} (skipped)` }] };
+          }
+
+          const meta: Record<string, unknown> = {
+            content_fingerprint: fp,
+            review_status: "pending_review",
+            ollama_decision: "NEW",
+            source: finalSource,
+          };
+          if (classification) meta.classification = classification;
+
+          const VALID_TYPES = ["task","idea","observation","reference","person_note","decision","lesson","meeting","journal"];
+          const resolvedType = (typeof type === "string" && VALID_TYPES.includes(type)) ? type : "observation";
+
+          const { data: inserted, error } = await supabase
+            .from("thoughts")
+            .insert({
+              content: trimmed,
+              type: resolvedType,
+              status: null,
+              importance: 3,
+              quality_score: 50,
+              classification: classification || "work",
+              source_type: "plaud",
+              content_fingerprint: fp,
+              metadata: meta,
+            })
+            .select("serial_id")
+            .single();
+
+          if (error) return { content: [{ type: "text", text: `Failed: ${error.message}` }], isError: true };
+
+          return { content: [{ type: "text", text: `Queued for review: #${inserted.serial_id} (pending manual approval in dashboard)` }] };
+        }
+
+        // Default path: human-attended capture — go straight into the brain.
+        const [embedding, extracted] = await Promise.all([getEmbedding(trimmed), extractMetadata(trimmed)]);
+
         const metadata = { ...extracted, source: finalSource, classification };
 
         const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
-          p_content: content.trim(),
+          p_content: trimmed,
           p_payload: {
             metadata,
             type: type || (metadata.type as string),
@@ -394,20 +444,62 @@ function createServer(): McpServer {
     "update_thought",
     {
       title: "Update Thought",
-      description: "Update content and optionally move context. Archives old version. Use the serial number shown in search results (e.g. '132'), not a UUID.",
+      description: "Update content and optionally move context. Archives old version. Use the serial number shown in search results (e.g. '132'), not a UUID. Set auto_review=true ONLY for unattended / scheduled batch imports — instead of overwriting the target thought immediately, a pending UPDATE-decision row is created in the dashboard Review queue, where you can compare the original vs proposed content before approving.",
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
       inputSchema: {
         id: z.string().describe("UUID or Serial ID (as string)"),
         content: z.string(),
         classification: z.enum(["work", "personal"]).optional(),
+        auto_review: z.boolean().optional().describe("If true, do NOT overwrite the target thought. Instead, create a pending UPDATE-decision row in the dashboard Review queue (the target's original content is captured for side-by-side comparison). Defaults to false — meaning a human is signing off on this update in real time."),
+        source: z.string().optional().describe("Optional client name for provenance when auto_review=true (e.g. 'cowork-scheduler'). Stored in metadata.source as 'mcp-<name>'."),
       },
     },
-    async ({ id, content, classification }) => {
+    async ({ id, content, classification, auto_review, source }) => {
       try {
         const filter = /^[0-9a-f]{8}-/.test(id) ? { id } : { serial_id: parseInt(id, 10) };
         const { data: current } = await supabase.from("thoughts").select("*").match(filter).single();
         if (!current) return { content: [{ type: "text", text: "Not found" }], isError: true };
 
+        // Auto-review path: don't touch the target. Insert a new pending
+        // thought with the proposed merged content, an UPDATE decision,
+        // and the target's current content captured for comparison.
+        if (auto_review) {
+          const trimmed = content.trim();
+          const fp = await fingerprint(trimmed);
+
+          const meta: Record<string, unknown> = {
+            content_fingerprint: fp,
+            review_status: "pending_review",
+            ollama_decision: "UPDATE",
+            update_target_id: current.serial_id,
+            original_content: current.content,
+            source: source ? `mcp-${source}` : "mcp",
+          };
+          const resolvedClassification = classification || current.classification || (current.metadata as Record<string, unknown> | null)?.classification || "work";
+          meta.classification = resolvedClassification;
+
+          const { data: inserted, error: insertErr } = await supabase
+            .from("thoughts")
+            .insert({
+              content: trimmed,
+              type: current.type || "observation",
+              status: null,
+              importance: 3,
+              quality_score: 50,
+              classification: resolvedClassification,
+              source_type: "plaud",
+              content_fingerprint: fp,
+              metadata: meta,
+            })
+            .select("serial_id")
+            .single();
+
+          if (insertErr) return { content: [{ type: "text", text: `Failed: ${insertErr.message}` }], isError: true };
+
+          return { content: [{ type: "text", text: `Update proposed: #${inserted.serial_id} → #${current.serial_id} (pending manual approval in dashboard)` }] };
+        }
+
+        // Default path: human-attended update — overwrite the target in place.
         // Archive
         await supabase.from("thought_versions").insert({
           thought_id: current.id,

@@ -547,9 +547,6 @@ KANBAN_INITIAL_STATUS="backlog"
 
 WORK_CONTEXT_DESC="Professional work, software development, and corporate projects"
 PERSONAL_CONTEXT_DESC="Home life, hobbies, fitness, and family"
-
-# Plaud webhook (optional — default port is 4001)
-# PLAUD_WEBHOOK_PORT=4001
 ```
 
 > **Note:** The wiki compiler also uses these env vars via the fallback aliases `OPEN_BRAIN_URL` (= `SUPABASE_URL`) and `OPEN_BRAIN_SERVICE_KEY` (= `SUPABASE_KEY`). The generate-wiki.mjs script handles both names automatically. The `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` env vars are not required — the script detects `OLLAMA_URL` and derives the OpenAI-compatible endpoint automatically.
@@ -569,7 +566,7 @@ BRAIN_KEY="the-same-password-as-above"
 
 ## 🚀 Phase 6: Launching
 
-Run the unified start script from the project root. This launches all four processes inside a single Windows Terminal window using **psmux** with a 2×2 pane layout — easier to monitor than four scattered PowerShell windows.
+Run the unified start script from the project root. This launches both local processes inside a single Windows Terminal window using **psmux** with a 1×2 (vertical) pane layout.
 
 ```powershell
 .\start_brain.ps1
@@ -577,16 +574,12 @@ Run the unified start script from the project root. This launches all four proce
 
 | Pane | Process | URL / Notes |
 |------|---------|-------------|
-| Top-left | **Dashboard** (Next.js) | http://localhost:3010 |
-| Top-right | **Plaud Webhook** | http://127.0.0.1:4001/webhook — receives Applaud `transcript_ready` events |
-| Bottom-left | **Brain Worker** | classification + entity extraction via Ollama |
-| Bottom-right | **Applaud** | http://127.0.0.1:44471 — Plaud sync daemon (polls Plaud API, fires webhooks) |
+| Top | **Dashboard** (Next.js) | http://localhost:3010 (and reachable via Tailscale tailnet hostname for the mobile app) |
+| Bottom | **Brain Worker** | classification + entity extraction via Ollama |
 
 > **Prerequisites**: `psmux` and Windows Terminal (`wt.exe`) must be on the system. Install psmux via `winget install psmux` (or equivalent). Paths to `psmux`, `wt`, and `powershell.exe` are pinned at the top of `start_brain.ps1` — edit if your install locations differ.
 >
-> **Applaud path**: `start_brain.ps1` hardcodes the Applaud directory. Edit the `$ApplaudPath` variable at the top of the script if Applaud is cloned elsewhere.
->
-> **Plaud setup**: In Applaud's web UI, set the webhook URL to `http://127.0.0.1:4001/webhook`. New Plaud transcripts will then land in the **Review** panel (`/review`) in the dashboard before entering the brain.
+> **Plaud ingestion (2026-05-16 onward)** no longer runs locally. Plaud's own MCP server exposes transcripts to a separate AI client (e.g. Cowork as a scheduled task, or Claude Desktop interactively). That client calls Open Brain's MCP `capture_thought` / `update_thought` tools with `auto_review: true` for unattended runs — those land in the dashboard **Review** panel (`/review`) for manual approval before entering the brain. For interactive (human-attended) chat use, those same tools write straight through.
 
 ### How the integrated workflow runs
 
@@ -702,7 +695,6 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 | **REST API** | `supabase/functions/rest-api/index.ts` | All logic for the Dashboard |
 | **MCP Server** | `supabase/functions/open-brain-mcp/index.ts` | Interface for Claude, ChatGPT, Perplexity, etc. |
 | **AI Worker** | `scripts/local-brain-worker.js` | Classification + entity graph extraction (Ollama) |
-| **Plaud Webhook** | `scripts/plaud-webhook.js` | Applaud → brain bridge; parses `---ENTRY---` blocks, runs Ollama SKIP/NEW/UPDATE triage, captures to `/capture-pending` for human review |
 | **Wiki Compiler** | `recipes/entity-wiki/generate-wiki.mjs` | On-demand and auto-triggered wiki generation |
 | **Wiki Synthesis** | `recipes/wiki-synthesis/scripts/synthesize-wiki.mjs` | Autobiography / topic wiki page generation |
 | **Score Thoughts** | `scripts/score-thoughts.mjs` | Heuristic quality scoring backfill |
@@ -727,8 +719,8 @@ The MCP `capture_thought` tool requires clients to pass their own name in the `s
 *   **Action Items pipeline**: The enrichment worker extracts `action_items` from every thought into metadata. The `/actions` dashboard page surfaces these as a triage inbox — each item can be dismissed (Done) or promoted to a Kanban task (→ Kanban, which creates a `type=task, status=backlog` thought). Action items are the discovery layer; Kanban is the execution layer. Also available via the `list_action_items` MCP tool.
 *   **Session context sharing**: `get_context_brief` and `resume` MCP tools let any AI client (Claude, ChatGPT, Perplexity) pull a live briefing from the database at session start, solving the cross-AI context copy-paste problem without any sync infrastructure.
 *   **Source-agnostic capture review**: `capture_review` MCP tool (replaces `fieldy_review`) lists recent auto-captured memories from any device — Fieldy, Plaud, or future auto-capture sources. Filter by source or see all.
-*   **Plaud capture triage**: Thoughts from Plaud land in a Review panel (`/review`) before entering the brain. `POST /capture-pending` stores them with `metadata.review_status: pending_review` — they are invisible to the wiki, Kanban, and action items pipeline until approved. The webhook pre-processes each `---ENTRY---` block from the Plaud template: TYPE and CONTEXT fields are parsed and set directly on the thought; classification defaults to `work` if the CONTEXT field is absent. UPDATE decisions (where Ollama decides a new entry should merge with an existing thought) synthesise the merge at webhook time and store the result as a pending thought — the original is never touched until the user approves in the Review panel, making reject always safe with nothing to restore.
+*   **Plaud capture triage (MCP-based, 2026-05-16 onward)**: Plaud transcripts now arrive via Plaud's official MCP server, processed by a separate AI client (Cowork as a scheduled task, or Claude Desktop interactively). That client calls Open Brain's MCP `capture_thought` / `update_thought` tools with `auto_review: true` for unattended runs — those land in the dashboard Review panel (`/review`) with `metadata.review_status: pending_review` so the wiki, Kanban, and action items pipeline can't see them until approved. `update_thought` with `auto_review: true` is non-destructive: instead of overwriting the target, it inserts a new pending thought carrying `ollama_decision: "UPDATE"`, `update_target_id`, and `original_content` so the dashboard can show a side-by-side comparison before approval — reject is always safe. Human-attended chat captures use the same tools without the flag and write straight through. The old local `plaud-webhook.js` + Applaud daemon pipeline was removed when this flow shipped.
 
 ---
 
-*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools, wiki MCP tools (search_wiki/read_wiki_page/get_entity_connections), improved edge extraction (typed relation vocabulary + entity-type constraints), persona synthesis script, MCP v1.4.0 (get_context_brief/resume/list_action_items/capture_review), Actions dashboard page with Done + Promote to Kanban triage, Plaud/Applaud capture pipeline with Review triage panel (capture-pending gate, Ollama SKIP/NEW/UPDATE decisions, safe UPDATE handling, TYPE+CONTEXT parsing from template).*
+*AJO fork of Open Brain Pro. Last updated May 2026 — wiki notes/rename/alias/type/delete UI, entity-type sidebar filter, deep-linking, heuristic scoring, configurable audit threshold, Kanban card-to-card drag, wiki-wipe + score-thoughts scripts, ChatGPT search/fetch compatibility tools, wiki MCP tools (search_wiki/read_wiki_page/get_entity_connections), improved edge extraction (typed relation vocabulary + entity-type constraints), persona synthesis script, MCP v1.5.0 (get_context_brief/resume/list_action_items/capture_review + auto_review flag on capture_thought/update_thought for Plaud-via-MCP review triage), Actions dashboard page with Done + Promote to Kanban triage, Tailscale-friendly mobile-portrait dashboard, MCP-based Plaud capture pipeline (replaces local webhook + Applaud daemon).*
