@@ -460,16 +460,47 @@ Your response is a wiki article. It begins with the entity's heading. Output ONL
 NEVER output reasoning, self-corrections, counting, planning, or any meta-commentary. If you need to revise, do it silently. Your entire output is the finished article — nothing else.
 
 Write well-structured markdown with these sections in order:
-# {Entity Name}, ## Summary (2-3 sentences), ## Key Facts (bulleted),
-## Timeline (chronological, most recent first, max 8 items),
-## Relationships, ## Open Questions (3-5 genuine gaps).
+  # {Entity Name}
+  ## TLDR              — 2-3 tight sentences. What this entity is, what it
+                         does, why it matters. No fluff, no lists.
+  ## Detailed          — Several paragraphs of NARRATIVE prose telling the
+                         entity's story. Weave together what it does, when
+                         key events happened, who it works with, lessons
+                         and decisions associated with it, and how it sits
+                         in the broader graph. Mention other entities by
+                         name and LINK them inline (markdown link to their
+                         /wiki?slug=…). You may use a short sub-list
+                         inside Detailed if a true list reads better than
+                         prose (e.g. specific configurations) — but the
+                         section MUST be majority paragraphs, not bullets.
+  ## Relationships     — Structured. See Relationships rules below.
+  ## Open Questions    — 3-5 genuine gaps the captures don't answer.
+
+WORD COUNT — Detailed section:
+The user message will include a "word_target" field. That number is the
+CEILING for the Detailed section, scaled to how much real material you have
+(more thoughts + more typed edges = more to say). NEVER pad to hit the
+target. If there's only enough substance for 300 words, write 300. If the
+real material would only fill 200 words, write 200 — better short and
+informative than long and thin. Do not invent context, motivations,
+plans, or quotes to fill space. Every claim still needs a citation. The
+word target exists to TELL YOU WHEN TO STOP, not to prescribe length.
 
 CITATIONS — MANDATORY:
-Every claim must cite the thought ids it came from. Use the format [#42] (hash + integer, e.g. [#7], [#142]). Always include the # — never write [42] without it. Citations go inline at the END of the claim, not as standalone list items. For multiple sources, list each separately like "[#7] [#42]" — do NOT combine into "[#7, #42]".
+Every factual claim must cite the thought ids it came from. Use the format
+[#42] (hash + integer, e.g. [#7], [#142]). Always include the # — never
+write [42] without it. Citations go inline at the END of the claim, not
+as standalone list items. For multiple sources, list each separately like
+"[#7] [#42]" — do NOT combine into "[#7, #42]".
 
-EVERY bullet in Key Facts MUST end with at least one citation. EVERY entry in Timeline MUST end with at least one citation. EVERY question in Open Questions MUST cite the thought it derives from. Bullets without citations are invalid output. If you cannot cite a claim, omit it.
+EVERY paragraph in Detailed MUST cite at least one thought for the facts
+it asserts (typically several citations per paragraph). EVERY question
+in Open Questions MUST cite the thought it derives from. Claims without
+citations are invalid output. If you cannot cite a claim, omit it.
 
-Skip sections with no material rather than filling with generic text.
+Skip sections with no material rather than filling with generic text. If
+the entity has no typed edges, omit Relationships. If there are no
+genuine unresolved questions in the captures, omit Open Questions.
 
 CURATOR NOTES — HIGHEST AUTHORITY:
 If the STRUCTURE block contains a "curator_notes" field, those statements are verified
@@ -483,11 +514,19 @@ CURATOR-NOTE CONFLICT RESOLUTION:
 Where a curator note conflicts with a thought, drop the contradicting claim from the
 article. Do not present both. The curator note's version is the article's version.
 
-WIKI LINKS: If the STRUCTURE block contains "related_wiki_links" (a map of entity name
-to URL path), format those entity names as markdown links when you mention them naturally
-in the article. Example: if related_wiki_links shows {"Tom Falconar": "/wiki/person-tom-falconar"},
-write [Tom Falconar](/wiki/person-tom-falconar) on first mention per section. Do not
-force links; only link names that appear naturally in your prose.
+WIKI LINKS — MANDATORY in Detailed:
+The STRUCTURE block contains "related_wiki_links" (a map of entity name to
+URL path). EVERY time you mention one of those entity names in the Detailed
+section, link it as markdown: [Entity Name](/wiki?slug=…). Use the slug
+URL exactly as provided in related_wiki_links. This is non-optional — the
+wiki body relies on these links for navigation, and bare entity names in
+prose make the article feel dead. Link every occurrence, not just the
+first mention per paragraph, unless three consecutive mentions of the
+same name in one paragraph reads awkwardly (in which case link the first
+and last).
+
+For names that aren't in related_wiki_links, leave them as plain text —
+do NOT invent URLs.
 
 For the Relationships section specifically:
 organize connections by relation type using \`### {relation_type}\` subheadings
@@ -562,11 +601,23 @@ async function synthesize(env, model, payload) {
   // ids, edges, and the entity identity (safe — values are either our
   // controlled metadata or primary keys). The fenced <thought> block carries
   // the scrubbed, untrusted free-text from user-captured thoughts.
+  // Compute a word-count ceiling for the Detailed section, scaled to the
+  // amount of real material we have. sqrt curve: a handful of links gets
+  // ~500 words, dozens get the 1000-word cap. Floor of 300. The prompt
+  // treats this as a STOP signal, not a floor — the LLM is told not to pad.
+  const linkCount = Object.values(payload.typed_edges_by_relation || {})
+    .reduce((acc, arr) => acc + (Array.isArray(arr) ? arr.length : 0), 0);
+  const wordTarget = Math.max(
+    300,
+    Math.min(1000, Math.round(300 + Math.sqrt(linkCount) * 100))
+  );
+
   const structurePayload = {
     entity: payload.entity,
     entity_metadata: payload.entity_metadata,
     typed_edges_by_relation: payload.typed_edges_by_relation,
     provenance: payload.provenance,
+    word_target: wordTarget,
     ...(payload.curator_notes ? { curator_notes: payload.curator_notes } : {}),
     ...(payload.related_wiki_links ? { related_wiki_links: payload.related_wiki_links } : {}),
   };

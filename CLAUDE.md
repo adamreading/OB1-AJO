@@ -72,6 +72,15 @@ When working in this repo as the AJO maintainer, be aware:
 - **Undoing a bad absorb**: there's no audit log to reverse the merge directly. Instead use `PATCH /entities/:id/aliases { alias, action: "remove_and_resplit" }` — this removes the alias AND re-queues every thought currently linked to the entity into `entity_extraction_queue`. The worker re-reads each thought, sees the names in content, and re-derives entities from scratch. Thoughts that mention the removed alias get a fresh entity created (since the alias is gone, no match), splitting the merged data back apart. Response includes `resplit_queued: N`. Surfaced in the wiki dashboard as a "Remove & resplit" button next to each alias.
 - After absorb, the survivor's wiki page is marked stale (`generated_at = NULL`) and one of its thoughts re-queued so the next worker tick + wiki compile reflect the merged content.
 
+**Wiki article structure (post 2026-05-10)**:
+The regen prompt now emits articles as narrative prose, not structured forms. Sections:
+  - `## TLDR` — 2-3 sentences. What this entity is, what it does, why it matters.
+  - `## Detailed` — Multi-paragraph narrative. Weaves together what would have been Key Facts + Timeline into prose. Word count scaled to material density: `max(300, min(1000, 300 + sqrt(link_count) * 100))`. The target is a CEILING with a "do not pad" rule — the LLM is told to land shorter rather than fabricate context.
+  - `## Relationships` — Structured edge data, grouped by relation type. Unchanged.
+  - `## Open Questions` — Unresolved gaps from the captures. Unchanged.
+
+Legacy pages compiled before this change still have `## Summary` / `## Key Facts` / `## Timeline`. The dashboard parser (`parseSections` in `WikiGraphView`) recognises both formats — a legacy Summary maps to the same slot as a new TLDR; Key Facts and Timeline render as additional sections until the page is regenerated. Once `wiki-regen-all.mjs` runs, all pages converge on the new structure.
+
 **Wiki pipeline**:
 - Compiler (`generate-wiki.mjs`) always regenerates all pages — `manually_edited` is ignored.
 - Curator notes → `wiki_pages.notes` column. Treated as **HIGHEST AUTHORITY** in the regen prompt: explicit override of conflicting thought snippets, drop-the-thought conflict-resolution rule, plus a tail reminder appended to the user message when notes are present (sits in the model's recency window). The wiki UI surfaces this in a violet-bordered "curator note" panel — the only writable surface on the wiki page.

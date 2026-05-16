@@ -53,17 +53,23 @@ interface WikiGraphViewProps {
 }
 
 interface SectionMap {
+  // New (post-2026-05-10): TLDR + Detailed narrative
+  tldr?: string;
+  detailed?: string;
+  // Legacy (pre-regen): structured Summary + Key Facts + Timeline. Kept so
+  // pages compiled before the prompt change still render correctly until
+  // they're regenerated.
   summary?: string;
   keyFacts?: string;
   timeline?: string;
+  // Always-structured
   openQuestions?: string;
   rest: { heading: string; body: string }[];
 }
 
 // Split markdown into named sections by H2 headings. Sections that fit one of
-// the named slots (Summary, Key Facts, Timeline, Open Questions) are stored
-// against that key; everything else is preserved in `rest` for the left
-// column to render after the named blocks.
+// the named slots are stored against that key; everything else is preserved
+// in `rest` for the left column to render after the named blocks.
 function parseSections(markdown: string): SectionMap {
   const lines = markdown.split("\n");
   const sections: { heading: string; body: string[] }[] = [];
@@ -84,21 +90,36 @@ function parseSections(markdown: string): SectionMap {
   if (current) sections.push(current);
 
   const result: SectionMap = { rest: [] };
-  // If markdown has any preamble before the first H2, treat it as Summary
+  // If markdown has any preamble before the first H2, treat it as TLDR
   const preambleText = preamble.join("\n").trim();
-  if (preambleText && !result.summary) {
-    result.summary = preambleText.replace(/^#\s+.+$/m, "").trim();
+  if (preambleText) {
+    result.tldr = preambleText.replace(/^#\s+.+$/m, "").trim();
   }
 
   for (const s of sections) {
     const h = s.heading.toLowerCase();
     const body = s.body.join("\n").trim();
     if (!body) continue;
-    if (h.includes("summary") && !result.summary) result.summary = body;
+    // New format
+    if ((h === "tldr" || h === "tl;dr" || h.startsWith("tldr")) && !result.tldr) {
+      result.tldr = body;
+    } else if (h.startsWith("detailed") || h === "story" || h === "about") {
+      result.detailed = body;
+    }
+    // Legacy
+    else if (h.includes("summary") && !result.summary) result.summary = body;
     else if (h.includes("key fact")) result.keyFacts = body;
     else if (h.includes("timeline")) result.timeline = body;
+    // Always
     else if (h.includes("open question")) result.openQuestions = body;
     else result.rest.push({ heading: s.heading, body });
+  }
+  // If neither TLDR nor Summary survived, but we had a preamble, the preamble
+  // already populated TLDR. If a legacy page only has Summary, treat Summary
+  // as TLDR for rendering — both go in the same slot.
+  if (!result.tldr && result.summary) {
+    result.tldr = result.summary;
+    delete result.summary;
   }
   return result;
 }
@@ -1087,11 +1108,18 @@ export function WikiGraphView({
                 gap: 24,
               }}
             >
-              {sections?.summary && (
-                <Section title="Summary">
-                  {renderMarkdownInline(sections.summary, entityMap, onSelectSlug, selected.slug)}
+              {sections?.tldr && (
+                <Section title="TLDR">
+                  {renderMarkdownInline(sections.tldr, entityMap, onSelectSlug, selected.slug)}
                 </Section>
               )}
+              {sections?.detailed && (
+                <Section title="Detailed">
+                  {renderMarkdownInline(sections.detailed, entityMap, onSelectSlug, selected.slug)}
+                </Section>
+              )}
+              {/* Legacy structure — shown for pages compiled before the
+                  TLDR/Detailed prompt change. Will disappear after regen. */}
               {sections?.keyFacts && (
                 <Section title="Key Facts">
                   {renderMarkdownInline(sections.keyFacts, entityMap, onSelectSlug, selected.slug)}
@@ -1107,7 +1135,8 @@ export function WikiGraphView({
                   {renderMarkdownInline(s.body, entityMap, onSelectSlug, selected.slug)}
                 </Section>
               ))}
-              {!sections?.summary &&
+              {!sections?.tldr &&
+                !sections?.detailed &&
                 !sections?.keyFacts &&
                 !sections?.timeline &&
                 sections?.rest.length === 0 && (
