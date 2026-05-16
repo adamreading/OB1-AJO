@@ -40,7 +40,7 @@ $WorkerPath    = Join-Path $ProjectRoot "scripts\local-brain-worker.js"
 Write-Host ""
 Write-Host "Reaping any leftover services..." -ForegroundColor Gray
 
-# 1) Anything listening on port 3010 (old next dev)
+# 1) Anything listening on port 3010 (old next dev primary)
 $dashListeners = Get-NetTCPConnection -LocalPort 3010 -State Listen -ErrorAction SilentlyContinue
 foreach ($conn in $dashListeners) {
     try {
@@ -50,15 +50,26 @@ foreach ($conn in $dashListeners) {
     } catch {}
 }
 
-# 2) Any node.exe whose command line points at local-brain-worker.js
-$workerProcs = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like "*local-brain-worker*" }
+# 2) Any node.exe whose command line matches our two services. We match
+# broadly here because next dev spawns many forked workers — the primary
+# is bound to :3010, but the workers aren't, and they're the ones that
+# keep .next file handles open and prevent cache cleanup. Match by repo
+# path + worker script name.
+$allNode = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue
+
+$dashProcs   = $allNode | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*open-brain-dashboard-next*" -or $_.CommandLine -like "*next dev*") }
+$workerProcs = $allNode | Where-Object { $_.CommandLine -and $_.CommandLine -like "*local-brain-worker*" }
+
+foreach ($dp in $dashProcs) {
+    Write-Host "  Killing PID $($dp.ProcessId) (dashboard next dev)" -ForegroundColor Yellow
+    try { Stop-Process -Id $dp.ProcessId -Force -ErrorAction Stop } catch {}
+}
 foreach ($wp in $workerProcs) {
     Write-Host "  Killing PID $($wp.ProcessId) (brain-worker)" -ForegroundColor Yellow
     try { Stop-Process -Id $wp.ProcessId -Force -ErrorAction Stop } catch {}
 }
 
-if (-not $dashListeners -and -not $workerProcs) {
+if (-not $dashListeners -and -not $dashProcs -and -not $workerProcs) {
     Write-Host "  Nothing to reap. Clean slate." -ForegroundColor Gray
 }
 
