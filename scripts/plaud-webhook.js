@@ -566,6 +566,28 @@ async function processRecording(payload) {
 
   // Dedup by file_id (cursor.json canonical), falling back to summary path
   const dedupKey = fileId || payload.files?.summary;
+
+  // ── BLESSING CHECK ────────────────────────────────────────────────
+  // Applaud fires TWO transcript_ready webhooks per recording:
+  //   1. The original auto-summary fire (summary_markdown = auto sum,
+  //      no ENTRY blocks) — fires for every recording with summary.md.
+  //   2. The Open-Brain consumer_note fire from Adam's [ob] commit —
+  //      only fires when the blessed template's consumer_note is
+  //      downloaded. summary_markdown = the OB template output.
+  // Only (2) is processable. Distinguish by inspecting files.summary —
+  // the OB fire sets it to "<folder>/Open_Brain_Ready_Thought_Extractor*"
+  // while the auto fire sets it to "<folder>/summary.md".
+  const blessingTabName = cursor.skip_rules?.required_blessing_tab_name || "Open Brain Ready Thought Extractor";
+  const blessingNeedle = blessingTabName.replace(/\s+/g, "_");
+  const summaryPath = payload.files?.summary ?? "";
+  if (!summaryPath.includes(blessingNeedle)) {
+    console.log(`[plaud-webhook] Unblessed fire for ${filename} (summary=${summaryPath.split("/").pop()}) — ignoring (waiting for blessed consumer_note)`);
+    runLog.notes = "skipped — unblessed webhook fire (no dedup change)";
+    cursor.run_log.push(runLog);
+    persistCursor(cursor);
+    return;
+  }
+
   if (dedupKey && cursor.processed_file_ids.includes(dedupKey)) {
     console.log(`[plaud-webhook] Already processed: ${filename} (${dedupKey}) — skipping`);
     runLog.notes = "skipped — already in processed_file_ids";
@@ -574,7 +596,8 @@ async function processRecording(payload) {
     return;
   }
 
-  // Skip rules (short recordings, mic tests, etc.)
+  // Skip rules (short recordings, mic tests, etc.) — these ARE permanent
+  // skips, so we DO add to processed_file_ids.
   const skip = shouldSkipByRules(payload, cursor);
   if (skip.skip) {
     console.log(`[plaud-webhook] Skipping ${filename}: ${skip.reason}`);
@@ -588,7 +611,7 @@ async function processRecording(payload) {
   const summaryMarkdown = payload.content?.summary_markdown;
   if (!summaryMarkdown) {
     console.log(`[plaud-webhook] No summary for: ${filename}`);
-    runLog.notes = "skipped — no summary_markdown";
+    runLog.notes = "skipped — no summary_markdown (no dedup change)";
     cursor.run_log.push(runLog);
     persistCursor(cursor);
     return;
@@ -599,9 +622,11 @@ async function processRecording(payload) {
 
   const entries = parseEntries(correctedMarkdown);
   if (entries.length === 0) {
-    console.log(`[plaud-webhook] No ENTRY blocks in: ${filename} — not blessed, skipping`);
-    runLog.notes = "skipped — no ENTRY blocks (not the blessed template)";
-    if (dedupKey) cursor.processed_file_ids.push(dedupKey);
+    // Don't dedup — a later consumer_note fire might bring entries with the
+    // same file_id. Marking it processed here was the bug that prevented
+    // re-processing once the blessed template was applied.
+    console.log(`[plaud-webhook] Blessed fire for ${filename} contained no ENTRY blocks — skipping without dedup`);
+    runLog.notes = "skipped — blessed fire had no ENTRY blocks (no dedup change)";
     cursor.run_log.push(runLog);
     persistCursor(cursor);
     return;
@@ -757,6 +782,31 @@ const server = http.createServer((req, res) => {
     ).catch((err) =>
       console.error("[plaud-webhook] /scan-answered error:", err.message)
     );
+    return;
+  }
+
+  // POST /forget?file_id=<id> — drop a file_id from processed_file_ids so
+  // the next webhook fire for it gets processed again. Use when an entry
+  // was pre-loaded (e.g. by the manual backfill) but you want the curator
+  // to re-run on it. Also accepts ?all_unblessed=1 to clear any file_id
+  // that hit the old "no ENTRY blocks" bug and got dedup-locked.
+  if (req.method === "POST" && req.url.startsWith("/forget")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const fileId = url.searchParams.get("file_id");
+    const cursor = readCursor();
+    const before = cursor.processed_file_ids.length;
+    if (fileId) {
+      cursor.processed_file_ids = cursor.processed_file_ids.filter((id) => id !== fileId);
+    } else {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "missing ?file_id=<id>" }));
+      return;
+    }
+    persistCursor(cursor);
+    const removed = before - cursor.processed_file_ids.length;
+    console.log(`[plaud-webhook] /forget: removed ${removed} entries (file_id=${fileId})`);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ removed, remaining: cursor.processed_file_ids.length }));
     return;
   }
 
