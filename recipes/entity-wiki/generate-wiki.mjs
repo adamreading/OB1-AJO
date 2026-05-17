@@ -456,8 +456,15 @@ function buildSynthesisInput(entity, linked, semantic, nameMap, relatedWikiLinks
 const SYSTEM_PROMPT = `You write wiki pages for a personal knowledge graph.
 The subject is a single entity (person, project, topic, organization, tool, or place).
 
-Your response is a wiki article. It begins with the entity's heading. Output ONLY the final markdown.
-NEVER output reasoning, self-corrections, counting, planning, or any meta-commentary. If you need to revise, do it silently. Your entire output is the finished article — nothing else.
+OUTPUT CONTRACT — read this twice:
+- Your entire response is ONE article in markdown. Nothing else.
+- The FIRST character of your response is "#". The LAST character is the end of "## Open Questions".
+- Output ONE H1 (\`# {Entity Name}\`). Exactly one. Never repeat it.
+- Output ONE \`## TLDR\`, ONE \`## Detailed\`, ONE \`## Relationships\`, ONE \`## Open Questions\`. Never repeat any of them.
+- Do NOT show your work. Do NOT count words out loud. Do NOT write a draft then revise. Do NOT explain what you are doing, what the rules are, what the inputs are, or what you decided. Do NOT emit phrases like "Let me", "I need to", "I should", "Now I", "Wait", "Actually", "The problem is", "My current Detailed section is".
+- Do NOT emit \`<think>\` or \`</think>\` tags.
+- If you realise mid-output that you wrote something wrong, you are NOT allowed to start a new draft below it. Stop, mentally revise, and produce ONLY the single corrected article from the top.
+- Violating any of the above will cause the article to be DISCARDED entirely.
 
 Write well-structured markdown with these sections in order:
   # {Entity Name}
@@ -663,6 +670,12 @@ async function synthesize(env, model, payload) {
 function cleanWikiOutput(text) {
   // Strip <think>...</think> blocks (qwen3 extended thinking)
   text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  // Qwen3 sometimes emits </think> without an opening <think> tag — in that
+  // case everything before the close-tag is leaked reasoning. Drop it.
+  const closeIdx = text.lastIndexOf("</think>");
+  if (closeIdx !== -1) {
+    text = text.slice(closeIdx + "</think>".length).trim();
+  }
   // Strip lines that are LLM meta-commentary / self-correction
   const metaLineRe = /^(Wait[,. ]|Okay[,. ]|Alright[,. ]|Let me |I need to |I('ll|'ve| will| see| have| should)|Note:|Actually[,. ]|Hmm[,. ]|Now[,. ]I|Right[,. ]|Final |OK[,. ])/i;
   const lines = text.split("\n");
@@ -674,6 +687,31 @@ function cleanWikiOutput(text) {
   text = clean.join("\n");
   // Collapse runs of 3+ blank lines down to 2
   text = text.replace(/\n{3,}/g, "\n\n").trim();
+  // If the model produced multiple drafts of the article (visible as
+  // repeated H1 `# Name` or repeated `## TLDR` sections), keep only the
+  // final draft. The model treats the LAST emission as its best work.
+  text = keepLastDraft(text);
+  return text;
+}
+
+// If text contains multiple article drafts (repeated H1 or repeated TLDR),
+// slice to the last draft only.
+function keepLastDraft(text) {
+  // Prefer splitting on H1 since the prompt instructs the model to start
+  // every draft with `# {EntityName}`. Fallback to TLDR splits.
+  const h1Matches = [...text.matchAll(/^# [^\n]+$/gm)];
+  if (h1Matches.length > 1) {
+    const last = h1Matches[h1Matches.length - 1];
+    return text.slice(last.index).trim();
+  }
+  const tldrMatches = [...text.matchAll(/^## TLDR\b/gm)];
+  if (tldrMatches.length > 1) {
+    // Keep from the last TLDR onward. The H1 (if any) lives above it; we
+    // accept losing it because the dashboard derives the title from the
+    // wiki_pages.title column anyway, not from the H1 in content.
+    const last = tldrMatches[tldrMatches.length - 1];
+    return text.slice(last.index).trim();
+  }
   return text;
 }
 

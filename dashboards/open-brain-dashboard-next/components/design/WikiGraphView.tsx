@@ -71,7 +71,25 @@ interface SectionMap {
 // the named slots are stored against that key; everything else is preserved
 // in `rest` for the left column to render after the named blocks.
 function parseSections(markdown: string): SectionMap {
-  const lines = markdown.split("\n");
+  // Defensive: if the stored content contains multiple article drafts
+  // (Qwen3 chain-of-thought leakage produces repeated `# {Entity}` H1
+  // blocks), keep only the LAST draft so we render the model's final
+  // answer. The cleaner in generate-wiki.mjs handles new pages; this
+  // protects rendering of pages compiled before that fix shipped.
+  let working = markdown;
+  const h1Matches = [...markdown.matchAll(/^# [^\n]+$/gm)];
+  if (h1Matches.length > 1) {
+    const last = h1Matches[h1Matches.length - 1];
+    working = markdown.slice(last.index);
+  } else {
+    const tldrMatches = [...markdown.matchAll(/^## TLDR\b/gm)];
+    if (tldrMatches.length > 1) {
+      const last = tldrMatches[tldrMatches.length - 1];
+      working = markdown.slice(last.index);
+    }
+  }
+
+  const lines = working.split("\n");
   const sections: { heading: string; body: string[] }[] = [];
   let current: { heading: string; body: string[] } | null = null;
   let preamble: string[] = [];
@@ -96,24 +114,30 @@ function parseSections(markdown: string): SectionMap {
     result.tldr = preambleText.replace(/^#\s+.+$/m, "").trim();
   }
 
+  // Track "rest" by heading so repeated H2s in malformed content collapse
+  // to one entry (last wins). Without this, React renders duplicates with
+  // the same key and warns.
+  const restByHeading = new Map<string, string>();
+
   for (const s of sections) {
     const h = s.heading.toLowerCase();
     const body = s.body.join("\n").trim();
     if (!body) continue;
-    // New format
-    if ((h === "tldr" || h === "tl;dr" || h.startsWith("tldr")) && !result.tldr) {
+    // New format — last wins for consistency with malformed multi-draft input
+    if (h === "tldr" || h === "tl;dr" || h.startsWith("tldr")) {
       result.tldr = body;
     } else if (h.startsWith("detailed") || h === "story" || h === "about") {
       result.detailed = body;
     }
     // Legacy
-    else if (h.includes("summary") && !result.summary) result.summary = body;
+    else if (h.includes("summary")) result.summary = body;
     else if (h.includes("key fact")) result.keyFacts = body;
     else if (h.includes("timeline")) result.timeline = body;
     // Always
     else if (h.includes("open question")) result.openQuestions = body;
-    else result.rest.push({ heading: s.heading, body });
+    else restByHeading.set(s.heading, body);
   }
+  result.rest = Array.from(restByHeading.entries()).map(([heading, body]) => ({ heading, body }));
   // If neither TLDR nor Summary survived, but we had a preamble, the preamble
   // already populated TLDR. If a legacy page only has Summary, treat Summary
   // as TLDR for rendering — both go in the same slot.
