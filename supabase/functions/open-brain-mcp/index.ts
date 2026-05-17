@@ -111,7 +111,7 @@ function distillHeuristic(text: string): Array<{ content: string; type: string }
 function createServer(): McpServer {
   const server = new McpServer({
     name: "open-brain",
-    version: "1.5.0",
+    version: "1.5.1",
   });
 
   // ChatGPT compatibility aliases — restricted ChatGPT connectors look for exact `search` / `fetch` shapes
@@ -645,24 +645,30 @@ function createServer(): McpServer {
     "add_reflection",
     {
       title: "Add Reflection",
-      description: "Save an AI-generated realization or reflection about a specific thought.",
+      description: "Attach a structured reflection to a thought — the *reasoning behind* a decision, lesson, retrospective, or hypothesis. Reflection types: decision_trace (you chose X over Y because…), lesson_trace (what this taught you), retrospective (looking back at a project / period), hypothesis (something you predicted, with what would confirm or refute it), or general (anything else). Free-text 'reflection' is the conclusion; pass reflection_type for structured surfacing in the dashboard.",
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
       inputSchema: {
-        thought_id: z.string().describe("The ID of the thought to reflect on"),
-        reflection: z.string().describe("The insight or realization to save"),
+        thought_id: z.string().describe("UUID or Serial ID (as string) of the thought to reflect on"),
+        reflection: z.string().describe("The conclusion — the realization, lesson, or decision being captured"),
+        reflection_type: z.enum(["decision_trace", "lesson_trace", "retrospective", "hypothesis", "general"]).optional().default("general"),
+        trigger_context: z.string().optional().describe("Optional — what prompted this reflection (e.g. 'reviewing Q1 outcomes', 'after the migration failed')"),
+        confidence: z.number().min(0).max(1).optional().default(1.0).describe("How confident you are in this reflection, 0.0–1.0. Default 1.0."),
       },
     },
-    async ({ thought_id, reflection }) => {
+    async ({ thought_id, reflection, reflection_type, trigger_context, confidence }) => {
       const filter = /^[0-9a-f]{8}-/.test(thought_id) ? { id: thought_id } : { serial_id: parseInt(thought_id, 10) };
-      const { data: thought } = await supabase.from("thoughts").select("id").match(filter).single();
+      const { data: thought } = await supabase.from("thoughts").select("id, serial_id").match(filter).single();
       if (!thought) return { content: [{ type: "text", text: "Thought not found" }], isError: true };
 
       const { error } = await supabase.from("reflections").insert({
         thought_id: thought.id,
-        content: reflection,
+        reflection_type: reflection_type ?? "general",
+        conclusion: reflection,
+        trigger_context: trigger_context ?? "",
+        confidence: typeof confidence === "number" ? confidence : 1.0,
       });
-      if (error) return { content: [{ type: "text", text: error.message }], isError: true };
-      return { content: [{ type: "text", text: "Reflection saved." }] };
+      if (error) return { content: [{ type: "text", text: `Failed: ${error.message}` }], isError: true };
+      return { content: [{ type: "text", text: `Reflection (${reflection_type ?? "general"}) saved on thought #${thought.serial_id}.` }] };
     }
   );
 

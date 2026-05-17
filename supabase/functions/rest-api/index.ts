@@ -530,25 +530,47 @@ app.delete("/thought/:id", async (c) => {
   return c.json({ status: "deleted" });
 });
 
+// Resolve a `/thought/:id/reflection` path param (UUID or serial_id string)
+// to the thought's canonical UUID, which is what reflections.thought_id FKs to.
+async function resolveThoughtUuid(idParam: string): Promise<string | null> {
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idParam);
+  if (isUuid) return idParam;
+  const serial = parseInt(idParam, 10);
+  if (Number.isNaN(serial)) return null;
+  const { data } = await supabase.from("thoughts").select("id").eq("serial_id", serial).maybeSingle();
+  return data?.id ?? null;
+}
+
 // Reflections — GET
 app.get("/thought/:id/reflection", async (c) => {
-  const id = c.req.param("id");
-  const { data, error } = await supabase.from("reflections").select("*").eq("thought_id", id);
+  const uuid = await resolveThoughtUuid(c.req.param("id"));
+  if (!uuid) return c.json({ reflections: [] });
+  const { data, error } = await supabase
+    .from("reflections")
+    .select("*")
+    .eq("thought_id", uuid)
+    .order("created_at", { ascending: false });
   if (error) return c.json({ error: error.message }, 500);
   return c.json({ reflections: data || [] });
 });
 
 // Reflections — POST
 app.post("/thought/:id/reflection", async (c) => {
-  const id = c.req.param("id");
+  const uuid = await resolveThoughtUuid(c.req.param("id"));
+  if (!uuid) return c.json({ error: "thought not found" }, 404);
   const body = await c.req.json();
+  // Accept both `reflection_type` (canonical, used by the dashboard composer)
+  // and legacy `type` (older callers) — preferring the canonical name.
+  const reflection_type = body.reflection_type ?? body.type ?? "general";
   const { data, error } = await supabase.from("reflections").insert({
-    thought_id: id,
-    type: body.type ?? "general",
+    thought_id: uuid,
+    reflection_type,
     trigger_context: body.trigger_context ?? "",
     conclusion: body.conclusion ?? "",
-    options: body.options ?? [],
-    factors: body.factors ?? [],
+    options: Array.isArray(body.options) ? body.options : [],
+    factors: Array.isArray(body.factors) ? body.factors : [],
+    confidence: typeof body.confidence === "number" ? body.confidence : 1.0,
+    metadata: body.metadata ?? {},
   }).select().single();
   if (error) return c.json({ error: error.message }, 500);
   return c.json({ reflection: data }, 201, corsHeaders);
