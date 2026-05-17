@@ -1,8 +1,7 @@
 # Open Brain: Unified Startup Script (psmux edition)
-# Starts the 2 services Open Brain needs locally in a vertically-split
-# Windows Terminal pane (fullscreen). Plaud ingestion now arrives via the
-# Cowork scheduled task → MCP auto_review path, so the local
-# plaud-webhook + Applaud daemon panes were removed on 2026-05-16.
+# Starts the 4 services Open Brain needs locally in a 2x2 Windows Terminal
+# layout. Plaud ingestion now runs locally again via Applaud + plaud-webhook
+# (curator edition) — see scripts/plaud-webhook.js.
 
 $ProjectRoot = Get-Location
 $psmux = "C:\Users\JoannaThompson\AppData\Local\Microsoft\WinGet\Links\psmux.exe"
@@ -23,53 +22,59 @@ if ($null -eq $OllamaCheck) {
 }
 
 Write-Host ""
-Write-Host "Launching all services in Windows Terminal (1x2)..." -ForegroundColor Cyan
+Write-Host "Launching all services in Windows Terminal (2x2)..." -ForegroundColor Cyan
 Write-Host "------------------------------------------------"
-Write-Host "TOP:    Dashboard     http://localhost:3010 (and via Tailscale)"
-Write-Host "BOTTOM: Brain Worker"
+Write-Host "TOP-LEFT:     Dashboard     http://localhost:3010 (and via Tailscale)"
+Write-Host "TOP-RIGHT:    Plaud Webhook http://127.0.0.1:4001/webhook (curator edition)"
+Write-Host "BOTTOM-LEFT:  Brain Worker"
+Write-Host "BOTTOM-RIGHT: Applaud       http://127.0.0.1:44471"
 Write-Host "------------------------------------------------"
 
 $DashboardPath = Join-Path $ProjectRoot "dashboards\open-brain-dashboard-next"
 $WorkerPath    = Join-Path $ProjectRoot "scripts\local-brain-worker.js"
+$WebhookPath   = Join-Path $ProjectRoot "scripts\plaud-webhook.js"
+$ApplaudPath   = "C:\Users\JoannaThompson\projects\Applaud"
 
 # ─── Reap leftover services before launching ───────────────────────────
 # Closing a psmux window with X does NOT always kill the child node
 # processes — they get reparented to the session leader and survive,
-# locking port 3010 (next dev) and double-running the brain worker.
-# Identify and kill them by purpose before psmux respawns the panes.
+# locking port 3010 (next dev), port 4001 (plaud-webhook), and
+# double-running the brain worker / Applaud. Identify and kill them by
+# purpose before psmux respawns the panes.
 Write-Host ""
 Write-Host "Reaping any leftover services..." -ForegroundColor Gray
 
-# 1) Anything listening on port 3010 (old next dev primary)
-$dashListeners = Get-NetTCPConnection -LocalPort 3010 -State Listen -ErrorAction SilentlyContinue
-foreach ($conn in $dashListeners) {
-    try {
-        $proc = Get-Process -Id $conn.OwningProcess -ErrorAction Stop
-        Write-Host "  Killing PID $($proc.Id) ($($proc.ProcessName)) on :3010" -ForegroundColor Yellow
-        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-    } catch {}
+# 1) Anything listening on dashboard / webhook ports (old primaries)
+$portsToReap = @(3010, 4001, 44471)
+$portListeners = @()
+foreach ($p in $portsToReap) {
+    $listeners = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+    foreach ($conn in $listeners) {
+        try {
+            $proc = Get-Process -Id $conn.OwningProcess -ErrorAction Stop
+            Write-Host "  Killing PID $($proc.Id) ($($proc.ProcessName)) on :$p" -ForegroundColor Yellow
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            $portListeners += $proc.Id
+        } catch {}
+    }
 }
 
-# 2) Any node.exe whose command line matches our two services. We match
-# broadly here because next dev spawns many forked workers — the primary
-# is bound to :3010, but the workers aren't, and they're the ones that
-# keep .next file handles open and prevent cache cleanup. Match by repo
-# path + worker script name.
+# 2) Any node.exe whose command line matches our four services. We match
+# broadly because next dev + Applaud both spawn many forked workers that
+# aren't bound to a port but hold file handles open.
 $allNode = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue
 
-$dashProcs   = $allNode | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*open-brain-dashboard-next*" -or $_.CommandLine -like "*next dev*") }
-$workerProcs = $allNode | Where-Object { $_.CommandLine -and $_.CommandLine -like "*local-brain-worker*" }
+$dashProcs    = $allNode | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*open-brain-dashboard-next*" -or $_.CommandLine -like "*next dev*") }
+$webhookProcs = $allNode | Where-Object { $_.CommandLine -and $_.CommandLine -like "*plaud-webhook*" }
+$workerProcs  = $allNode | Where-Object { $_.CommandLine -and $_.CommandLine -like "*local-brain-worker*" }
+$applaudProcs = $allNode | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*projects\Applaud*" -or $_.CommandLine -like "*projects/Applaud*") }
 
-foreach ($dp in $dashProcs) {
-    Write-Host "  Killing PID $($dp.ProcessId) (dashboard next dev)" -ForegroundColor Yellow
-    try { Stop-Process -Id $dp.ProcessId -Force -ErrorAction Stop } catch {}
-}
-foreach ($wp in $workerProcs) {
-    Write-Host "  Killing PID $($wp.ProcessId) (brain-worker)" -ForegroundColor Yellow
-    try { Stop-Process -Id $wp.ProcessId -Force -ErrorAction Stop } catch {}
-}
+foreach ($dp in $dashProcs)    { Write-Host "  Killing PID $($dp.ProcessId) (dashboard next dev)" -ForegroundColor Yellow; try { Stop-Process -Id $dp.ProcessId -Force -ErrorAction Stop } catch {} }
+foreach ($wh in $webhookProcs) { Write-Host "  Killing PID $($wh.ProcessId) (plaud-webhook)" -ForegroundColor Yellow; try { Stop-Process -Id $wh.ProcessId -Force -ErrorAction Stop } catch {} }
+foreach ($wp in $workerProcs)  { Write-Host "  Killing PID $($wp.ProcessId) (brain-worker)" -ForegroundColor Yellow; try { Stop-Process -Id $wp.ProcessId -Force -ErrorAction Stop } catch {} }
+foreach ($ap in $applaudProcs) { Write-Host "  Killing PID $($ap.ProcessId) (applaud)" -ForegroundColor Yellow; try { Stop-Process -Id $ap.ProcessId -Force -ErrorAction Stop } catch {} }
 
-if (-not $dashListeners -and -not $dashProcs -and -not $workerProcs) {
+if (-not $portListeners -and -not $dashProcs -and -not $webhookProcs -and -not $workerProcs -and -not $applaudProcs) {
     Write-Host "  Nothing to reap. Clean slate." -ForegroundColor Gray
 }
 
@@ -79,19 +84,28 @@ Start-Sleep -Milliseconds 400
 # Kill any existing psmux session
 & $psmux kill-session -t "open-brain" 2>$null
 
-# Step 1: Create session — pane 0 is top (Dashboard)
+# Step 1: Create session — pane 0 is top-left (Dashboard), capture its ID
 & $psmux new-session -d -s "open-brain" -x 220 -y 50
 $pane0 = (& $psmux list-panes -t "open-brain" -F "#{pane_id}")[0]
 
-# Step 2: Split down from pane 0 — creates bottom (Brain Worker)
+# Step 2: Split right from pane 0 — creates top-right (Plaud Webhook), capture its ID
+& $psmux split-window -h -t "open-brain:0.0"
+$pane1 = (& $psmux list-panes -t "open-brain" -F "#{pane_id}" | Where-Object { $_ -ne $pane0 })[0]
+
+# Step 3: Split down from pane 0 — creates bottom-left (Brain Worker)
 & $psmux split-window -v -t $pane0
 
-# Step 3: Get all pane IDs in order
+# Step 4: Split down from pane 1 — creates bottom-right (Applaud)
+& $psmux split-window -v -t $pane1
+
+# Step 5: Get all pane IDs in order
 $panes = & $psmux list-panes -t "open-brain" -F "#{pane_id}"
 
-# Step 4: Send commands to each pane by ID
+# Step 6: Send commands to each pane by ID
 & $psmux send-keys -t $panes[0] "cd '$DashboardPath'; `$env:PORT=3010; `$env:HOST='0.0.0.0'; npm.cmd run dev" Enter
-& $psmux send-keys -t $panes[1] "cd '$ProjectRoot'; node --env-file=.env '$WorkerPath'" Enter
+& $psmux send-keys -t $panes[1] "cd '$ProjectRoot'; node --env-file=.env '$WebhookPath'" Enter
+& $psmux send-keys -t $panes[2] "cd '$ProjectRoot'; node --env-file=.env '$WorkerPath'" Enter
+& $psmux send-keys -t $panes[3] "cd '$ApplaudPath'; pnpm start" Enter
 
 # Open Windows Terminal fullscreen and attach
 & $wt --maximized $ps -NoExit -Command "& '$psmux' attach-session -t 'open-brain'"

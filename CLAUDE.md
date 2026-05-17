@@ -171,18 +171,37 @@ The dashboard auto-adapts to phone-portrait via CSS media queries — there is n
 - `reclassify-existing.js` — re-run Work/Personal classification
 - `synthesize-persona.mjs` — generate conceptual `topic-adam-*` wiki pages from semantic clusters; requires `OPENROUTER_API_KEY` + Ollama running. CLI: `node --env-file=.env scripts/synthesize-persona.mjs [--list|--lens <name>|--dry-run]`
 
-**Plaud capture pipeline (current, MCP-based — 2026-05-16 onward)**:
-Plaud ingestion happens entirely through the MCP. Plaud's own MCP server exposes transcripts to a separate AI client (Cowork or Claude Desktop); that client distils each transcript into atomic captures + proposed updates and calls Open Brain's MCP tools. There is no local webhook, no Applaud daemon, no port 4001. `start_brain.ps1` therefore launches only 2 panes (Dashboard top + Brain Worker bottom).
+**Plaud capture pipeline (current, local-curator — 2026-05-17 onward)**:
+Plaud ingestion runs locally on the 5090 via Applaud + a curator-oriented webhook. The Cowork-scheduled-Claude pivot from 2026-05-16 was abandoned (Claude API tokens ~10% of a 5h block per scheduled run, unsustainable at hourly cadence). The local pipeline costs £0 ongoing — Qwen3:30b (Ollama) does the curator reasoning; REST endpoints do the OB writes.
 
-Two distinct call shapes flow through the same MCP tools:
-- **Human-attended** (default): the user is in the chat watching every capture. `capture_thought` / `update_thought` write straight through — capture goes via `upsert_thought` RPC + embedding; update overwrites the target in place and re-queues extraction.
-- **Auto-review** (`auto_review: true`): for unattended / scheduled batch imports. The tool does NOT touch the brain — it inserts a `source_type: plaud` thought with `metadata.review_status: "pending_review"` so it shows up in the dashboard `/review` page. For `capture_thought` the row carries `ollama_decision: "NEW"`. For `update_thought` the target is NOT modified — instead a new pending thought is inserted with `ollama_decision: "UPDATE"`, `update_target_id: <serial_id>`, and `original_content: <target's current content>` captured for side-by-side comparison in the dashboard. The pre-existing `/review/approve` handler does the right thing for both decisions.
+**Flow:**
+1. Plaud user manually applies the "Open Brain Ready Thought Extractor" template in the Plaud UI after reviewing/correcting the transcript. The template (GPT-5.5 in Plaud) emits `---ENTRY---` / `---END---` blocks with five headers: `TYPE`, `CONTEXT`, `ENTITIES` (comma-separated canonical names), `SEARCH_HINTS` (` | ` separated phrases), then the body, then `ACTIONS:`.
+2. Applaud daemon (`http://127.0.0.1:44471`) polls Plaud's API and fires `POST /webhook` to `http://127.0.0.1:4001` (`scripts/plaud-webhook.js`) when a `transcript_ready` event fires. Payload includes `recording.id`, `recording.filename`, `files.summary` (file path), and `content.summary_markdown`.
+3. The webhook is a CURATOR, not a blind capturer. Per entry it:
+   - Applies `processor_prompt/entity_corrections.json` (lowercase whole-word STT corrections — `Click→Qlik`, `Bundler→Funder`, `Biblia→BVRLA`, plus `flag_only` rules for ambiguous names that are surfaced as open questions rather than auto-replaced).
+   - Searches OB via REST `/search?q=<hint>&classification=<context>` per `SEARCH_HINTS` phrase, dedup by serial_id.
+   - Looks up canonical wiki anchors via REST `/wiki-pages/<slug>` for each entity (probes `person-`, `organization-`, `project-`, `tool-`, `topic-`, `place-` prefixes).
+   - Hands all that context to Qwen3 via `scripts/plaud-curator-prompt.md` (hot-reloaded between requests). Curator returns a single-line JSON: `{decision, target_id, merged_content, confidence, reasoning, open_question}`.
+   - Acts on the decision: `IGNORE` (logged, skipped); `UPDATE` (POST `/capture-pending` with `ollama_decision="UPDATE"`, `update_target_id`, `original_content`, plus the LLM-merged body); `CAPTURE` (POST `/capture-pending` with `ollama_decision="NEW"`).
+4. Open questions are appended to `processor_prompt/OPEN_QUESTIONS.md` when: a `flag_only` correction was triggered; OR the curator's confidence dropped below 0.6 and it raised one. Never inject caveats into thought bodies — that's the whole point of the queue.
+5. After processing all entries in a payload, the webhook scans `OPEN_QUESTIONS.md` for `Status: answered` entries and applies each via REST `/capture-pending` as an UPDATE, then rewrites Status to `resolved`.
+6. Run state lives in `processor_prompt/cursor.json` — `processed_file_ids[]` for dedup, plus a `run_log[]` capped at 50 entries. All writes are atomic (write-temp + rename).
 
-The review gate and approve handler are unchanged from the old webhook era:
-- `metadata.review_status: "pending_review"` is the review gate — thoughts with this flag are NOT inserted into `entity_extraction_queue` and therefore invisible to the wiki, Kanban, and action items pipeline until approved.
-- `POST /review/approve` batch-approves: NEW decisions queue the thought for extraction + embedding; UPDATE decisions apply the pending thought's merged content to the original target thought, re-queue it, and delete the pending vessel.
-- The Review dashboard page (`/review`) shows all `source_type: plaud` thoughts with `review_status: pending_review`. Each row shows an `ollama_decision` badge (`NEW` or `→ #N` for updates), inline editable content/type/classification, per-row Pass/Delete, and bulk Pass/Delete. For UPDATE entries, the original content is available in a collapsible section for comparison before approving.
-- `/capture-pending` still exists in `rest-api` and is functionally identical to what the MCP auto-review path does — kept so external callers (n8n, Zapier, etc.) without MCP can still queue thoughts for review via plain HTTP.
+**Critical: every write is via `/capture-pending` (not `/capture`).** Adam triages everything in the dashboard `/review` panel. No auto-merge into the brain.
+
+**`processor_prompt/` directory (gitignored — contains personal data):**
+- `entity_corrections.json` — list of `{wrong, canonical, context, flag_only?}` STT correction rules. `_meta.match_rules` controls case sensitivity. Add new entries when fresh hallucinations appear; set `flag_only: true` for ambiguous names.
+- `OPEN_QUESTIONS.md` — `## QNNN — <title>` blocks with `Status: open|answered|resolved|dismissed`, `Target thought: #N`, `Question:`, `Why it matters:`, `Answer:`. The webhook reads + writes this file.
+- `cursor.json` — `{processed_file_ids[], last_processed_at, skip_rules{min_duration_ms, title_skip_keywords[], required_blessing_tab_name}, run_log[]}`. `required_blessing_tab_name` defaults to "Open Brain Ready Thought Extractor" but is effectively informational — the webhook actually blesses by presence of `---ENTRY---` blocks in `summary_markdown`.
+- `processor_prompt.md` — the canonical Plaud template prompt (reference only — Adam updates Plaud's template editor manually; not loaded at runtime).
+
+**MCP `auto_review` flag stays as a fallback path:** `capture_thought` and `update_thought` still accept `auto_review: true` for any chat client (Claude Desktop, etc.) that wants to push into the review queue without going through the webhook. Same behaviour as `/capture-pending` underneath. The webhook bypasses MCP and calls REST directly — simpler for a programmatic client.
+
+The review gate and approve handler are unchanged:
+- `metadata.review_status: "pending_review"` keeps the thought out of `entity_extraction_queue` until approved.
+- `POST /review/approve` batch-approves: NEW → queues extraction + embedding; UPDATE → applies merged content to target, re-queues, deletes pending vessel.
+- The Review dashboard page (`/review`) shows `source_type: plaud` thoughts with the `ollama_decision` badge (`NEW` or `→ #N`), inline editable content/type/classification, per-row + bulk Pass/Delete, original content collapsible for UPDATE rows.
+- `/capture-pending` is also used by external callers (n8n, Zapier) that don't go through the webhook.
 
 **Upstream sync — MANDATORY PROCESS**:
 The AJO fork tracks `upstream https://github.com/NateBJones-Projects/OB1`. Never manually port upstream changes — always use git properly:

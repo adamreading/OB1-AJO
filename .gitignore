@@ -27,6 +27,10 @@ scripts/edge-snapshots/
 .claude/scheduled_tasks.lock
 start_brain.old
 
+# Plaud curator state — contains personal data (colleague names, SCL internals,
+# processed Plaud recording IDs). Schemas documented in CLAUDE.md.
+processor_prompt/
+
 # Build artifacts
 deno.lock
 
