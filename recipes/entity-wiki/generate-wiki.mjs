@@ -691,6 +691,10 @@ function cleanWikiOutput(text) {
   // repeated H1 `# Name` or repeated `## TLDR` sections), keep only the
   // final draft. The model treats the LAST emission as its best work.
   text = keepLastDraft(text);
+  // Strip a leading H1 if present — the caller prepends its own
+  // `# {Entity Name} ({type})` heading, so any H1 the model emitted at
+  // the top of its response would result in a duplicate H1.
+  text = text.replace(/^#[ \t]+[^\n]+\n+/, "").trim();
   return text;
 }
 
