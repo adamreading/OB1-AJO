@@ -1568,6 +1568,61 @@ app.get("/entities/:id/edges", async (c) => {
   return c.json({ edges }, 200, corsHeaders);
 });
 
+// Reflections attached to any thought that links to this entity. Used by the
+// wiki page to surface lessons / decisions / retrospectives / hypotheses
+// alongside the entity itself, so they don't get marooned on the single
+// source thought.
+app.get("/entities/:id/reflections", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!id || isNaN(id)) return c.json({ error: "Valid entity id required" }, 400, corsHeaders);
+
+  // 1) Find all thought UUIDs linked to this entity
+  const { data: links, error: linksErr } = await supabase
+    .from("thought_entities")
+    .select("thought_id")
+    .eq("entity_id", id);
+  if (linksErr) return c.json({ error: linksErr.message }, 500, corsHeaders);
+  const thoughtIds = Array.from(new Set((links ?? []).map((l: { thought_id: string }) => l.thought_id)));
+  if (thoughtIds.length === 0) return c.json({ reflections: [], by_type: {} }, 200, corsHeaders);
+
+  // 2) Fetch reflections for those thoughts
+  const { data: reflections, error: reflErr } = await supabase
+    .from("reflections")
+    .select("*")
+    .in("thought_id", thoughtIds)
+    .order("created_at", { ascending: false });
+  if (reflErr) return c.json({ error: reflErr.message }, 500, corsHeaders);
+
+  // 3) Map UUIDs back to serial_ids + a short content preview so the
+  //    dashboard can render deep-links and context without a follow-up call.
+  const { data: thoughts } = await supabase
+    .from("thoughts")
+    .select("id, serial_id, content")
+    .in("id", thoughtIds);
+  const thoughtMeta = new Map<string, { serial_id: number; preview: string }>();
+  for (const t of thoughts ?? []) {
+    thoughtMeta.set(t.id, {
+      serial_id: t.serial_id,
+      preview: String(t.content ?? "").replace(/\s+/g, " ").slice(0, 160),
+    });
+  }
+
+  const enriched = (reflections ?? []).map((r: Record<string, unknown>) => ({
+    ...r,
+    source_thought_serial: thoughtMeta.get(r.thought_id as string)?.serial_id ?? null,
+    source_thought_preview: thoughtMeta.get(r.thought_id as string)?.preview ?? "",
+  }));
+
+  // 4) Group by reflection_type for the dashboard's grouped rendering
+  const byType: Record<string, typeof enriched> = {};
+  for (const r of enriched) {
+    const t = String(r.reflection_type ?? "general");
+    (byType[t] ??= []).push(r);
+  }
+
+  return c.json({ reflections: enriched, by_type: byType }, 200, corsHeaders);
+});
+
 // Delete an edge AND add it to edge_blocklist so the worker won't recreate it.
 // This is the "✕ remove" action from the Edit Relationships panel.
 // Body: { from_entity_id, to_entity_id, relation }

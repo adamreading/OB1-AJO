@@ -111,7 +111,7 @@ function distillHeuristic(text: string): Array<{ content: string; type: string }
 function createServer(): McpServer {
   const server = new McpServer({
     name: "open-brain",
-    version: "1.5.1",
+    version: "1.5.2",
   });
 
   // ChatGPT compatibility aliases — restricted ChatGPT connectors look for exact `search` / `fetch` shapes
@@ -191,7 +191,7 @@ function createServer(): McpServer {
     {
       title: "Search Thoughts",
       description:
-        "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea. Respects Work/Personal context. Returns source so you can see where each memory came from.",
+        "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea. Respects Work/Personal context. Returns source so you can see where each memory came from. Each result includes any reflections attached to that thought (lessons, decisions, hypotheses, retrospectives) — read them and surface relevant ones to the user, especially lesson_trace and decision_trace when similar situations arise.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         query: z.string().describe("What to search for"),
@@ -250,12 +250,42 @@ function createServer(): McpServer {
           return { content: [{ type: "text", text: `No thoughts found matching "${query}" from source "${source}".` }] };
         }
 
+        // Bundle any reflections attached to these thoughts so AI callers
+        // get the *reasoning behind* a thought (lessons, decisions,
+        // hypotheses, retrospectives) inline with each search hit — no
+        // need for a separate tool call.
+        const uuids = filtered.map((t: any) => t.id).filter(Boolean);
+        const refByThought = new Map<string, any[]>();
+        if (uuids.length > 0) {
+          const { data: refRows } = await supabase
+            .from("reflections")
+            .select("thought_id, reflection_type, conclusion, trigger_context, confidence, created_at")
+            .in("thought_id", uuids)
+            .order("created_at", { ascending: false });
+          for (const r of refRows ?? []) {
+            const arr = refByThought.get(r.thought_id) ?? [];
+            arr.push(r);
+            refByThought.set(r.thought_id, arr);
+          }
+        }
+
         const results = filtered.map((t: any, i: number) => {
           const m = t.metadata || {};
           const label = m.classification ? `[${m.classification.toUpperCase()}] ` : "";
           const src = t.source_type ? ` (${t.source_type})` : "";
           const score = typeof t.similarity === "number" ? `\nSimilarity: ${(t.similarity * 100).toFixed(0)}%` : "\nMatch: text";
-          return `${i + 1}. ${label}#${t.serial_id || t.id}${src}\n${t.content}${score}`;
+          let reflectionsBlock = "";
+          const refs = refByThought.get(t.id) ?? [];
+          if (refs.length > 0) {
+            const lines = refs.slice(0, 5).map((r: any) => {
+              const concl = String(r.conclusion ?? "").replace(/\s+/g, " ").slice(0, 140);
+              const conf = typeof r.confidence === "number" ? ` (conf ${r.confidence.toFixed(2)})` : "";
+              return `   [${r.reflection_type ?? "general"}] ${concl}${conf}`;
+            });
+            const more = refs.length > 5 ? `\n   …and ${refs.length - 5} more` : "";
+            reflectionsBlock = `\n↪ Reflections (${refs.length}):\n${lines.join("\n")}${more}`;
+          }
+          return `${i + 1}. ${label}#${t.serial_id || t.id}${src}\n${t.content}${score}${reflectionsBlock}`;
         });
 
         return { content: [{ type: "text", text: `Found ${filtered.length} results:\n\n${results.join("\n\n")}` }] };

@@ -33,6 +33,20 @@ interface EdgeRow {
   direction: "out" | "in";
 }
 
+interface ReflectionRow {
+  id: number;
+  thought_id: string;
+  reflection_type: string;
+  trigger_context: string;
+  conclusion: string;
+  options: { label: string }[];
+  factors: { label: string; weight: number }[];
+  confidence: number;
+  created_at: string;
+  source_thought_serial: number | null;
+  source_thought_preview: string;
+}
+
 interface WikiGraphViewProps {
   selected: WikiPageDetail | null;
   onSelectSlug: (slug: string) => void;
@@ -566,6 +580,8 @@ export function WikiGraphView({
   const [searchQuery, setSearchQuery] = useState("");
   const [edges, setEdges] = useState<EdgeRow[]>([]);
   const [edgesLoading, setEdgesLoading] = useState(false);
+  const [reflections, setReflections] = useState<ReflectionRow[]>([]);
+  const [reflectionsLoading, setReflectionsLoading] = useState(false);
   const [entityMap, setEntityMap] = useState<Map<string, string>>(new Map());
 
   // Pull dynamic entity types
@@ -631,6 +647,29 @@ export function WikiGraphView({
       .catch(() => {})
       .finally(() => {
         if (!cancelled) setEdgesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.entity_id]);
+
+  // Pull reflections attached to any thought linked to this entity
+  useEffect(() => {
+    if (!selected?.entity_id) {
+      setReflections([]);
+      return;
+    }
+    let cancelled = false;
+    setReflectionsLoading(true);
+    fetch(`/api/entities/${selected.entity_id}/reflections`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d?.reflections) return;
+        setReflections(d.reflections as ReflectionRow[]);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setReflectionsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -1180,13 +1219,18 @@ export function WikiGraphView({
                 )}
             </div>
 
-            {/* Right — Relationships, Open Questions, Curator Note */}
+            {/* Right — Relationships, Reflections, Open Questions, Curator Note */}
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <RelationshipsCard
                 edges={edges}
                 loading={edgesLoading}
                 entityTypes={entityTypes}
                 onSelectSlug={onSelectSlug}
+              />
+
+              <ReflectionsCard
+                reflections={reflections}
+                loading={reflectionsLoading}
               />
 
               {sections?.openQuestions && (
@@ -1372,6 +1416,149 @@ function RelationshipsCard({
             </div>
           </div>
         ))}
+      </div>
+    </Card>
+  );
+}
+
+const REFLECTION_TYPE_META: Record<string, { label: string; tone: string }> = {
+  decision_trace: { label: "Decision", tone: "rgba(157,131,255,0.18)" },
+  lesson_trace: { label: "Lesson", tone: "rgba(80,200,200,0.18)" },
+  retrospective: { label: "Retro", tone: "rgba(255,180,80,0.18)" },
+  hypothesis: { label: "Hypothesis", tone: "rgba(255,150,80,0.18)" },
+  general: { label: "Reflection", tone: "rgba(255,255,255,0.06)" },
+};
+
+function ReflectionsCard({
+  reflections,
+  loading,
+}: {
+  reflections: ReflectionRow[];
+  loading: boolean;
+}) {
+  // Group by reflection_type
+  const groups = useMemo(() => {
+    const m = new Map<string, ReflectionRow[]>();
+    for (const r of reflections) {
+      const k = r.reflection_type ?? "general";
+      const arr = m.get(k) ?? [];
+      arr.push(r);
+      m.set(k, arr);
+    }
+    // Order: lessons first, then decisions, then retros, hypotheses, general
+    const order = ["lesson_trace", "decision_trace", "retrospective", "hypothesis", "general"];
+    return Array.from(m.entries()).sort(
+      (a, b) => order.indexOf(a[0]) - order.indexOf(b[0])
+    );
+  }, [reflections]);
+
+  if (loading) {
+    return (
+      <Card padding={20} title="Reflections" eyebrow="LESSONS · DECISIONS">
+        <span style={{ color: "var(--fg-4)", fontSize: 12 }}>Loading…</span>
+      </Card>
+    );
+  }
+  if (reflections.length === 0) {
+    return (
+      <Card padding={20} title="Reflections" eyebrow="LESSONS · DECISIONS">
+        <span style={{ color: "var(--fg-4)", fontSize: 12 }}>
+          No reflections attached to thoughts about this entity yet. Add one
+          from any thought&apos;s detail page, or via an AI client&apos;s{" "}
+          <code style={{ fontSize: 11 }}>add_reflection</code> tool.
+        </span>
+      </Card>
+    );
+  }
+
+  return (
+    <Card padding={20} title="Reflections" eyebrow="LESSONS · DECISIONS">
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {groups.map(([type, rows], i) => {
+          const meta = REFLECTION_TYPE_META[type] ?? REFLECTION_TYPE_META.general;
+          return (
+            <div
+              key={type}
+              style={
+                i > 0
+                  ? { paddingTop: 12, borderTop: "1px solid var(--line)" }
+                  : undefined
+              }
+            >
+              <div className="eyebrow" style={{ marginBottom: 8 }}>
+                {meta.label} · {rows.length}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {rows.slice(0, 10).map((r) => (
+                  <a
+                    key={r.id}
+                    href={
+                      r.source_thought_serial != null
+                        ? `/thoughts/${r.source_thought_serial}`
+                        : "#"
+                    }
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                      padding: "10px 12px",
+                      borderRadius: 8,
+                      background: meta.tone,
+                      border: "1px solid var(--line)",
+                      textDecoration: "none",
+                      color: "var(--fg)",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: "var(--fg)",
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {r.conclusion || (
+                        <span style={{ color: "var(--fg-4)", fontStyle: "italic" }}>
+                          (no conclusion yet)
+                        </span>
+                      )}
+                    </div>
+                    {r.trigger_context && (
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "var(--fg-3)",
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        Trigger: {r.trigger_context}
+                      </div>
+                    )}
+                    <div
+                      style={{
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 10,
+                        color: "var(--fg-4)",
+                        display: "flex",
+                        gap: 10,
+                      }}
+                    >
+                      {r.source_thought_serial != null && (
+                        <span>#{r.source_thought_serial}</span>
+                      )}
+                      <span>conf {Number(r.confidence ?? 1).toFixed(2)}</span>
+                      <span>{(r.created_at ?? "").slice(0, 10)}</span>
+                    </div>
+                  </a>
+                ))}
+                {rows.length > 10 && (
+                  <span style={{ fontSize: 11, color: "var(--fg-4)" }}>
+                    +{rows.length - 10} more…
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </Card>
   );
