@@ -39,6 +39,44 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const VALID_TYPES = new Set(["idea", "task", "meeting", "reference", "journal", "decision", "lesson", "observation"]);
 const VALID_CONTEXTS = new Set(["work", "personal"]);
 const VALID_ENTITY_TYPES = new Set(["person", "project", "topic", "tool", "organization", "place"]);
+
+// Belt-and-braces filter for junk topic entities the prompt is supposed to
+// reject but Ollama sometimes returns anyway. Run AFTER the prompt-side
+// rules — catches dates, filenames, config keys, pure numbers, single chars,
+// and a small block-list of generic English nouns.
+const TOPIC_FILE_EXT_RE = /\.(md|markdown|json|ya?ml|toml|env|ini|cfg|sql|tsx?|jsx?|mjs|cjs|py|rb|go|rs|sh|ps1|bat|txt|csv|log|html?|css|scss|xml)$/i;
+// Dates: ISO 8601, slash-delimited, bare quarters (Q1), quarters with year, half-years.
+const TOPIC_DATE_RE = /^(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}\/\d{2,4}|Q[1-4](\s*\d{4})?|\d{4}\s*Q[1-4]|H[12](\s*\d{4})?)$/i;
+const TOPIC_CONFIG_KEY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+){1,}$/; // snake_case all-lower, e.g. num_predict, max_tokens
+const TOPIC_PURE_NUMBER_RE = /^[£$€]?\s*[\d,]+(\.\d+)?\s*[kKmMbB%]?$/;
+// File path: dotted relative (./foo), absolute (/foo/bar), or has BOTH a slash
+// AND a known extension. Naked slashes inside human text (e.g. "Build / Buy",
+// "£50/month") are NOT file paths.
+const TOPIC_FILE_PATH_RE = /^[.\/\\]|^[\w\-]+\/[\w\-./\\]+\.[a-z]{1,5}$/i;
+const TOPIC_BAD_GENERIC_NOUNS = new Set([
+  // Generic categories that should have a specific entity instead
+  "funder", "funders", "rate book", "rate books", "the meeting", "the system",
+  "the bot", "the dashboard", "the tool", "the project", "the platform",
+  "the team", "the vendor", "the client", "the customer",
+  // Meeting jargon
+  "stakeholder meetings", "stakeholder meeting", "poc milestones", "poc milestone",
+  "end-of-quarter period", "weekly standup", "daily standup", "all-hands",
+  // Generic process labels
+  "the call", "the chat", "the email", "the demo", "the proposal",
+]);
+
+function isJunkTopic(name) {
+  const t = String(name || "").trim();
+  if (!t) return true;
+  if (t.length < 2) return true; // single chars are never useful as topics
+  if (TOPIC_DATE_RE.test(t)) return true;
+  if (TOPIC_FILE_EXT_RE.test(t)) return true;
+  if (TOPIC_FILE_PATH_RE.test(t)) return true;
+  if (TOPIC_CONFIG_KEY_RE.test(t)) return true;
+  if (TOPIC_PURE_NUMBER_RE.test(t)) return true;
+  if (TOPIC_BAD_GENERIC_NOUNS.has(t.toLowerCase())) return true;
+  return false;
+}
 const VALID_RELATIONS = new Set([
   "works_on",          // person|org → project|task
   "uses",              // person|org → tool|technology
@@ -151,6 +189,26 @@ Entity rules:
 - Use the SHORTEST canonical name. Strip generic qualifiers that aren't part of the official name: write "Call Listening" not "Call Listening App" or "Call Listening System"; write "Bookstack" not "Bookstack Wiki"; write "ZVA" not "ZVA Chatbot". Never add App, System, Tool, Service, Wiki, Module, Platform, Chatbot, Bot, Dashboard, Website unless the entity is officially named that way.
 - Omit entities and relationships below 0.5 confidence.
 
+What each entity type means:
+- person       → a specific named human. "Adam Ososki", not "the engineer".
+- organization → a named company, team, body, or institution. "Cybit", "BVRLA". Not generic categories like "the funder" or "the vendor".
+- project      → a named initiative or product the user (or someone in their orbit) is building or running. "Promptinator", "Funder Pricing Bot Migration". Not generic task descriptions.
+- tool         → a named software product or service. "Plaud", "UiPath", "Qlik". Not categories like "the database" or feature names like "the dashboard".
+- place        → a named geographic location. "Reading", "London". Not "the office" or "the meeting room".
+- topic        → a DURABLE concept, methodology, idea, or theme that recurs across captures and would deserve a wiki page in three months. "Agentic AI", "Vector embeddings", "Per-funder concurrency". The durability test is the key gate: would you write a wiki page about this in 3 months?
+
+DO NOT extract as a topic (or any entity type):
+- Dates or date-like strings — "2026-05-19", "Q1 2026", "early November", "end of quarter".
+- Filenames, file paths, or file extensions — "README.md", ".env", "platforms.yaml", "scripts/foo.js".
+- Software/config parameter keys — "num_predict", "num_ctx", "max_tokens".
+- Generic English nouns being used in their ordinary sense — "funder" alone (without a specific name), "rate book", "the meeting", "the system", "the bot", "the dashboard".
+- Meeting jargon and process labels — "stakeholder meetings", "POC milestones", "end-of-quarter period", "weekly standup".
+- Numbers or numeric codes on their own — "92", "£28,000", "1024 tokens".
+- Suspected STT mishearings — if a name looks half-formed or doesn't make sense in context, skip it rather than guess.
+- Fragments of a larger entity that already appears elsewhere in the same thought (e.g. don't extract "CAP" separately if you already have "CAP code" and "CAP ID" — pick the most specific form that actually applies, or skip the bare acronym).
+
+If you're uncertain whether something is a real topic or just a generic noun, OMIT IT. Empty arrays are correct outputs; bad entities are corrosive.
+
 Relationship relation values — pick the MOST SPECIFIC match:
 - works_on       → person or org actively building/owning a project or task
 - uses           → person or org using a tool or technology
@@ -211,6 +269,16 @@ function normalizeAnalysis(raw, existingThought) {
           confidence: asNumber(entity?.confidence, 0.5, 0, 1),
         }))
         .filter((entity) => entity.name && VALID_ENTITY_TYPES.has(entity.type) && entity.confidence >= 0.5)
+        // Reject junk topics that slipped past the prompt's exclusion rules
+        // (dates, filenames, config keys, pure numbers, generic nouns).
+        .filter((entity) => {
+          if (entity.type !== "topic") return true;
+          if (isJunkTopic(entity.name)) {
+            console.log(`[topic-filter] Dropping junk topic: "${entity.name}"`);
+            return false;
+          }
+          return true;
+        })
     : [];
 
   const RELATION_ALIASES = { uses_tool: "uses" };
