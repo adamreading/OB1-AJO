@@ -42,6 +42,10 @@ const TOPIC_CONFIG_KEY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+){1,}$/;
 const TOPIC_PURE_NUMBER_RE = /^[£$€]?\s*[\d,]+(\.\d+)?\s*[kKmMbB%]?$/;
 // Tighter than "any slash" — only flag relative/absolute paths or path+ext.
 const TOPIC_FILE_PATH_RE = /^[.\/\\]|^[\w\-]+\/[\w\-./\\]+\.[a-z]{1,5}$/i;
+// Jira / ticket-tracker IDs (PROJ-123 shape) and SKU-like product names
+// (20,000-credit pack). Neither is a durable topic.
+const TOPIC_TICKET_ID_RE = /^[A-Z]{2,5}-\d+$/;
+const TOPIC_SKU_LIKE_RE = /^\d[\d,]*\s*-\s*\w/;
 const TOPIC_BAD_GENERIC_NOUNS = new Set([
   "funder", "funders", "rate book", "rate books", "the meeting", "the system",
   "the bot", "the dashboard", "the tool", "the project", "the platform",
@@ -60,6 +64,8 @@ function classifyJunk(name) {
   if (TOPIC_FILE_PATH_RE.test(t)) return "file-path";
   if (TOPIC_CONFIG_KEY_RE.test(t)) return "config-key";
   if (TOPIC_PURE_NUMBER_RE.test(t)) return "pure-number";
+  if (TOPIC_TICKET_ID_RE.test(t)) return "ticket-id";
+  if (TOPIC_SKU_LIKE_RE.test(t)) return "sku-like";
   if (TOPIC_BAD_GENERIC_NOUNS.has(t.toLowerCase())) return "generic-noun";
   return null;
 }

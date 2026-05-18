@@ -53,6 +53,12 @@ const TOPIC_PURE_NUMBER_RE = /^[£$€]?\s*[\d,]+(\.\d+)?\s*[kKmMbB%]?$/;
 // AND a known extension. Naked slashes inside human text (e.g. "Build / Buy",
 // "£50/month") are NOT file paths.
 const TOPIC_FILE_PATH_RE = /^[.\/\\]|^[\w\-]+\/[\w\-./\\]+\.[a-z]{1,5}$/i;
+// Jira / ticket-tracker IDs: PROJ-123 shape. Always a specific ticket, never
+// a durable topic worth a wiki page.
+const TOPIC_TICKET_ID_RE = /^[A-Z]{2,5}-\d+$/;
+// Product SKU-like strings: "20,000-credit pack", "5-licence pack". Specific
+// numbered offerings — not durable topics.
+const TOPIC_SKU_LIKE_RE = /^\d[\d,]*\s*-\s*\w/;
 const TOPIC_BAD_GENERIC_NOUNS = new Set([
   // Generic categories that should have a specific entity instead
   "funder", "funders", "rate book", "rate books", "the meeting", "the system",
@@ -74,6 +80,8 @@ function isJunkTopic(name) {
   if (TOPIC_FILE_PATH_RE.test(t)) return true;
   if (TOPIC_CONFIG_KEY_RE.test(t)) return true;
   if (TOPIC_PURE_NUMBER_RE.test(t)) return true;
+  if (TOPIC_TICKET_ID_RE.test(t)) return true;
+  if (TOPIC_SKU_LIKE_RE.test(t)) return true;
   if (TOPIC_BAD_GENERIC_NOUNS.has(t.toLowerCase())) return true;
   return false;
 }
