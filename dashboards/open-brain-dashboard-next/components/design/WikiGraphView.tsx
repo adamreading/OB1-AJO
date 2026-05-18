@@ -149,6 +149,9 @@ function parseSections(markdown: string): SectionMap {
     else if (h.includes("timeline")) result.timeline = body;
     // Always
     else if (h.includes("open question")) result.openQuestions = body;
+    // Skip parsed-markdown "Relationships" — the right-column live edges
+    // card is the source-of-truth and they'd otherwise duplicate.
+    else if (h.includes("relationship")) continue;
     else restByHeading.set(s.heading, body);
   }
   result.rest = Array.from(restByHeading.entries()).map(([heading, body]) => ({ heading, body }));
@@ -1191,6 +1194,15 @@ export function WikiGraphView({
                   {renderMarkdownInline(sections.detailed, entityMap, onSelectSlug, selected.slug)}
                 </Section>
               )}
+              {/* Reflections live here in the left column, immediately after
+                  Detailed and before any rest sections / legacy structure.
+                  The right-column Relationships card is the live graph view;
+                  Reflections is the user's own commentary attached to thoughts
+                  linked to this entity, so it pairs naturally with the prose. */}
+              <ReflectionsCard
+                reflections={reflections}
+                loading={reflectionsLoading}
+              />
               {/* Legacy structure — shown for pages compiled before the
                   TLDR/Detailed prompt change. Will disappear after regen. */}
               {sections?.keyFacts && (
@@ -1219,18 +1231,17 @@ export function WikiGraphView({
                 )}
             </div>
 
-            {/* Right — Relationships, Reflections, Open Questions, Curator Note */}
+            {/* Right — Relationships (live graph), Open Questions, Curator Note.
+                Reflections moved to the left column (after Detailed) — Adam's
+                preference, and the live graph Relationships here is the
+                source-of-truth (the LLM's parsed-markdown Relationships used
+                to render here too but was a derivative duplicate). */}
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <RelationshipsCard
                 edges={edges}
                 loading={edgesLoading}
                 entityTypes={entityTypes}
                 onSelectSlug={onSelectSlug}
-              />
-
-              <ReflectionsCard
-                reflections={reflections}
-                loading={reflectionsLoading}
               />
 
               {sections?.openQuestions && (
