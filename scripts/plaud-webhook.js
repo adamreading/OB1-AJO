@@ -31,10 +31,12 @@ const http = require("node:http");
 const https = require("node:https");
 const fs = require("node:fs");
 const path = require("node:path");
+const { createClient } = require("@supabase/supabase-js");
 
 const PORT = Number(process.env.PLAUD_WEBHOOK_PORT || 4001);
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const BRAIN_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabase = createClient(SUPABASE_URL, BRAIN_KEY);
 const OLLAMA_BASE = (process.env.OLLAMA_URL || "http://localhost:11434/api").replace(/\/+$/, "");
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:30b";
 
@@ -203,6 +205,184 @@ async function capturePending({ content, decision, updateTargetId, originalConte
   return apiCall("POST", "/capture-pending", body);
 }
 
+// Find all in-flight pending UPDATEs that target any of the candidate
+// serial_ids. Returns a Map<target_serial_id, { serial_id, uuid, content,
+// amend_count }>. Used by the curator to amend instead of duplicate-insert
+// when a previous Plaud entry already proposed an update to the same target.
+async function findPendingUpdatesForTargets(targetSerialIds) {
+  const map = new Map();
+  if (!targetSerialIds.length) return map;
+  const ids = targetSerialIds.map(String);
+  const { data, error } = await supabase
+    .from("thoughts")
+    .select("id, serial_id, content, metadata")
+    .eq("source_type", "plaud")
+    .filter("metadata->>review_status", "eq", "pending_review")
+    .filter("metadata->>ollama_decision", "eq", "UPDATE")
+    .filter("metadata->>update_target_id", "in", `(${ids.join(",")})`);
+  if (error) {
+    console.error("[plaud-webhook] findPendingUpdatesForTargets failed:", error.message);
+    return map;
+  }
+  for (const row of data ?? []) {
+    const target = Number(row.metadata?.update_target_id);
+    if (!Number.isFinite(target)) continue;
+    map.set(target, {
+      uuid: row.id,
+      serial_id: row.serial_id,
+      content: row.content,
+      amend_count: Number(row.metadata?.amend_count ?? 0),
+    });
+  }
+  return map;
+}
+
+// Either UPDATE an existing pending UPDATE row for this target, OR insert
+// a fresh pending row via /capture-pending. Single entry point for both
+// the first proposal and the Nth amendment within a session — keeps the
+// review queue at one row per target instead of N near-duplicates.
+async function writeOrAmendPendingUpdate({
+  targetSerialId,
+  newContent,
+  originalContent,
+  type,
+  classification,
+  actionItems,
+  existingPending,
+}) {
+  if (existingPending) {
+    const nextAmendCount = (existingPending.amend_count ?? 0) + 1;
+    // Read latest metadata so we don't drop unrelated fields.
+    const { data: cur } = await supabase
+      .from("thoughts")
+      .select("metadata")
+      .eq("id", existingPending.uuid)
+      .single();
+    const meta = { ...(cur?.metadata ?? {}) };
+    meta.amend_count = nextAmendCount;
+    meta.last_amended_at = new Date().toISOString();
+    if (Array.isArray(actionItems) && actionItems.length > 0) {
+      const prior = Array.isArray(meta.action_items) ? meta.action_items : [];
+      // Dedupe by string equality
+      const merged = Array.from(new Set([...prior, ...actionItems]));
+      meta.action_items = merged;
+    }
+    const updatePayload = {
+      content: newContent,
+      metadata: meta,
+      updated_at: new Date().toISOString(),
+    };
+    if (type) updatePayload.type = type;
+    if (classification) updatePayload.classification = classification;
+    const { data, error } = await supabase
+      .from("thoughts")
+      .update(updatePayload)
+      .eq("id", existingPending.uuid)
+      .select("serial_id")
+      .single();
+    if (error) {
+      return { ok: false, error: error.message };
+    }
+    return { ok: true, amended: true, amend_count: nextAmendCount, serial_id: data.serial_id };
+  }
+
+  const r = await capturePending({
+    content: newContent,
+    decision: "UPDATE",
+    updateTargetId: targetSerialId,
+    originalContent,
+    type,
+    classification,
+    actionItems,
+  });
+  if (r.status >= 200 && r.status < 300) {
+    return { ok: true, amended: false, amend_count: 0, serial_id: r.body?.thought_id, status: r.status };
+  }
+  return { ok: false, error: `capture-pending status ${r.status}` };
+}
+
+// Recovery operation for the pre-fix duplicate-pending state. Pull all
+// pending UPDATE rows for a target, merge their bodies via Qwen3 into a
+// single canonical merged_content, write that to the oldest row, delete
+// the rest. Returns a small summary.
+async function consolidatePendingUpdatesForTarget(targetSerialId) {
+  if (!Number.isFinite(targetSerialId)) return { ok: false, error: "invalid target serial_id" };
+  const { data: rows, error } = await supabase
+    .from("thoughts")
+    .select("id, serial_id, content, metadata, created_at, type, classification")
+    .eq("source_type", "plaud")
+    .filter("metadata->>review_status", "eq", "pending_review")
+    .filter("metadata->>ollama_decision", "eq", "UPDATE")
+    .filter("metadata->>update_target_id", "eq", String(targetSerialId))
+    .order("created_at", { ascending: true });
+  if (error) return { ok: false, error: error.message };
+  if (!rows || rows.length === 0) return { ok: true, found: 0, note: "no pending updates for this target" };
+  if (rows.length === 1) return { ok: true, found: 1, note: "single pending row already — nothing to consolidate" };
+
+  // Pull the target's original content for context
+  const { data: target } = await supabase
+    .from("thoughts")
+    .select("content")
+    .eq("serial_id", targetSerialId)
+    .maybeSingle();
+  const originalBody = String(target?.content ?? rows[0].metadata?.original_content ?? "");
+
+  // Ask Qwen3 to merge the N pending bodies into one canonical body that
+  // supersedes all of them. Lay them out in chronological order so the
+  // model knows which dated sections came from which proposal.
+  const proposals = rows
+    .map((r, i) => `--- PROPOSAL ${i + 1} (pending #${r.serial_id}, created ${String(r.created_at).slice(0, 19)}) ---\n${String(r.content ?? "").trim()}`)
+    .join("\n\n");
+
+  const prompt = `/no_think
+You are merging ${rows.length} parallel proposed updates to the SAME target thought into one canonical merged body. Each proposal was produced independently by the same curator over a short window and each proposal already contains the target's original body PLUS one or more dated sections this proposal wants to add.
+
+ORIGINAL TARGET BODY (current state of thought #${targetSerialId}):
+${originalBody.slice(0, 2000)}
+
+PROPOSED UPDATES (chronological):
+${proposals}
+
+Produce a single canonical merged body that supersedes ALL the proposals. Rules:
+- Start with the original target body intact (the lead-in paragraph(s) before any dated section).
+- Then list dated sections in chronological order (oldest first), one per unique date.
+- For each date, consolidate the content from every proposal that touched that date — deduplicate, keep all distinct facts, preserve numbers/names/decisions verbatim.
+- Do not invent content. Do not drop content that appears in any proposal.
+- Output ONLY the merged body text, nothing else — no preamble, no JSON, no fences.`;
+
+  const merged = (await ollamaGenerate(prompt)).trim();
+  if (!merged || merged.length < 100) {
+    return { ok: false, error: "merge LLM returned empty or too-short content" };
+  }
+
+  // Keep the oldest row, update its content + bump amend_count, delete the rest
+  const survivor = rows[0];
+  const toDelete = rows.slice(1).map((r) => r.id);
+  const survivorMeta = { ...(survivor.metadata ?? {}) };
+  survivorMeta.amend_count = (Number(survivorMeta.amend_count) || 0) + rows.length - 1;
+  survivorMeta.last_amended_at = new Date().toISOString();
+  survivorMeta.consolidated_from = rows.slice(1).map((r) => r.serial_id);
+
+  const { error: updErr } = await supabase
+    .from("thoughts")
+    .update({ content: merged, metadata: survivorMeta, updated_at: new Date().toISOString() })
+    .eq("id", survivor.id);
+  if (updErr) return { ok: false, error: `survivor update failed: ${updErr.message}` };
+
+  if (toDelete.length > 0) {
+    const { error: delErr } = await supabase.from("thoughts").delete().in("id", toDelete);
+    if (delErr) return { ok: false, error: `delete duplicates failed: ${delErr.message}` };
+  }
+
+  return {
+    ok: true,
+    found: rows.length,
+    consolidated_into: survivor.serial_id,
+    deleted: rows.slice(1).map((r) => r.serial_id),
+    merged_length: merged.length,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Slug derivation (matches wiki convention used by generate-wiki.mjs)
 // ─────────────────────────────────────────────────────────────────────
@@ -357,6 +537,21 @@ function formatWikiAnchors(anchors) {
   return anchors.map((a) => `- ${a.title}  (slug: ${a.slug}, type: ${a.type})`).join("\n");
 }
 
+function formatPendingUpdates(candidates, pendingByTarget) {
+  const blocks = [];
+  for (const c of candidates) {
+    const p = pendingByTarget.get(c.id);
+    if (!p) continue;
+    blocks.push(
+      `→ Target #${c.id} already has a PENDING update in the review queue (amend_count ${p.amend_count}). The current proposed-new-state of #${c.id} is:\n${String(p.content ?? "").slice(0, 1200)}`
+    );
+  }
+  if (blocks.length === 0) {
+    return "(no pending updates for these candidates — your merged_content can be built straight from the candidate body)";
+  }
+  return blocks.join("\n\n");
+}
+
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -369,7 +564,7 @@ function safeJsonParse(text) {
   return null;
 }
 
-async function curatorDecide(entry, candidates, wikiAnchors) {
+async function curatorDecide(entry, candidates, wikiAnchors, pendingByTarget = new Map()) {
   const template = loadCuratorPrompt();
   if (!template) {
     console.error("[plaud-webhook] Curator prompt missing — defaulting to CAPTURE");
@@ -383,7 +578,8 @@ async function curatorDecide(entry, candidates, wikiAnchors) {
     .replace(/\{\{ENTRY_SEARCH_HINTS\}\}/g, entry.search_hints.join("\n") || "(none specified)")
     .replace(/\{\{ENTRY_BODY\}\}/g, entry.content)
     .replace(/\{\{CANDIDATES_BLOCK\}\}/g, formatCandidates(candidates))
-    .replace(/\{\{WIKI_ANCHORS_BLOCK\}\}/g, formatWikiAnchors(wikiAnchors));
+    .replace(/\{\{WIKI_ANCHORS_BLOCK\}\}/g, formatWikiAnchors(wikiAnchors))
+    .replace(/\{\{PENDING_UPDATES_BLOCK\}\}/g, formatPendingUpdates(candidates, pendingByTarget));
 
   const response = await ollamaGenerate(prompt);
   const parsed = safeJsonParse(response);
@@ -650,16 +846,28 @@ async function processRecording(payload) {
     const label = `entry ${i + 1}/${entries.length}`;
 
     try {
-      // Pull candidate thoughts via /search per SEARCH_HINTS
-      const candidateMap = new Map(); // dedupe by id
+      // Pull candidate thoughts via /search per SEARCH_HINTS. Filter pending
+      // review rows out of candidates — they're surfaced separately to the
+      // curator as "in-flight pending updates" so the curator can amend
+      // them rather than treat them as new targets.
+      const candidateMap = new Map();
       const hintsToSearch = entry.search_hints.length > 0 ? entry.search_hints : [entry.content.slice(0, 200)];
       for (const hint of hintsToSearch) {
         const results = await searchThoughts(hint, entry.classification);
         for (const r of results) {
+          if (r.metadata?.review_status === "pending_review") continue;
           if (!candidateMap.has(r.id)) candidateMap.set(r.id, r);
         }
       }
       const candidates = [...candidateMap.values()].slice(0, 8);
+
+      // For each candidate, check whether a pending UPDATE row already
+      // proposes a change to it. If so, surface it to the curator so the
+      // merged_content can supersede that pending body rather than
+      // duplicating it. This is the fix for the "6 UPDATEs all wiping
+      // each other" bug.
+      const candidateSerialIds = candidates.map((c) => c.id).filter((n) => Number.isFinite(n));
+      const pendingByTarget = await findPendingUpdatesForTargets(candidateSerialIds);
 
       // Look up canonical wiki anchors for each named entity
       const wikiAnchors = [];
@@ -668,8 +876,8 @@ async function processRecording(payload) {
         if (anchor) wikiAnchors.push(anchor);
       }
 
-      // Hand to curator
-      const decision = await curatorDecide(entry, candidates, wikiAnchors);
+      // Hand to curator with pending state baked in
+      const decision = await curatorDecide(entry, candidates, wikiAnchors, pendingByTarget);
       console.log(`[plaud-webhook] ${label}: ${decision.decision.toUpperCase()}${decision.target_id ? ` #${decision.target_id}` : ""} (conf ${decision.confidence.toFixed(2)}) — ${decision.reasoning}`);
 
       // Raise open question if curator confidence is low
@@ -703,19 +911,44 @@ async function processRecording(payload) {
           runLog.actions.capture.push(`${label}: fallback (target not found) — ${r.body?.thought_id ?? r.status}`);
           continue;
         }
+        const existingPending = pendingByTarget.get(decision.target_id);
         const merged = decision.merged_content && decision.merged_content.trim().length > 50
           ? decision.merged_content.trim()
-          : `${target.content}\n\n## ${todayIso()}\n${entry.content}`;
-        const r = await capturePending({
-          content: merged,
-          decision: "UPDATE",
-          updateTargetId: decision.target_id,
+          : `${(existingPending?.content) ?? target.content}\n\n## ${todayIso()}\n${entry.content}`;
+        const w = await writeOrAmendPendingUpdate({
+          targetSerialId: decision.target_id,
+          newContent: merged,
           originalContent: target.content,
           type: entry.type,
           classification: entry.classification,
           actionItems: entry.action_items,
+          existingPending,
         });
-        runLog.actions.update.push(`${label}: #${decision.target_id} → #${r.body?.thought_id ?? "?"}`);
+        if (!w.ok) {
+          console.error(`[plaud-webhook] ${label}: UPDATE write failed — ${w.error}`);
+          runLog.errors.push({ entry: i + 1, message: `update write failed: ${w.error}` });
+          continue;
+        }
+        if (w.amended) {
+          // Reflect the amendment in pendingByTarget so subsequent entries
+          // in THIS same session see the latest pending body. Without this,
+          // entry 3 of the same Plaud bundle would re-fetch from DB but the
+          // map we already built wouldn't show the just-amended content.
+          pendingByTarget.set(decision.target_id, {
+            ...existingPending,
+            content: merged,
+            amend_count: w.amend_count,
+          });
+          runLog.actions.update.push(`${label}: #${decision.target_id} ← amended pending #${w.serial_id} (amend ${w.amend_count})`);
+        } else {
+          pendingByTarget.set(decision.target_id, {
+            uuid: null,
+            serial_id: w.serial_id,
+            content: merged,
+            amend_count: 0,
+          });
+          runLog.actions.update.push(`${label}: #${decision.target_id} → new pending #${w.serial_id ?? "?"}`);
+        }
         continue;
       }
 
@@ -807,6 +1040,28 @@ const server = http.createServer((req, res) => {
     console.log(`[plaud-webhook] /forget: removed ${removed} entries (file_id=${fileId})`);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ removed, remaining: cursor.processed_file_ids.length }));
+    return;
+  }
+
+  // POST /consolidate-pending?target=<serial_id> — recovery operation for
+  // the pre-fix duplicate-pending bug. Find all pending UPDATE rows for a
+  // single target, ask Qwen3 to merge their bodies into one canonical
+  // pending merged_content, write that to the oldest row, delete the
+  // rest. Run once per affected target. Idempotent — running it on a
+  // target with only one pending UPDATE is a no-op.
+  if (req.method === "POST" && req.url.startsWith("/consolidate-pending")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const target = url.searchParams.get("target");
+    if (!target) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "missing ?target=<serial_id>" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ received: true, target }));
+    consolidatePendingUpdatesForTarget(Number(target))
+      .then((r) => console.log(`[plaud-webhook] /consolidate-pending target=${target}: ${JSON.stringify(r)}`))
+      .catch((err) => console.error(`[plaud-webhook] /consolidate-pending target=${target} error:`, err.message));
     return;
   }
 

@@ -13,9 +13,16 @@ The webhook substitutes these placeholders before calling Ollama:
 - `{{ENTRY_SEARCH_HINTS}}` — the SEARCH_HINTS phrases (one per line)
 - `{{CANDIDATES_BLOCK}}` — pre-formatted list of candidate thoughts (id,
   created_at, classification, snippet). May be empty if `/search` returned
-  nothing.
+  nothing. Pending review rows are filtered OUT — see PENDING_UPDATES below.
 - `{{WIKI_ANCHORS_BLOCK}}` — pre-formatted list of wiki pages that exist for
   the entities mentioned in this entry. May be empty.
+- `{{PENDING_UPDATES_BLOCK}}` — for each candidate above, whether a pending
+  UPDATE already exists in the review queue for it, and the current
+  proposed-new-state body of that pending update. Critical: when this is
+  non-empty for a target you choose to UPDATE, your `merged_content` must
+  supersede BOTH the original candidate body AND the existing pending body.
+  This prevents N entries from a single Plaud session from producing N
+  near-duplicate pending rows that wipe each other on approval.
 - `{{TODAY}}` — today's date as YYYY-MM-DD, for the 14-day IGNORE window
   calculation.
 
@@ -41,6 +48,10 @@ NEW ENTRY:
 CANDIDATE EXISTING THOUGHTS (top matches from search across the brain):
 {{CANDIDATES_BLOCK}}
 
+PENDING IN-FLIGHT UPDATES already queued for these candidates (waiting for
+the user to approve in the dashboard /review page):
+{{PENDING_UPDATES_BLOCK}}
+
 CANONICAL WIKI ANCHORS for entities mentioned in this entry:
 {{WIKI_ANCHORS_BLOCK}}
 
@@ -60,11 +71,24 @@ DECISION RULES (apply in order — stop at the first that fits):
      new fact, new outcome), AND
    - merging them is cleaner than keeping two thoughts.
    When you choose UPDATE you MUST also produce `merged_content` — the full
-   re-authored body that should replace the target. Take the target's
-   existing body, append a dated section (`## {{TODAY}} — short summary`)
-   plus the new entry's substance, and lightly de-duplicate. Target
-   length 150-350 words. Do NOT include any meta-commentary or your own
-   reasoning in `merged_content`.
+   re-authored body that should replace the target.
+
+   IF the PENDING IN-FLIGHT UPDATES section shows a pending body for this
+   target, your `merged_content` is built from THAT pending body, not the
+   original candidate body. Take the pending body, weave the new entry's
+   facts into it coherently (add to the most recent dated section if it's
+   today's date, or append a new dated section `## {{TODAY}} — short summary`
+   otherwise), and lightly de-duplicate. The pending row will be amended
+   in place — your output replaces it.
+
+   IF NO pending body exists, take the candidate's existing body, append a
+   dated section (`## {{TODAY}} — short summary`) plus the new entry's
+   substance, lightly de-duplicate. A fresh pending row will be created.
+
+   Either way: target length 300-800 words (can grow with each amendment).
+   Do NOT include any meta-commentary or your own reasoning in
+   `merged_content`. Do NOT shrink content already in the pending body
+   unless it's clearly redundant.
 
 3. CAPTURE if neither IGNORE nor UPDATE applies. This is genuinely new
    strategic information.
