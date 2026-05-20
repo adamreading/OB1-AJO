@@ -156,7 +156,7 @@ def _load_ob1_config(hermes_home: str) -> dict:
     config["project_id"] = str(project_id) if project_id else None
     config["auto_recall"] = _as_bool(config.get("auto_recall"), True)
     config["auto_capture"] = _as_bool(config.get("auto_capture"), True)
-    config["include_unconfirmed_recall"] = _as_bool(config.get("include_unconfirmed_recall"), False)
+    config["include_unconfirmed_recall"] = _as_bool(config.get("include_unconfirmed_recall"), True)
     config["require_review_by_default"] = _as_bool(config.get("require_review_by_default"), True)
     mode = str(config.get("workspace_mode") or "shared").strip().lower()
     config["workspace_mode"] = mode if mode in ("shared", "per-agent") else "shared"
