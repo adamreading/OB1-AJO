@@ -148,12 +148,33 @@ function canonicalisePub(rawName) {
 // ─── 1. Identify newsletter thoughts ─────────────────────────────────
 
 async function findNewsletterThoughts() {
-  // Pull all thoughts that match the broad text pattern
+  // Broad DB filter that catches Pattern A (starts with Newsletter —),
+  // Pattern C (substack.com URL), AND Pattern B (insight title followed
+  // by "(<Publication>, <Date>)" near the top). Pattern B can't be cheap
+  // ilike-matched, so we pull anything containing one of the known
+  // publication-name fragments OR a date-in-parens shape, then let the
+  // detection function decide.
+  const orFilters = [
+    "content.ilike.Newsletter —%",
+    "content.ilike.%substack.com%",
+    "content.ilike.%Newsletter%",
+    "content.ilike.%Substack%",
+    // Known publications by name + author surname
+    "content.ilike.%Nate's Newsletter%",
+    "content.ilike.%Ken Huang%",
+    "content.ilike.%Claude Notebook%",
+    "content.ilike.%OpenClaw%",
+    "content.ilike.%Excellent Prompts%",
+    "content.ilike.%Molly O'Shea%",
+    "content.ilike.%Sourcery%",
+    "content.ilike.%Philippa Hardman%",
+    "content.ilike.%Ruben Hassid%",
+  ].join(",");
   const { data, error } = await sb
     .from("thoughts")
     .select("id, serial_id, type, classification, content, metadata")
-    .or("content.ilike.Newsletter —%,content.ilike.%substack.com%")
-    .limit(2000);
+    .or(orFilters)
+    .limit(5000);
   if (error) throw error;
   const matches = [];
   for (const t of data || []) {

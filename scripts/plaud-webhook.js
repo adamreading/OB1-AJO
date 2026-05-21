@@ -494,7 +494,11 @@ function parseEntries(summaryMarkdown) {
     if (bodyStart < 0) continue;
 
     const bodyLines = lines.slice(bodyStart, actionsStart >= 0 ? actionsStart : undefined);
-    const body = bodyLines.join("\n").trim();
+    // Strip a leading "Body:" / "BODY:" label — the Plaud template prompt
+    // includes a literal "[Body: 150–250 words...]" placeholder and GPT-5.5
+    // sometimes leaves the "Body:" prefix verbatim in the output instead of
+    // replacing it with prose. Anything else is left alone.
+    const body = bodyLines.join("\n").trim().replace(/^body:\s*/i, "");
     if (!body) continue;
 
     const actions = [];
