@@ -165,15 +165,26 @@ app.get("/health/quotas", async (c) => {
       },
     },
     {
-      name: "edges",
+      name: "edges (max per entity)",
       table: "edges",
-      cap: 1000, // PostgREST default for /entities/:id/edges
-      note: "Per-entity edges typically small; project-wide cap not user-facing yet.",
+      cap: 5000, // Per-side cap of /entities/:id/edges
+      note: "The truncation risk for /entities/:id/edges is per-entity, not total. We report the max edges connected to any single entity here so the warning fires only when a real entity is approaching the per-query cap (5000 per side).",
       countQuery: async () => {
-        const { count, error } = await supabase
+        // Fetch from/to ids and compute the worst-case per-entity count.
+        // For ~1000-edges-total brain this is fast; if the graph grows past
+        // ~50k edges this should move to a Postgres RPC for efficiency.
+        const { data, error } = await supabase
           .from("edges")
-          .select("id", { count: "exact", head: true });
-        return { count: count ?? null, error: error?.message ?? null };
+          .select("from_entity_id, to_entity_id");
+        if (error || !data) return { count: null, error: error?.message ?? "edges fetch failed" };
+        const counts = new Map<number, number>();
+        for (const e of data) {
+          counts.set(e.from_entity_id, (counts.get(e.from_entity_id) ?? 0) + 1);
+          counts.set(e.to_entity_id, (counts.get(e.to_entity_id) ?? 0) + 1);
+        }
+        let maxPerEntity = 0;
+        for (const v of counts.values()) if (v > maxPerEntity) maxPerEntity = v;
+        return { count: maxPerEntity, error: null };
       },
     },
   ];
@@ -1500,13 +1511,19 @@ app.get("/entities/:id/edges", async (c) => {
   const id = Number(c.req.param("id"));
   if (!id || isNaN(id)) return c.json({ error: "Valid entity id required" }, 400, corsHeaders);
 
+  // Explicit per-side cap so we don't rely on PostgREST's default. The most
+  // connected entity today has ~170 edges; 5000 leaves ~30x headroom for
+  // graph growth without ever silently truncating.
+  const PER_SIDE_LIMIT = 5000;
   const [outRes, inRes] = await Promise.all([
     supabase.from("edges")
       .select("id, from_entity_id, to_entity_id, relation, support_count, confidence, updated_at")
-      .eq("from_entity_id", id),
+      .eq("from_entity_id", id)
+      .limit(PER_SIDE_LIMIT),
     supabase.from("edges")
       .select("id, from_entity_id, to_entity_id, relation, support_count, confidence, updated_at")
-      .eq("to_entity_id", id),
+      .eq("to_entity_id", id)
+      .limit(PER_SIDE_LIMIT),
   ]);
   if (outRes.error) return c.json({ error: outRes.error.message }, 500, corsHeaders);
   if (inRes.error) return c.json({ error: inRes.error.message }, 500, corsHeaders);
