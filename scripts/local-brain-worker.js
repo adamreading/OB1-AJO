@@ -36,9 +36,9 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const VALID_TYPES = new Set(["idea", "task", "meeting", "reference", "journal", "decision", "lesson", "observation"]);
+const VALID_TYPES = new Set(["idea", "task", "meeting", "reference", "journal", "decision", "lesson", "observation", "newsletter"]);
 const VALID_CONTEXTS = new Set(["work", "personal"]);
-const VALID_ENTITY_TYPES = new Set(["person", "project", "topic", "tool", "organization", "place"]);
+const VALID_ENTITY_TYPES = new Set(["person", "project", "topic", "tool", "organization", "place", "newsletter"]);
 
 // Belt-and-braces filter for junk topic entities the prompt is supposed to
 // reject but Ollama sometimes returns anyway. Run AFTER the prompt-side
@@ -97,8 +97,24 @@ const VALID_RELATIONS = new Set([
   "located_in",        // org|place → place
   "related_to",        // topic ↔ topic weak fallback only
   "co_occurs_with",    // low-confidence proximity-only (symmetric)
+  "published_by",      // newsletter → person  (the publication's author)
+  "references",        // any → newsletter     (a thought cites/discusses the newsletter article)
 ]);
 const SYMMETRIC_RELATIONS = new Set(["co_occurs_with", "related_to", "collaborates_with", "integrates_with", "alternative_to"]);
+// Newsletter entities are READING SOURCES, not participants. They cannot be
+// the SOURCE of an action-style directional edge. Used to filter out the
+// hallucinated "Newsletter X works_on Project Y" edges the model was
+// producing.
+const NEWSLETTER_DISALLOWED_AS_SOURCE = new Set([
+  "works_on", "uses", "uses_tool", "evaluates", "integrates_with",
+  "alternative_to", "collaborates_with", "member_of", "located_in", "related_to",
+]);
+// Newsletter entities cannot be the TARGET of action-style directional edges
+// either (e.g. "Person works_on Newsletter" is wrong unless via published_by).
+const NEWSLETTER_DISALLOWED_AS_TARGET = new Set([
+  "works_on", "uses", "uses_tool", "evaluates", "integrates_with",
+  "alternative_to", "collaborates_with", "member_of", "located_in",
+]);
 
 let graphAvailable = null;
 
@@ -183,7 +199,7 @@ Return this exact JSON shape:
   "importance": 1,
   "summary": "short plain-language summary",
   "entities": [
-    {"name": "specific name", "type": "person|project|topic|tool|organization|place", "confidence": 0.0}
+    {"name": "specific name", "type": "person|project|topic|tool|organization|place|newsletter", "confidence": 0.0}
   ],
   "relationships": [
     {"from": "entity_name", "to": "entity_name", "relation": "relation_name", "confidence": 0.0}
@@ -204,6 +220,7 @@ What each entity type means:
 - tool         → a named software product or service. "Plaud", "UiPath", "Qlik". Not categories like "the database" or feature names like "the dashboard".
 - place        → a named geographic location. "Reading", "London". Not "the office" or "the meeting room".
 - topic        → a DURABLE concept, methodology, idea, or theme that recurs across captures and would deserve a wiki page in three months. "Agentic AI", "Vector embeddings", "Per-funder concurrency". The durability test is the key gate: would you write a wiki page about this in 3 months?
+- newsletter   → a NAMED PUBLICATION the user reads — a Substack newsletter, blog, trade journal, or similar serial publication. "Nate's Newsletter", "Ken Huang's Substack", "The Pragmatic Engineer". Use the PUBLICATION name, not a specific issue title. NOT individual articles, NOT one-off blog posts on someone's personal page.
 
 DO NOT extract as a topic (or any entity type):
 - Dates or date-like strings — "2026-05-19", "Q1 2026", "early November", "end of quarter".
@@ -228,6 +245,8 @@ Relationship relation values — pick the MOST SPECIFIC match:
 - located_in     → organization or place within a geographic place
 - related_to     → weak link between two topics only; do NOT use for person↔tool or person↔project
 - co_occurs_with → use ONLY when the text merely mentions two things together without stating any relationship; confidence must be ≤ 0.6
+- published_by   → newsletter → person   (the publication's author/editor)
+- references     → any → newsletter      (the thought cites or discusses an article from this newsletter; this is the ONLY directional edge a newsletter can be the TARGET of besides published_by)
 
 Critical relationship rules:
 - Only create a directional edge (works_on, uses, evaluates, member_of, located_in) when the source text EXPLICITLY states the subject→relation→object. Do NOT infer from co-occurrence alone.
@@ -236,7 +255,19 @@ Critical relationship rules:
 - Minimum confidence for directional edges: 0.65. Below that, downgrade to co_occurs_with or omit.
 - Relationship endpoints must exactly match returned entity names.
 - If there are no useful entities or relationships, return empty arrays.
-- Do not include markdown, comments, or extra keys.`;
+- Do not include markdown, comments, or extra keys.
+
+NEWSLETTER RULES — read carefully:
+A "newsletter" entity represents an EXTERNAL PUBLICATION the user's automation harvested from their email inbox — NOT a participant in the user's work. Newsletter-typed thoughts come from an agent that reads emails on the user's behalf and captures articles flagged as potentially relevant to the user's projects. The user has not necessarily read them personally. When a thought captures an article alongside one of the user's own projects/people/tools, the agent is noting a possible relevance — NOT claiming the newsletter author is working with the user.
+
+- Newsletters can ONLY participate in these edges:
+    newsletter --published_by--> person          (newsletter has an author)
+    anything   --references-----> newsletter      (a thought cites the newsletter)
+- A newsletter CANNOT be the source of: works_on, uses, evaluates, integrates_with, collaborates_with, member_of, located_in, related_to. The author wrote an article — they are NOT working on the user's projects just because the user found the article relevant.
+- A newsletter CANNOT be the target of: works_on, uses, evaluates, integrates_with, etc. The user READS the newsletter, they don't "work on" it or "use" it like a tool.
+- When the user's project (e.g. "Consultant Guardrail Bot") and a newsletter both appear in the same thought, do NOT emit a co_occurs_with edge between them. Use references (project → newsletter) ONLY IF the thought explicitly cites the newsletter as a source of inspiration or insight for that project. Otherwise omit.
+- The author of a newsletter ("Nate Jones", "Ken Huang") is a separate person entity. They are not the same as the newsletter itself. If both appear, create both entities and link them with published_by.
+- The user themselves never works_on a newsletter unless they are literally the publisher.`;
 }
 
 async function callOllama(content) {
@@ -267,7 +298,14 @@ function normalizeAnalysis(raw, existingThought) {
   const rawType = String(
     existingClassification && existingType ? existingType : raw.type || existingType || "observation",
   ).toLowerCase();
-  const rawContext = String(existingClassification || raw.context || "personal").toLowerCase();
+  // Newsletter thoughts default to personal context (professional reading,
+  // not Work). Override even if Ollama said work — newsletters are
+  // never the user's job. Existing classification on the thought wins
+  // only when the type isn't newsletter.
+  const newsletterForcesPersonal = rawType === "newsletter";
+  const rawContext = newsletterForcesPersonal
+    ? "personal"
+    : String(existingClassification || raw.context || "personal").toLowerCase();
 
   const entities = Array.isArray(raw.entities)
     ? raw.entities
@@ -290,7 +328,9 @@ function normalizeAnalysis(raw, existingThought) {
     : [];
 
   const RELATION_ALIASES = { uses_tool: "uses" };
-  const entityNames = new Set(entities.map((entity) => normalizeName(entity.name)));
+  // Build a name → type map so we can enforce newsletter-specific edge rules.
+  const entityTypeByName = new Map(entities.map((entity) => [normalizeName(entity.name), entity.type]));
+  const entityNames = new Set(entityTypeByName.keys());
   const relationships = Array.isArray(raw.relationships)
     ? raw.relationships
         .map((rel) => {
@@ -302,15 +342,45 @@ function normalizeAnalysis(raw, existingThought) {
             confidence: asNumber(rel?.confidence, 0.5, 0, 1),
           };
         })
-        .filter((rel) =>
-          rel.from &&
-          rel.to &&
-          normalizeName(rel.from) !== normalizeName(rel.to) &&
-          entityNames.has(normalizeName(rel.from)) &&
-          entityNames.has(normalizeName(rel.to)) &&
-          VALID_RELATIONS.has(rel.relation) &&
-          rel.confidence >= 0.5,
-        )
+        .filter((rel) => {
+          if (
+            !rel.from ||
+            !rel.to ||
+            normalizeName(rel.from) === normalizeName(rel.to) ||
+            !entityNames.has(normalizeName(rel.from)) ||
+            !entityNames.has(normalizeName(rel.to)) ||
+            !VALID_RELATIONS.has(rel.relation) ||
+            rel.confidence < 0.5
+          ) return false;
+
+          // Newsletter sanity rules — the model occasionally hallucinates
+          // edges like "Nate's Newsletter works_on Consultant Guardrail Bot"
+          // when the user just READ an article that's RELEVANT to a project.
+          // Filter these out so newsletter entities can only participate via
+          // `references` (something → newsletter) or `published_by`
+          // (newsletter → person).
+          const fromType = entityTypeByName.get(normalizeName(rel.from));
+          const toType = entityTypeByName.get(normalizeName(rel.to));
+          if (fromType === "newsletter" && NEWSLETTER_DISALLOWED_AS_SOURCE.has(rel.relation)) {
+            console.log(`[newsletter-filter] Dropping ${rel.relation}: ${rel.from} → ${rel.to}`);
+            return false;
+          }
+          if (toType === "newsletter" && NEWSLETTER_DISALLOWED_AS_TARGET.has(rel.relation)) {
+            console.log(`[newsletter-filter] Dropping ${rel.relation}: ${rel.from} → ${rel.to}`);
+            return false;
+          }
+          // published_by must be newsletter → person
+          if (rel.relation === "published_by" && !(fromType === "newsletter" && toType === "person")) {
+            console.log(`[newsletter-filter] published_by must be newsletter → person; dropping`);
+            return false;
+          }
+          // references must point AT a newsletter (anything → newsletter)
+          if (rel.relation === "references" && toType !== "newsletter") {
+            console.log(`[newsletter-filter] references must target a newsletter; dropping`);
+            return false;
+          }
+          return true;
+        })
     : [];
 
   return {

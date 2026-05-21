@@ -678,9 +678,12 @@ app.post("/capture-pending", async (c) => {
     meta.action_items = action_items.filter((a: unknown) => typeof a === "string" && a.trim().length > 0);
   }
 
-  const VALID_TYPES = ["task","idea","observation","reference","person_note","decision","lesson","meeting","journal"];
+  const VALID_TYPES = ["task","idea","observation","reference","person_note","decision","lesson","meeting","journal","newsletter"];
   const resolvedType = (typeof type === "string" && VALID_TYPES.includes(type)) ? type : "observation";
-  const resolvedClassification = (classification === "work" || classification === "personal") ? classification : "work";
+  // Newsletter captures default to personal (professional reading, not work) —
+  // anything else falls back to work unless the caller said otherwise.
+  const classificationDefault = resolvedType === "newsletter" ? "personal" : "work";
+  const resolvedClassification = (classification === "work" || classification === "personal") ? classification : classificationDefault;
 
   if (resolvedClassification) meta.classification = resolvedClassification;
 
@@ -1221,7 +1224,7 @@ app.patch("/entities/:id", async (c) => {
     return c.json({ error: "canonical_name or entity_type is required" }, 400, corsHeaders);
   }
 
-  const VALID_TYPES = ["person", "organization", "org", "project", "tool", "place", "topic", "entity"];
+  const VALID_TYPES = ["person", "organization", "org", "project", "tool", "place", "topic", "entity", "newsletter"];
   if (newType && !VALID_TYPES.includes(newType)) {
     return c.json({ error: `Invalid entity_type. Must be one of: ${VALID_TYPES.join(", ")}` }, 400, corsHeaders);
   }
