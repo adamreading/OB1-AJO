@@ -1420,7 +1420,10 @@ app.get("/sources", async (c) => {
 // (number of thoughts mentioning both endpoints) for the dashboard hero graph.
 // Days defaults to 90 to keep the graph current; pass 0 for all-time.
 app.get("/constellation", async (c) => {
-  const limit = Math.min(60, Math.max(5, Number(c.req.query("limit")) || 30));
+  // Cap at 200 — well above the UI's 100 option, leaves room for future
+  // expansion. The Postgres RPCs underneath have no row cap; this is just
+  // a sanity ceiling against runaway client requests.
+  const limit = Math.min(200, Math.max(5, Number(c.req.query("limit")) || 30));
   const days = c.req.query("days") === undefined ? 90 : Number(c.req.query("days"));
   const minWeight = Math.max(1, Number(c.req.query("min_weight")) || 2);
   const classification = c.req.query("classification") || null;
