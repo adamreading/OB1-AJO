@@ -31,6 +31,7 @@ export const THOUGHT_TYPES = [
   "lesson",
   "meeting",
   "journal",
+  "newsletter",
 ] as const;
 
 /** Only these types participate in the kanban workflow */
