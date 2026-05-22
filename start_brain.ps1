@@ -2,6 +2,16 @@
 # Starts the 4 services Open Brain needs locally in a 2x2 Windows Terminal
 # layout. Plaud ingestion now runs locally again via Applaud + plaud-webhook
 # (curator edition) — see scripts/plaud-webhook.js.
+#
+# Pre-launch: runs recipes/brain-smoke-test (via scripts/smoke-gate.mjs) as
+# a sanity check on the deployed Edge Functions + DB schema. Use -SkipSmoke
+# to bypass when iterating quickly. The gate is informational only — it
+# prints what's broken and pauses 4s so you can read it, then continues so
+# you can still launch and investigate locally.
+
+param(
+    [switch]$SkipSmoke
+)
 
 $ProjectRoot = Get-Location
 $psmux = "C:\Users\JoannaThompson\AppData\Local\Microsoft\WinGet\Links\psmux.exe"
@@ -19,6 +29,35 @@ if ($null -eq $OllamaCheck) {
     Write-Host "Please start Ollama manually for background classification and entity extraction to work." -ForegroundColor Gray
 } else {
     Write-Host "Ollama is online." -ForegroundColor Green
+}
+
+# ─── Pre-launch smoke test gate ─────────────────────────────────────────
+# Probes the deployed Edge Functions, DB schema, RLS, and access-key
+# enforcement BEFORE we relaunch the local panes. Skipped with -SkipSmoke.
+# If MCP_ACCESS_KEY isn't in .env (it lives as a Supabase secret) the
+# auth-related categories show as setup errors but the schema checks
+# still run, so we always see *something* useful.
+if (-not $SkipSmoke) {
+    $SmokeGate = Join-Path $ProjectRoot "scripts\smoke-gate.mjs"
+    if (Test-Path $SmokeGate) {
+        Write-Host ""
+        Write-Host "Pre-launch smoke test..." -ForegroundColor Cyan
+        $smokeStart = Get-Date
+        & node.exe --env-file=.env $SmokeGate
+        $smokeCode = $LASTEXITCODE
+        $smokeDur = [int]((Get-Date) - $smokeStart).TotalSeconds
+        if ($smokeCode -eq 0) {
+            Write-Host "  Smoke OK ($smokeDur s)." -ForegroundColor Green
+        } elseif ($smokeCode -eq 2) {
+            Write-Host "  Smoke setup-error ($smokeDur s) — missing env var; check above. Continuing in 4s..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 4
+        } else {
+            Write-Host "  Smoke FAIL ($smokeDur s) — see above. Continuing in 4s; Ctrl+C to abort..." -ForegroundColor Red
+            Start-Sleep -Seconds 4
+        }
+    } else {
+        Write-Host "  (smoke-gate.mjs not found — skipping)" -ForegroundColor DarkGray
+    }
 }
 
 Write-Host ""
