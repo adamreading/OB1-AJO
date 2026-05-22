@@ -14,7 +14,14 @@ export async function GET(request: NextRequest) {
   }
 
   const sp = new URLSearchParams();
-  for (const k of ["limit", "days", "min_weight", "classification"]) {
+  for (const k of [
+    "limit",
+    "days",
+    "min_weight",
+    "classification",
+    "focus_id",
+    "excluded_types",
+  ]) {
     const v = request.nextUrl.searchParams.get(k);
     if (v) sp.set(k, v);
   }

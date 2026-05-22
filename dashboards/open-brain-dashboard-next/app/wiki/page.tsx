@@ -1255,6 +1255,7 @@ function WikiPageInner() {
             onAbsorb={() => setShowAbsorbModal(true)}
             onMerge={() => setShowMergeModal(true)}
             onDelete={handleDeleteEntity}
+            onTypeChanged={handleTypeChanged}
             confirmDelete={confirmDelete}
             setConfirmDelete={setConfirmDelete}
             deleting={deleting}

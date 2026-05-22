@@ -1422,6 +1422,16 @@ app.get("/sources", async (c) => {
 // Constellation — top N entities by mention count, plus co-occurrence edges
 // (number of thoughts mentioning both endpoints) for the dashboard hero graph.
 // Days defaults to 90 to keep the graph current; pass 0 for all-time.
+//
+// focus_id: when set, switches selection mode to "neighbours of this entity"
+//   — the entity itself + every entity it co-occurs with (weight >=
+//   min_weight), capped at limit. Lets the wiki re-centre the constellation
+//   on the currently-viewed entity without being trapped inside the global
+//   top-N.
+//
+// excluded_types: comma-separated entity_types to drop server-side. Honours
+//   the dashboard / wiki type-filter chips so toggled-off types don't eat
+//   slots in the top-N.
 app.get("/constellation", async (c) => {
   // Cap at 200 — well above the UI's 100 option, leaves room for future
   // expansion. The Postgres RPCs underneath have no row cap; this is just
@@ -1430,13 +1440,34 @@ app.get("/constellation", async (c) => {
   const days = c.req.query("days") === undefined ? 90 : Number(c.req.query("days"));
   const minWeight = Math.max(1, Number(c.req.query("min_weight")) || 2);
   const classification = c.req.query("classification") || null;
+  const focusIdRaw = c.req.query("focus_id");
+  const focusId = focusIdRaw ? Number(focusIdRaw) : null;
+  const excludedTypesRaw = c.req.query("excluded_types") || "";
+  const excludedTypes = excludedTypesRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const excludedTypesArg = excludedTypes.length > 0 ? excludedTypes : null;
 
   // Two RPC calls. Each runs in Postgres (GROUP BY / self-join) so no row
   // cap matters regardless of how big the brain gets.
-  const { data: topData, error: topErr } = await supabase.rpc(
-    "constellation_top_entities",
-    { p_days: days, p_limit: limit, p_classification: classification }
-  );
+  // - focus mode → constellation_focus_neighbors centres on the given entity
+  // - default → constellation_top_entities ranks by mention count
+  const { data: topData, error: topErr } = focusId && !isNaN(focusId)
+    ? await supabase.rpc("constellation_focus_neighbors", {
+        p_focus_id: focusId,
+        p_days: days,
+        p_limit: limit,
+        p_classification: classification,
+        p_min_weight: 1,
+        p_excluded_types: excludedTypesArg,
+      })
+    : await supabase.rpc("constellation_top_entities", {
+        p_days: days,
+        p_limit: limit,
+        p_classification: classification,
+        p_excluded_types: excludedTypesArg,
+      });
   if (topErr) return c.json({ error: topErr.message }, 500, corsHeaders);
 
   type TopRow = { entity_id: number; canonical_name: string; entity_type: string; mentions: number | string };

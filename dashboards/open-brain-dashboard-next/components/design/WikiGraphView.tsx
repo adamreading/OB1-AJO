@@ -20,6 +20,7 @@ interface WikiPageDetail {
   content: string;
   notes?: string | null;
   aliases?: string[];
+  metadata?: { entity_type?: string } & Record<string, unknown>;
 }
 
 interface EdgeRow {
@@ -60,6 +61,9 @@ interface WikiGraphViewProps {
   onAbsorb?: () => void;
   onMerge?: () => void;
   onDelete?: () => Promise<void> | void;
+  /** Fired when the inline entity-type dropdown saves a new type. Parent
+   *  caches both list + selected detail and updates them. */
+  onTypeChanged?: (newType: string) => void;
   /** Two-step delete confirm state, lifted from parent so all modals share state. */
   confirmDelete?: boolean;
   setConfirmDelete?: (v: boolean) => void;
@@ -543,6 +547,13 @@ const RELATION_LABELS: Record<string, string> = {
   collaborates_with: "collaborates with",
   related_to: "related to",
   co_occurs_with: "co-occurs with",
+  knew: "knew",
+  friend_of: "friend of",
+  family_of: "family of",
+  mentor_of: "mentor of",
+  introduced_via: "met via",
+  published_by: "published by",
+  references: "references",
 };
 
 export function WikiGraphView({
@@ -557,6 +568,7 @@ export function WikiGraphView({
   onAbsorb,
   onMerge,
   onDelete,
+  onTypeChanged,
   confirmDelete = false,
   setConfirmDelete,
   deleting = false,
@@ -586,6 +598,14 @@ export function WikiGraphView({
   const [reflections, setReflections] = useState<ReflectionRow[]>([]);
   const [reflectionsLoading, setReflectionsLoading] = useState(false);
   const [entityMap, setEntityMap] = useState<Map<string, string>>(new Map());
+  // Full searchable index of every wiki-paged entity (id, entity_id, title,
+  // slug, aliases). Used by the constellation search box so typing matches
+  // canonical_name OR any alias, even for entities not currently in the
+  // top-N / focus neighbourhood. Without this, searching for "Peter"
+  // would return nothing whenever Peter wasn't already loaded into the graph.
+  const [wikiIndex, setWikiIndex] = useState<
+    Array<{ entity_id: number; title: string; slug: string; aliases: string[] }>
+  >([]);
 
   // Pull dynamic entity types
   useEffect(() => {
@@ -597,12 +617,88 @@ export function WikiGraphView({
       .catch(() => {});
   }, []);
 
-  // Pull constellation. Refetches when the user changes the Top-N
-  // chooser (server returns top-N entities by mention count).
+  // Resolve the search query against the full wiki index (canonical_name AND
+  // every alias). Returns the matched entity_ids — these power both the
+  // graph filter and the auto-refocus refetch below. Aliases mean searching
+  // "nemsis" hits a page titled "Nemesis", and a former legal name still
+  // finds the entity under its current canonical_name.
+  const searchMatchIds = useMemo<Set<number>>(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q || wikiIndex.length === 0) return new Set();
+    const matched = new Set<number>();
+    for (const p of wikiIndex) {
+      if (p.title.toLowerCase().includes(q)) {
+        matched.add(p.entity_id);
+        continue;
+      }
+      for (const a of p.aliases) {
+        if (a.toLowerCase().includes(q)) {
+          matched.add(p.entity_id);
+          break;
+        }
+      }
+    }
+    return matched;
+  }, [searchQuery, wikiIndex]);
+
+  // Pick a single best match to re-centre the constellation on. Always set
+  // (when there are matches) regardless of whether the match is already
+  // visible — re-centring on every search gives consistent UX, and depending
+  // on `graph.nodes` here would create an infinite loop because the fetch
+  // effect that consumes searchFocusId is exactly what updates graph.nodes.
+  // Scoring prefers exact title hits over substring hits over alias-only
+  // hits, so "Peter" lands on Peter, not "Peter Seibert" or peterpease.com.
+  const searchFocusId = useMemo<number | null>(() => {
+    if (searchMatchIds.size === 0) return null;
+    const q = searchQuery.trim().toLowerCase();
+    let best: { entity_id: number; score: number } | null = null;
+    for (const p of wikiIndex) {
+      if (!searchMatchIds.has(p.entity_id)) continue;
+      const title = p.title.toLowerCase();
+      let score = 0;
+      if (title === q) score = 100;
+      else if (title.startsWith(q)) score = 50;
+      else if (title.includes(q)) score = 10;
+      else score = 1; // alias-only match
+      if (!best || score > best.score) best = { entity_id: p.entity_id, score };
+    }
+    return best?.entity_id ?? null;
+  }, [searchMatchIds, searchQuery, wikiIndex]);
+
+  // Pull constellation. Refetches when:
+  //  - top-N chooser changes (slot count)
+  //  - selected entity_id changes (focus mode → centre on that entity and
+  //    fetch all its co-occurring neighbours, not just the global top-N)
+  //  - hiddenTypes changes (type-filter chips → server excludes those types
+  //    from selection so freed slots go to entities you actually want)
+  //  - searchFocusId changes (alias-aware search auto-centres the
+  //    constellation on the best match)
+  // The min_weight slider stays a pure client-side dim/filter — it doesn't
+  // touch the fetch deps, so dragging it doesn't re-hit the server.
   useEffect(() => {
     let cancelled = false;
     setGraphLoading(true);
-    fetch(`/api/constellation?days=90&limit=${topN}&min_weight=1`)
+    // Focus precedence:
+    //   1. searchFocusId — a search match outside the current graph re-centres
+    //      so the matched entity actually becomes visible.
+    //   2. selected.entity_id — the wiki page the user is reading.
+    //   3. (neither) — default top-N by mention count.
+    // Focus mode pulls the entity's full history (days=0) so sparsely-mentioned
+    // entities (an old friend, a one-meeting project) still surface their
+    // neighbourhood. Default mode keeps the 90-day window so the unfocused
+    // constellation reflects what's currently hot.
+    const effectiveFocusId = searchFocusId ?? selected?.entity_id ?? null;
+    const inFocus = effectiveFocusId !== null;
+    const params = new URLSearchParams({
+      days: inFocus ? "0" : "90",
+      limit: topN,
+      min_weight: "1",
+    });
+    if (inFocus) params.set("focus_id", String(effectiveFocusId));
+    if (hiddenTypes.size > 0) {
+      params.set("excluded_types", Array.from(hiddenTypes).join(","));
+    }
+    fetch(`/api/constellation?${params.toString()}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data) return;
@@ -615,20 +711,41 @@ export function WikiGraphView({
     return () => {
       cancelled = true;
     };
-  }, [topN]);
+  }, [topN, selected?.entity_id, hiddenTypes, searchFocusId]);
 
   // Build entity-name → slug map for [Entity Name] resolution in markdown
+  // AND the searchable index for the constellation search box.
   useEffect(() => {
     fetch("/api/wiki")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!d?.data) return;
         const map = new Map<string, string>();
-        for (const p of d.data as { title: string; slug: string; aliases?: string[] }[]) {
+        const index: Array<{
+          entity_id: number;
+          title: string;
+          slug: string;
+          aliases: string[];
+        }> = [];
+        for (const p of d.data as {
+          entity_id: number | null;
+          title: string;
+          slug: string;
+          aliases?: string[];
+        }[]) {
           map.set(p.title.toLowerCase(), p.slug);
           for (const a of p.aliases ?? []) map.set(a.toLowerCase(), p.slug);
+          if (p.entity_id != null) {
+            index.push({
+              entity_id: p.entity_id,
+              title: p.title,
+              slug: p.slug,
+              aliases: p.aliases ?? [],
+            });
+          }
         }
         setEntityMap(map);
+        setWikiIndex(index);
       })
       .catch(() => {});
   }, []);
@@ -694,21 +811,18 @@ export function WikiGraphView({
   // single floating node, useless for navigation.
   const filteredNodes = useMemo(() => {
     if (!searchQuery.trim()) return graph.nodes;
-    const q = searchQuery.trim().toLowerCase();
+    // Use the alias-aware match set against the graph
     const matchIds = new Set(
-      graph.nodes
-        .filter((n) => n.label.toLowerCase().includes(q))
-        .map((n) => n.id)
+      graph.nodes.filter((n) => searchMatchIds.has(n.id)).map((n) => n.id)
     );
     if (matchIds.size === 0) return [];
-    // Pull in any node connected to a match by an edge
     const keep = new Set(matchIds);
     for (const e of graph.edges) {
       if (matchIds.has(e.source)) keep.add(e.target);
       if (matchIds.has(e.target)) keep.add(e.source);
     }
     return graph.nodes.filter((n) => keep.has(n.id));
-  }, [graph.nodes, graph.edges, searchQuery]);
+  }, [graph.nodes, graph.edges, searchQuery, searchMatchIds]);
 
   const selectedNode = useMemo(() => {
     if (!selected) return null;
@@ -937,6 +1051,7 @@ export function WikiGraphView({
               hiddenTypes={hiddenTypes}
               entityTypes={entityTypes}
               selectedId={selectedNode?.id ?? null}
+              bypassMinWeightIds={searchMatchIds.size > 0 ? searchMatchIds : undefined}
               onNodeClick={handleNodeClick}
               collapsed={collapsed}
             />
@@ -1012,21 +1127,11 @@ export function WikiGraphView({
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-              <span
-                style={{
-                  fontSize: 10,
-                  fontFamily: "var(--font-mono)",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.12em",
-                  padding: "3px 9px",
-                  borderRadius: 4,
-                  background: "rgba(80,200,200,0.10)",
-                  color: "#7adcdc",
-                  border: "1px solid rgba(80,200,200,0.25)",
-                }}
-              >
-                {selected.type}
-              </span>
+              <EntityTypePill
+                page={selected}
+                entityTypes={entityTypes}
+                onTypeChanged={onTypeChanged}
+              />
               <h2
                 style={{
                   margin: 0,
@@ -1277,6 +1382,152 @@ const ghostBtn: React.CSSProperties = {
   cursor: "pointer",
   fontFamily: "inherit",
 };
+
+// Inline entity-type pill. Acts as a static chip when the page has no
+// entity_id (e.g. legacy topic wiki rows). For entity-backed pages it
+// becomes an editable select that PATCHes /api/entities/:id with the
+// new entity_type and bubbles the change up so the parent's pages list
+// + selected detail stay in sync. Mirrors the List view's
+// EntityTypeSelect but styled to match the Graph view's pill aesthetic.
+function EntityTypePill({
+  page,
+  entityTypes,
+  onTypeChanged,
+}: {
+  page: WikiPageDetail;
+  entityTypes: EntityTypeInfo[];
+  onTypeChanged?: (newType: string) => void;
+}) {
+  const currentType =
+    (page.metadata?.entity_type as string | undefined) ?? page.type;
+  const [pendingType, setPendingType] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const displayType = pendingType ?? currentType;
+  const meta = entityTypes.find((t) => t.entity_type === displayType);
+  const color = meta?.color ?? "#7adcdc";
+
+  async function handleChange(newType: string) {
+    if (!page.entity_id || newType === currentType) return;
+    setPendingType(newType);
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/entities/${page.entity_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entity_type: newType }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { error?: string };
+        const msg = d.error || `HTTP ${res.status}`;
+        const dupe = msg.includes("duplicate key") || msg.includes("unique constraint");
+        throw new Error(
+          dupe
+            ? `A "${newType}" entity with this name already exists — use Merge to combine them`
+            : msg
+        );
+      }
+      onTypeChanged?.(newType);
+      setPendingType(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+      setPendingType(null);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Topic / non-entity pages have no entity_id — render as a static pill so
+  // we don't pretend they're editable.
+  if (!page.entity_id) {
+    return (
+      <span
+        style={{
+          fontSize: 10,
+          fontFamily: "var(--font-mono)",
+          textTransform: "uppercase",
+          letterSpacing: "0.12em",
+          padding: "3px 9px",
+          borderRadius: 4,
+          background: `color-mix(in srgb, ${color} 15%, transparent)`,
+          color,
+          border: `1px solid color-mix(in srgb, ${color} 35%, transparent)`,
+        }}
+      >
+        {displayType}
+      </span>
+    );
+  }
+
+  return (
+    <span
+      title={error ?? "Click to change entity type"}
+      style={{
+        position: "relative",
+        display: "inline-flex",
+        alignItems: "center",
+      }}
+    >
+      <select
+        value={displayType}
+        onChange={(e) => handleChange(e.target.value)}
+        disabled={saving}
+        style={{
+          appearance: "none",
+          WebkitAppearance: "none",
+          MozAppearance: "none",
+          fontSize: 10,
+          fontFamily: "var(--font-mono)",
+          textTransform: "uppercase",
+          letterSpacing: "0.12em",
+          padding: "3px 18px 3px 9px",
+          borderRadius: 4,
+          background: `color-mix(in srgb, ${color} 15%, transparent)`,
+          color,
+          border: `1px solid color-mix(in srgb, ${color} 35%, transparent)`,
+          cursor: saving ? "wait" : "pointer",
+          outline: "none",
+          opacity: saving ? 0.6 : 1,
+        }}
+      >
+        {entityTypes.length === 0 ? (
+          <option value={displayType}>{displayType}</option>
+        ) : (
+          entityTypes.map((t) => (
+            <option key={t.entity_type} value={t.entity_type}>
+              {t.entity_type}
+            </option>
+          ))
+        )}
+      </select>
+      <span
+        style={{
+          pointerEvents: "none",
+          position: "absolute",
+          right: 6,
+          fontSize: 8,
+          color,
+          opacity: 0.7,
+        }}
+      >
+        ▾
+      </span>
+      {error && (
+        <span
+          style={{
+            marginLeft: 8,
+            fontSize: 10,
+            color: "#ff9b9b",
+          }}
+        >
+          ! {error}
+        </span>
+      )}
+    </span>
+  );
+}
 
 function Section({
   title,

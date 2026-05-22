@@ -37,6 +37,10 @@ interface Props {
   entityTypes?: EntityTypeInfo[];
   /** Persistently highlight one node (e.g. the entity currently being viewed). */
   selectedId?: number | null;
+  /** Additional entity_ids whose edges should bypass the min_weight filter
+   *  alongside selectedId — used by the wiki search to keep matched entities
+   *  fully connected even when their co-occurrences are single-thought. */
+  bypassMinWeightIds?: Set<number>;
   /** Override the default plain-click behavior. If provided, click calls this instead of router.push. */
   onNodeClick?: (node: ConstellationNode) => void;
   /** Compact strip mode — only renders selected node + first-degree neighbors in a row. */
@@ -394,6 +398,7 @@ export function ThoughtGraph({
   hiddenTypes,
   entityTypes,
   selectedId = null,
+  bypassMinWeightIds,
   onNodeClick,
   collapsed = false,
 }: Props) {
@@ -413,16 +418,31 @@ export function ThoughtGraph({
     [categoryVisibleNodes]
   );
 
-  // Edges respecting min-weight + hidden categories (full set, focus-agnostic)
+  // Edges respecting min-weight + hidden categories (full set, focus-agnostic).
+  //
+  // Edges that touch the selected entity (or any search-match entity passed in
+  // via bypassMinWeightIds) skip the min_weight filter so focusing on or
+  // searching for someone always shows their full neighborhood — including
+  // single-thought (weight=1) co-occurrences. Without this bypass, a sparsely
+  // connected entity (someone mentioned in only a couple of personal thoughts)
+  // would appear with no neighbors when min_weight defaults to 2. Edges between
+  // non-bypassed pairs still respect min_weight, so the background stays clean.
   const baseEdges = useMemo(
     () =>
       edges.filter(
-        (e) =>
-          e.weight >= minWeight &&
-          categoryVisibleIds.has(e.source) &&
-          categoryVisibleIds.has(e.target)
+        (e) => {
+          if (!categoryVisibleIds.has(e.source) || !categoryVisibleIds.has(e.target)) {
+            return false;
+          }
+          const bypass =
+            (selectedId !== null && (e.source === selectedId || e.target === selectedId)) ||
+            (bypassMinWeightIds &&
+              (bypassMinWeightIds.has(e.source) || bypassMinWeightIds.has(e.target)));
+          if (bypass) return true;
+          return e.weight >= minWeight;
+        }
       ),
-    [edges, minWeight, categoryVisibleIds]
+    [edges, minWeight, categoryVisibleIds, selectedId, bypassMinWeightIds]
   );
 
   // Full adjacency (used to compute the neighborhood when focusing)
