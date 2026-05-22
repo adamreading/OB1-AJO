@@ -21,6 +21,10 @@ const nextConfig: NextConfig = {
     "ajo-ai.tail9c43a2.ts.net",       // Tailscale MagicDNS FQDN (explicit)
     "*.tail9c43a2.ts.net",            // wildcard for any tailnet host
   ],
+
+  // Standalone output bundles the dashboard for Docker / containerized
+  // deploys (picked up from upstream eb68169).
+  output: "standalone",
 };
 
 export default nextConfig;
