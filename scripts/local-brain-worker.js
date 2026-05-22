@@ -89,7 +89,7 @@ const VALID_RELATIONS = new Set([
   "works_on",          // person|org → project|task
   "uses",              // person|org → tool|technology
   "uses_tool",         // person → tool (alias kept for back-compat)
-  "collaborates_with", // person ↔ person (symmetric)
+  "collaborates_with", // person ↔ person (symmetric)  — work context
   "integrates_with",   // tool ↔ tool (symmetric)
   "alternative_to",    // tool|project ↔ tool|project (symmetric)
   "evaluates",         // person → tool|project|idea
@@ -99,8 +99,17 @@ const VALID_RELATIONS = new Set([
   "co_occurs_with",    // low-confidence proximity-only (symmetric)
   "published_by",      // newsletter → person  (the publication's author)
   "references",        // any → newsletter     (a thought cites/discusses the newsletter article)
+  // ─── Personal / social ties ───
+  "knew",              // person ↔ person — generic "knew each other" (symmetric)
+  "friend_of",         // person ↔ person — close personal friendship (symmetric)
+  "family_of",         // person ↔ person — relative (symmetric)
+  "mentor_of",         // person → person — directional teaching/guidance
+  "introduced_via",    // person → org|place — community/context where they met
 ]);
-const SYMMETRIC_RELATIONS = new Set(["co_occurs_with", "related_to", "collaborates_with", "integrates_with", "alternative_to"]);
+const SYMMETRIC_RELATIONS = new Set([
+  "co_occurs_with", "related_to", "collaborates_with", "integrates_with", "alternative_to",
+  "knew", "friend_of", "family_of",
+]);
 // Newsletter entities are READING SOURCES, not participants. They cannot be
 // the SOURCE of an action-style directional edge. Used to filter out the
 // hallucinated "Newsletter X works_on Project Y" edges the model was
@@ -247,6 +256,13 @@ Relationship relation values — pick the MOST SPECIFIC match:
 - co_occurs_with → use ONLY when the text merely mentions two things together without stating any relationship; confidence must be ≤ 0.6
 - published_by   → newsletter → person   (the publication's author/editor)
 - references     → any → newsletter      (the thought cites or discusses an article from this newsletter; this is the ONLY directional edge a newsletter can be the TARGET of besides published_by)
+
+Personal / social relations — use ONLY when the text explicitly establishes the bond (not just because two people appear together):
+- knew            → two people who knew each other (symmetric, weak); fallback when the text just says they "met" or "knew" without a stronger label
+- friend_of       → two people described as friends, close companions, or in a personal relationship outside of work (symmetric)
+- family_of       → relatives — partner, parent, sibling, child, in-law (symmetric)
+- mentor_of       → directional: person A mentored / taught / guided person B (asymmetric)
+- introduced_via  → directional: person → org/place — the community, group, or place where two people met (e.g. "we met through the OpenArt community")
 
 Critical relationship rules:
 - Only create a directional edge (works_on, uses, evaluates, member_of, located_in) when the source text EXPLICITLY states the subject→relation→object. Do NOT infer from co-occurrence alone.
