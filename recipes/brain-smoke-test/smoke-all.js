@@ -145,7 +145,18 @@ const SVC_HEADERS = {
   Authorization: `Bearer ${SERVICE_KEY}`,
   "Content-Type": "application/json",
 };
-const MCP_HEADERS = { "x-brain-key": MCP_KEY, "Content-Type": "application/json" };
+// MCP Streamable HTTP transport (used by AJO + any spec-compliant MCP
+// server) requires the client to advertise BOTH application/json AND
+// text/event-stream in the Accept header — without this, the transport
+// returns 405 "Method not allowed". The original recipe only set
+// Content-Type, which works against ad-hoc JSON-RPC endpoints but fails
+// the MCP-SDK transport. This is an AJO-local patch; consider PR'ing
+// upstream.
+const MCP_HEADERS = {
+  "x-brain-key": MCP_KEY,
+  "Content-Type": "application/json",
+  "Accept": "application/json, text/event-stream",
+};
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -193,7 +204,17 @@ async function fetchJson(url, init, signal) {
     e.status = res.status;
     throw e;
   }
-  return text ? JSON.parse(text) : null;
+  if (!text) return null;
+  // AJO-local patch: MCP Streamable HTTP transport replies with
+  // text/event-stream by default. Extract the JSON payload from the first
+  // `data:` line so callers don't have to care which transport variant
+  // the server picked. Falls back to plain JSON.parse for ad-hoc servers.
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("text/event-stream") || /^event:\s*\w/.test(text)) {
+    const dataLine = text.split(/\r?\n/).find((l) => l.startsWith("data:"));
+    if (dataLine) return JSON.parse(dataLine.slice(5).trim());
+  }
+  return JSON.parse(text);
 }
 
 async function tableCount(table, signal, extraQuery = "") {
@@ -475,7 +496,17 @@ const dbChecks = [
         signal: s,
       });
       if (res.status === 404) throw new SkipError("enhanced-thoughts not installed");
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
+      // AJO-local patch: PostgREST returns 400 when the RPC exists but
+      // depends on a column that's not present (e.g., sensitivity_tier
+      // when the sensitivity-tiers primitive isn't installed). Treat
+      // that as "schema not installed" rather than a hard failure.
+      if (!res.ok) {
+        const text = (await res.text()).slice(0, 200);
+        if (res.status === 400 && /column .* does not exist/i.test(text)) {
+          throw new SkipError("enhanced-thoughts dependency column missing");
+        }
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 120)}`);
+      }
       return "callable";
     },
   },
@@ -528,9 +559,15 @@ const authChecks = [
   {
     name: "MCP accepts correct access key (?key=)",
     fn: async (s) => {
+      // Same Accept-header requirement as the header variant. Brain key
+      // goes in the query string only — we deliberately omit the
+      // x-brain-key header to actually test query-string auth.
       const res = await fetch(`${MCP_URL}?key=${encodeURIComponent(MCP_KEY)}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+        },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
         signal: s,
       });
