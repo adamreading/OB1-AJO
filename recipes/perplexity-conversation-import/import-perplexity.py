@@ -39,6 +39,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -53,9 +54,66 @@ OLLAMA_BASE = "http://localhost:11434"
 
 # Supabase: reads the "Secret Key" from Settings → API (starts with sb_secret_)
 # The env var name uses the legacy convention for cross-recipe consistency.
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "") or os.environ.get("OPEN_BRAIN_URL", "")
+# AJO-local: this fork stores the service-role secret as SUPABASE_KEY.
+# Fall back to the upstream name and the upstream Open Brain naming
+# (OPEN_BRAIN_SERVICE_KEY) too so the recipe works against any flavour.
+SUPABASE_SERVICE_ROLE_KEY = (
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    or os.environ.get("SUPABASE_KEY", "")
+    or os.environ.get("OPEN_BRAIN_SERVICE_KEY", "")
+)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# ─── Heuristic prefilter ────────────────────────────────────────────────────
+# AJO-local: drop obvious trivia BEFORE we spend OpenRouter tokens on a
+# summarisation that's likely to come back {"thoughts": []} anyway.
+# Conservative — when in doubt the conversation goes through to the LLM
+# judge, which is itself selective. Tuned for Perplexity-shaped Q&A.
+
+JUNK_TITLE_PATTERNS = [
+    r"^how many\s+",                  # "how many r's in strawberry"
+    r"^what (time|date|day)\s",       # "what time is it in tokyo"
+    r"^when (does|did|is)\s",         # "when does X open"
+    r"^how do you spell\s",
+    r"^spell\s\w+\s*$",
+    r"^convert\s+[\d\.]+\s",          # "convert 32f to c"
+    r"^\d+\s*(°|degrees)",            # "32 degrees fahrenheit"
+    r"^\d+\s*[\+\-\*/]\s*\d+",        # "5 + 3"
+    r"^(define|definition of)\s",     # "define cromulent"
+    r"^translate\s",
+    r"^pronounce\s",
+    r"^what does (.{1,30})\s+mean\s*\??$",  # "what does X mean?" short ones
+    r"^image\.(jpg|png|jpeg|webp)\s*$",  # bare image-upload prompts
+]
+_JUNK_TITLE_RE = [re.compile(p, re.IGNORECASE) for p in JUNK_TITLE_PATTERNS]
+
+# Minimum answer length to bother summarising. Real Perplexity answers
+# with sources and structure tend to be >400 chars; trivia is often
+# <200. 400 is a defensible midpoint that catches most one-liners
+# without dropping shorter-but-substantive answers.
+MIN_ANSWER_CHARS = 400
+
+
+def looks_like_junk(conv):
+    """Return (skip: bool, reason: str). Conservative — only drop on clear
+    trivia signals. Anything ambiguous goes through to the LLM judge."""
+    answer = (conv.get("answer_text") or "").strip()
+    title = (conv.get("title") or "").strip()
+
+    if not answer:
+        return True, "empty answer"
+    if len(answer) < MIN_ANSWER_CHARS:
+        return True, f"answer too short ({len(answer)} chars < {MIN_ANSWER_CHARS})"
+    if not title:
+        # No title + an answer that survived the length check is unusual
+        # but not necessarily junk; let the LLM decide.
+        return False, ""
+    for rx in _JUNK_TITLE_RE:
+        if rx.search(title):
+            return True, f"trivia title pattern: {rx.pattern}"
+    return False, ""
+
 
 SUMMARIZATION_PROMPT = """\
 You are distilling a Perplexity Q&A exchange into standalone thoughts for a \
@@ -201,11 +259,31 @@ def parse_timestamp_iso(raw):
     return None
 
 
-def extract_conversations(xlsx_path):
-    """Extract conversation rows from the 'Conversations' sheet.
+def extract_conversations(path):
+    """Extract conversation rows from any supported export format.
 
     Returns list of dicts with keys: uuid, created, updated, title, answer_text.
+
+    Supported inputs (auto-detected by file extension):
+      .xlsx  — workbook with a "Conversations" sheet (canonical format)
+      .csv   — UUID,CREATED,UPDATED,TITLE,OUTPUT_STR
+      .json  — { "conversations": [ { context_uuid, context_title,
+                                       created_at, updated_at,
+                                       entries: [{query, answer, ...}] } ] }
+               Multi-turn entries get concatenated into a single answer_text
+               for the summariser (lossier than emitting one thought per
+               turn, but matches the recipe's "1-3 thoughts per conv"
+               output shape, and the LLM still sees the full conversation).
     """
+    ext = str(path).lower().rsplit(".", 1)[-1] if "." in str(path) else ""
+    if ext == "json":
+        return _extract_conversations_json(path)
+    if ext == "csv":
+        return _extract_conversations_csv(path)
+    return _extract_conversations_xlsx(path)
+
+
+def _extract_conversations_xlsx(xlsx_path):
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
 
     if "Conversations" not in wb.sheetnames:
@@ -253,6 +331,121 @@ def extract_conversations(xlsx_path):
     return conversations
 
 
+def _extract_conversations_csv(csv_path):
+    """CSV variant of the Conversations sheet (same headers)."""
+    import csv as _csv
+
+    conversations = []
+    with open(csv_path, "r", encoding="utf-8", newline="") as f:
+        for row in _csv.DictReader(f):
+            uuid = (row.get("UUID") or "").strip()
+            title = (row.get("TITLE") or "").strip()
+            if not uuid and not title:
+                continue
+            conversations.append(
+                {
+                    "uuid": uuid,
+                    "created": (row.get("CREATED") or "").strip(),
+                    "updated": (row.get("UPDATED") or "").strip(),
+                    "title": title,
+                    "answer_text": _parse_output_str(row.get("OUTPUT_STR") or ""),
+                }
+            )
+    return conversations
+
+
+def _extract_conversations_json(json_path):
+    """JSON variant — Perplexity's newer export format with multi-turn entries.
+
+    Each conversation has an entries[] array of (query, answer) turns. We
+    flatten them into a single answer_text using Q1/A1/Q2/A2/... so the
+    summariser sees the full thread and can synthesise a multi-turn-aware
+    thought set.
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    convs = data.get("conversations", []) if isinstance(data, dict) else []
+    out = []
+    for c in convs:
+        uuid = (c.get("context_uuid") or "").strip()
+        title = (c.get("context_title") or "").strip()
+        if not uuid and not title:
+            continue
+        entries = c.get("entries") or []
+        # Flatten multi-turn entries. For single-turn we just emit the
+        # bare answer (matches the xlsx/csv format) so the summariser
+        # prompt isn't bloated with Q1/A1 framing for trivial cases.
+        if len(entries) <= 1:
+            answer_text = (entries[0].get("answer") if entries else "") or ""
+        else:
+            parts = []
+            for i, e in enumerate(entries, start=1):
+                q = (e.get("query") or "").strip()
+                a = (e.get("answer") or "").strip()
+                if q:
+                    parts.append(f"Q{i}: {q}")
+                if a:
+                    parts.append(f"A{i}: {a}")
+            answer_text = "\n\n".join(parts)
+        out.append(
+            {
+                "uuid": uuid,
+                "created": c.get("created_at") or "",
+                "updated": c.get("updated_at") or "",
+                "title": title,
+                "answer_text": answer_text.strip(),
+                # AJO-local: keep the Perplexity Space id + mode so the
+                # ingest stage can resolve a friendly source_type tag
+                # (perplexity-scl, perplexity-personal, etc.) and tuck
+                # the original mode into metadata for later filtering.
+                "space_uuid": c.get("collection_uuid"),
+                "mode": c.get("mode"),
+            }
+        )
+    return out
+
+
+def load_space_map(path):
+    """Read the optional Perplexity-spaces JSON map.
+
+    Format produced by the AJO template-generator:
+      { "<uuid>": { "name": "scl", "classification": "work",
+                    "action": "import"|"drop", ... } }
+
+    Returns {uuid: {"name": <slug>, "classification": <work|personal|"">,
+                    "action": <import|drop>}} for every mapped UUID. Spaces
+    with action="drop" cause every conversation in that space to be
+    skipped at the prefilter stage. Spaces without a classification leave
+    that column NULL so the worker classifies on entity extraction.
+    """
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out = {}
+    for uuid, info in (raw or {}).items():
+        if not isinstance(info, dict):
+            continue
+        name = (info.get("name") or "").strip()
+        classification = (info.get("classification") or "").strip().lower()
+        if classification not in ("work", "personal", ""):
+            classification = ""
+        action = (info.get("action") or "import").strip().lower()
+        if action not in ("import", "drop"):
+            action = "import"
+        slug = ""
+        if name:
+            slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+        # Keep entries even when name/classification are blank, so the
+        # action='drop' marker is honoured for spaces with empty names.
+        out[uuid] = {"name": slug, "classification": classification, "action": action}
+    return out
+
+
 def _parse_output_str(output_str):
     """Extract answer text from Perplexity's OUTPUT_STR JSON blob."""
     if not output_str:
@@ -272,11 +465,26 @@ def _parse_output_str(output_str):
     return output_str
 
 
-def extract_memory_rows(xlsx_path):
-    """Extract memory rows from the 'Memory' sheet.
+def extract_memory_rows(path):
+    """Extract memory rows from either a CSV file or the 'Memory' sheet of an XLSX."""
+    ext = str(path).lower().rsplit(".", 1)[-1] if "." in str(path) else ""
+    if ext == "csv":
+        return _extract_memory_csv(path)
+    return _extract_memory_xlsx(path)
 
-    Returns list of dicts with all memory columns.
-    """
+
+def _normalize_memory_row(mem):
+    """Shared normalisation for the IS_* boolean columns."""
+    for bool_col in ("IS_DELETED", "IS_FORGOTTEN", "IS_INVISIBLE"):
+        val = (mem.get(bool_col) or "").strip().lower() if isinstance(mem.get(bool_col), str) else mem.get(bool_col)
+        if isinstance(val, str):
+            mem[bool_col] = val in ("true", "1", "yes")
+        else:
+            mem[bool_col] = bool(val)
+    return mem
+
+
+def _extract_memory_xlsx(xlsx_path):
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
 
     if "Memory" not in wb.sheetnames:
@@ -302,16 +510,28 @@ def extract_memory_rows(xlsx_path):
         for col_name, idx in col_idx.items():
             mem[col_name] = values[idx] if idx < len(values) else ""
 
-        # Normalize boolean-ish strings
-        for bool_col in ("IS_DELETED", "IS_FORGOTTEN", "IS_INVISIBLE"):
-            val = mem.get(bool_col, "").lower()
-            mem[bool_col] = val in ("true", "1", "yes")
+        _normalize_memory_row(mem)
 
         if not mem.get("MEMORY_KEY") and not mem.get("MEMORY_VALUE"):
             continue
 
         memories.append(mem)
 
+    return memories
+
+
+def _extract_memory_csv(csv_path):
+    """CSV variant of the Memory sheet."""
+    import csv as _csv
+
+    memories = []
+    with open(csv_path, "r", encoding="utf-8", newline="") as f:
+        for row in _csv.DictReader(f):
+            mem = {k: (v if v is not None else "") for k, v in row.items()}
+            _normalize_memory_row(mem)
+            if not mem.get("MEMORY_KEY") and not mem.get("MEMORY_VALUE"):
+                continue
+            memories.append(mem)
     return memories
 
 
@@ -586,8 +806,14 @@ def generate_embedding(text):
 # ─── Ingestion ───────────────────────────────────────────────────────────────
 
 
-def ingest_thought_supabase(content, metadata_dict, created_at=None):
-    """Insert a thought directly into Supabase with a generated embedding."""
+def ingest_thought_supabase(content, metadata_dict, created_at=None, extra_columns=None):
+    """Insert a thought directly into Supabase with a generated embedding.
+
+    extra_columns: optional dict of top-level column values to set on the
+    inserted row (e.g., {"type": "reference", "source_type": "perplexity-scl"}).
+    AJO-local addition so the dashboard's Source dropdown + Type filter chips
+    pick up imported rows without a post-process pass.
+    """
     embedding = generate_embedding(content)
     if not embedding:
         return {"ok": False, "error": "Failed to generate embedding"}
@@ -599,6 +825,10 @@ def ingest_thought_supabase(content, metadata_dict, created_at=None):
     }
     if created_at:
         body["created_at"] = created_at
+    if extra_columns:
+        for k, v in extra_columns.items():
+            if v is not None and k not in body:
+                body[k] = v
 
     resp = http_post_with_retry(
         f"{SUPABASE_URL}/rest/v1/thoughts",
@@ -648,7 +878,23 @@ Examples:
   python import-perplexity.py export.xlsx --model ollama --ollama-model qwen3
   python import-perplexity.py export.xlsx --report import-report.md""",
     )
-    parser.add_argument("xlsx_path", help="Path to Perplexity data export .xlsx file")
+    parser.add_argument(
+        "xlsx_path",
+        help="Path to Perplexity conversations export. Accepts .xlsx (canonical), "
+             ".csv (Conversations table), or .json (newer per-Space export with "
+             "multi-turn entries[]). When .xlsx, Memory sheet is read from the "
+             "same workbook unless --memory overrides.",
+    )
+    parser.add_argument(
+        "--memory",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Path to Memory file (.xlsx with Memory sheet, or .csv). "
+             "Required when the main file is .json or a Conversations-only .csv "
+             "and --type includes memory. Auto-resolves to imports/Memory.csv "
+             "or imports/Memory.xlsx if those exist alongside the main file.",
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="Parse and summarize but don't ingest"
     )
@@ -688,17 +934,36 @@ Examples:
         metavar="FILE",
         help="Write a markdown report of everything imported",
     )
+    parser.add_argument(
+        "--space-map",
+        type=str,
+        default="imports/perplexity-spaces.json",
+        metavar="FILE",
+        help="JSON file mapping Perplexity Space UUIDs to friendly names. "
+             "Each named space yields source_type='perplexity-<name>'; "
+             "unmapped/no-space conversations stay 'perplexity'.",
+    )
+    parser.add_argument(
+        "--no-prefilter",
+        action="store_true",
+        help="Disable the heuristic junk prefilter (lets every conversation "
+             "reach the LLM judge). Default: prefilter is on.",
+    )
     return parser.parse_args()
 
 
 # ─── Main: Conversations Pipeline ───────────────────────────────────────────
 
 
-def process_conversations(conversations, sync_log, args):
+def process_conversations(conversations, sync_log, args, space_map=None):
     """Process and ingest conversations. Returns stats dict."""
+    space_map = space_map or {}
     stats = {
         "total": len(conversations),
         "already_imported": 0,
+        "space_dropped": 0,
+        "heuristic_skipped": 0,
+        "heuristic_examples": [],
         "processed": 0,
         "thoughts_generated": 0,
         "ingested": 0,
@@ -723,10 +988,41 @@ def process_conversations(conversations, sync_log, args):
                 stats["already_imported"] += 1
             continue
 
+        # AJO-local: spaces marked action=drop in the spaces map skip
+        # every conversation in that space. Use this for noisy/test
+        # spaces ("ob test1", "{ THE PROMPT-INATOR }") so the LLM
+        # doesn't waste time summarising them.
+        space_uuid_check = conv.get("space_uuid")
+        if space_uuid_check and space_map.get(space_uuid_check, {}).get("action") == "drop":
+            stats["space_dropped"] += 1
+            continue
+
+        # AJO-local heuristic prefilter — catches obvious trivia BEFORE we
+        # spend an OpenRouter call. Disable with --no-prefilter.
+        if not getattr(args, "no_prefilter", False):
+            skip, reason = looks_like_junk(conv)
+            if skip:
+                stats["heuristic_skipped"] += 1
+                if len(stats["heuristic_examples"]) < 6:
+                    stats["heuristic_examples"].append(
+                        f"{(conv.get('title') or '(untitled)')[:60]} -- {reason}"
+                    )
+                continue
+
         stats["processed"] += 1
         uuid = conv["uuid"]
         title = conv["title"] or "(untitled)"
         answer_text = conv["answer_text"]
+
+        # Resolve Perplexity Space (from collection_uuid) -> friendly
+        # name + per-space classification. Unmapped UUIDs fall back to
+        # plain "perplexity" with NULL classification (the worker will
+        # decide work/personal during entity extraction).
+        space_uuid = conv.get("space_uuid")
+        space_info = space_map.get(space_uuid, {}) if space_uuid else {}
+        space_name = space_info.get("name") or None
+        space_classification = space_info.get("classification") or None
+        source_type = f"perplexity-{space_name}" if space_name else "perplexity"
 
         # Parse date
         created = conv.get("created", "")
@@ -735,7 +1031,8 @@ def process_conversations(conversations, sync_log, args):
 
         word_count = len(answer_text.split())
         print(f"\n{stats['processed']}. {title}")
-        print(f"   {word_count} words | {date_str} | {uuid[:8]}...")
+        space_tag = f" | space={space_name or space_uuid[:8]+'...' if space_uuid else 'none'}"
+        print(f"   {word_count} words | {date_str} | {uuid[:8]}...{space_tag}")
 
         if not answer_text.strip():
             print("   -> No answer text, skipping")
@@ -780,12 +1077,33 @@ def process_conversations(conversations, sync_log, args):
             "perplexity_date": date_str,
             "perplexity_uuid": uuid,
         }
+        if space_uuid:
+            metadata["perplexity_space_uuid"] = space_uuid
+        if space_name:
+            metadata["perplexity_space"] = space_name
+        mode = conv.get("mode")
+        if mode:
+            metadata["perplexity_mode"] = mode
+
+        # AJO column fields. type='reference' lands these in the right
+        # dashboard filter bucket; source_type lets the Source dropdown
+        # show "perplexity" and (if mapped) per-space variants.
+        # classification: pre-set when the space map has work/personal,
+        # otherwise NULL and the worker classifies during entity
+        # extraction. Also mirror to metadata.classification (kept in
+        # sync with the column by the existing AJO pipeline).
+        columns = {"type": "reference", "source_type": source_type}
+        if space_classification:
+            columns["classification"] = space_classification
+            metadata["classification"] = space_classification
 
         # Ingest thoughts
         all_ok = True
         for i, thought in enumerate(thoughts):
             content = f"[Perplexity: {title} | {date_str}] {thought}"
-            result = ingest_thought_supabase(content, metadata, created_at=created_iso)
+            result = ingest_thought_supabase(
+                content, metadata, created_at=created_iso, extra_columns=columns
+            )
 
             if result.get("ok"):
                 stats["ingested"] += 1
@@ -939,7 +1257,14 @@ def process_memory(memories, sync_log, args):
             else:
                 content = f"[Perplexity Memory: {synthetic_key}] {text}"
 
-            result = ingest_thought_supabase(content, meta, created_at=created_iso)
+            # AJO column fields. Memory entries are facts about the user
+            # (interests, work context, preferences), not Q&A research,
+            # so they land as type='reference' with source_type
+            # 'perplexity-memory' to distinguish from conversations.
+            columns = {"type": "reference", "source_type": "perplexity-memory"}
+            result = ingest_thought_supabase(
+                content, meta, created_at=created_iso, extra_columns=columns
+            )
 
             if result.get("ok"):
                 stats["ingested"] += 1
@@ -1020,6 +1345,28 @@ def main():
 
     sync_log = load_sync_log()
 
+    # Load optional space-uuid -> friendly-name map (AJO-local feature).
+    space_map = load_space_map(args.space_map)
+    if space_map:
+        print(f"Loaded {len(space_map)} mapped Perplexity Space(s) from {args.space_map}")
+
+    # Resolve memory file path. If --memory wasn't given:
+    #   - .xlsx main file: assume Memory is in same workbook (legacy behaviour)
+    #   - otherwise: look for sibling Memory.csv / Memory.xlsx
+    main_ext = xlsx_path.suffix.lower()
+    if args.memory:
+        memory_path = Path(args.memory)
+    elif main_ext == ".xlsx":
+        memory_path = xlsx_path
+    else:
+        # auto-discover alongside the main file
+        candidates = [xlsx_path.parent / "Memory.csv", xlsx_path.parent / "Memory.xlsx"]
+        memory_path = next((c for c in candidates if c.is_file()), None)
+
+    if args.type in ("memory", "both") and not memory_path:
+        print(f"Warning: --type {args.type} requested but no Memory file found "
+              f"(use --memory PATH).")
+
     # Process conversations
     conv_stats = None
     if args.type in ("conversations", "both"):
@@ -1027,13 +1374,13 @@ def main():
         conversations = extract_conversations(str(xlsx_path))
         print(f"Found {len(conversations)} conversations.")
         conversations.sort(key=lambda c: c.get("created", ""))
-        conv_stats = process_conversations(conversations, sync_log, args)
+        conv_stats = process_conversations(conversations, sync_log, args, space_map=space_map)
 
     # Process memory
     mem_stats = None
-    if args.type in ("memory", "both"):
-        print(f"\nExtracting memory from {xlsx_path}...")
-        memories = extract_memory_rows(str(xlsx_path))
+    if args.type in ("memory", "both") and memory_path:
+        print(f"\nExtracting memory from {memory_path}...")
+        memories = extract_memory_rows(str(memory_path))
         print(f"Found {len(memories)} memory entries.")
         mem_stats = process_memory(memories, sync_log, args)
 
@@ -1047,6 +1394,12 @@ def main():
         print(f"    Found:              {conv_stats['total']}")
         if conv_stats["already_imported"]:
             print(f"    Already imported:   {conv_stats['already_imported']} (skipped)")
+        if conv_stats.get("space_dropped"):
+            print(f"    Space dropped:      {conv_stats['space_dropped']} (action=drop in spaces map)")
+        if conv_stats.get("heuristic_skipped"):
+            print(f"    Heuristic-skipped:  {conv_stats['heuristic_skipped']} (junk filter)")
+            for ex in conv_stats.get("heuristic_examples", []):
+                print(f"      - {ex}")
         print(f"    Processed:          {conv_stats['processed']}")
         print(f"    Thoughts:           {conv_stats['thoughts_generated']}")
         if not args.dry_run:
