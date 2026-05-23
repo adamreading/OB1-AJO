@@ -236,18 +236,40 @@ def parse_timestamp_iso(raw):
     """Parse a Perplexity timestamp string into ISO 8601 (UTC).
 
     Returns ISO string or None if parsing fails.
-    Also handles datetime objects from openpyxl (data_only mode).
+    Handles three shapes Perplexity has been observed to emit across
+    exports (csv vs xlsx vs json):
+      - "2024-11-15 10:33:01.146952"     (csv / xlsx — naive)
+      - "2026-05-21T11:12:19.679327Z"    (json — UTC with Z suffix)
+      - "2026-05-21T11:12:19+00:00"      (json — explicit offset)
+    Also accepts a datetime object directly from openpyxl data_only mode.
+
+    Bug history: prior version's TIMESTAMP_FORMATS list didn't tolerate
+    the trailing "Z" used by the json export, so every json-sourced
+    import got created_at=None — every imported thought ended up dated
+    "now()" instead of the original Perplexity date. Use Python's
+    fromisoformat first (handles all ISO variants in 3.11+) and fall
+    back to the strptime list for csv-style naive timestamps.
     """
     if not raw:
         return None
 
-    # openpyxl may return datetime objects directly
     if isinstance(raw, datetime):
         return raw.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
     raw = str(raw).strip()
     if not raw:
         return None
+
+    # First try the ISO parser. Python 3.11+ fromisoformat accepts Z;
+    # for older runtimes the manual Z->+00:00 swap keeps it working.
+    try:
+        normalised = raw.rstrip()
+        if normalised.endswith("Z"):
+            normalised = normalised[:-1] + "+00:00"
+        dt = datetime.fromisoformat(normalised)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    except ValueError:
+        pass
 
     for fmt in TIMESTAMP_FORMATS:
         try:
@@ -367,12 +389,30 @@ def _extract_conversations_json(json_path):
 
     convs = data.get("conversations", []) if isinstance(data, dict) else []
     out = []
+    # Caps tuned against the actual export shape:
+    #  - Some Perplexity conversations have context_title that's a
+    #    multi-line copy-paste of the user's original prompt + part of
+    #    an answer (up to 500+ chars). Used verbatim it produces
+    #    nonsense thought-content prefixes. Trim to the first line and
+    #    a reasonable length so the title stays a label.
+    #  - Multi-turn conversations can run to 10+ entries; flattening
+    #    them all into one summarisation call overflows the LLM's
+    #    useful attention window and the model returns fragments of
+    #    random parts of the thread instead of a coherent summary.
+    #    Cap to the first MAX_TURNS turns so the summariser sees a
+    #    focused thread.
+    MAX_TITLE_LEN = 120
+    MAX_TURNS = 4
     for c in convs:
         uuid = (c.get("context_uuid") or "").strip()
-        title = (c.get("context_title") or "").strip()
+        raw_title = (c.get("context_title") or "").strip()
+        # First newline kills sprawling multi-paragraph "titles".
+        title = raw_title.split("\n", 1)[0].strip()
+        if len(title) > MAX_TITLE_LEN:
+            title = title[:MAX_TITLE_LEN].rstrip() + "..."
         if not uuid and not title:
             continue
-        entries = c.get("entries") or []
+        entries = (c.get("entries") or [])[:MAX_TURNS]
         # Flatten multi-turn entries. For single-turn we just emit the
         # bare answer (matches the xlsx/csv format) so the summariser
         # prompt isn't bloated with Q1/A1 framing for trivial cases.
@@ -381,7 +421,7 @@ def _extract_conversations_json(json_path):
         else:
             parts = []
             for i, e in enumerate(entries, start=1):
-                q = (e.get("query") or "").strip()
+                q = (e.get("query") or "").strip().split("\n", 1)[0]
                 a = (e.get("answer") or "").strip()
                 if q:
                     parts.append(f"Q{i}: {q}")
