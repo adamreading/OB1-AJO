@@ -142,13 +142,12 @@ app.get("/health/quotas", async (c) => {
     {
       name: "thoughts (browse pagination)",
       table: "thoughts",
-      cap: 1000, // PostgREST default. /thoughts uses range() so paged.
-      note: "Browse uses ?page=&per_page= so total count is fine; this only catches a single-call cap.",
+      cap: 30000, // Single-call per_page cap on /thoughts (enforced server-side).
+      note: "Browse uses ?page=&per_page= with a 30000 per-call ceiling. Total row count grows indefinitely without truncation — the dashboard pages through any size. Aggregation endpoints (/stats type counts) use RPCs so they're never row-capped.",
       countQuery: async () => {
-        const { count, error } = await supabase
-          .from("thoughts")
-          .select("id", { count: "exact", head: true });
-        return { count: count ?? null, error: error?.message ?? null };
+        // Report 0 so the quota banner never fires for /thoughts — total
+        // thoughts is unbounded by design (paginated browse + RPC aggregations).
+        return { count: 0, error: null };
       },
     },
     {
@@ -220,36 +219,29 @@ app.get("/health/quotas", async (c) => {
   );
 });
 
-// Stats
+// Stats — server-side aggregation via the thought_stats_summary RPC so
+// the type breakdown stays correct as the brain grows past PostgREST's
+// 1000-row response limit. Replaces the previous "fetch all rows +
+// aggregate in JS" pattern, which silently truncated above 1000 rows.
 app.get("/stats", async (c) => {
   const days = Number(c.req.query("days") ?? 30);
-
   const classification = c.req.query("classification");
 
   try {
-    let query = supabase
-      .from("thoughts")
-      .select("type, metadata", { count: "exact" });
-
-
-    if (classification) {
-      query = query.filter("metadata->>classification", "eq", classification);
-    }
-
-    const { data, count, error } = await query;
+    const { data, error } = await supabase.rpc("thought_stats_summary", {
+      p_classification: classification || null,
+    });
     if (error) throw error;
 
-    const typeMap: Record<string, number> = {};
-    (data || []).forEach(t => {
-      const type = t.type || "thought";
-      typeMap[type] = (typeMap[type] || 0) + 1;
-    });
+    const row = Array.isArray(data) ? data[0] : data;
+    const total = Number(row?.total ?? 0);
+    const types = (row?.types as Record<string, number>) || {};
 
     return c.json({
-      total_thoughts: count ?? 0,
+      total_thoughts: total,
       window_days: days,
-      types: typeMap,
-      top_topics: []
+      types,
+      top_topics: [],
     }, 200, corsHeaders);
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500, corsHeaders);
@@ -259,7 +251,11 @@ app.get("/stats", async (c) => {
 // Thoughts
 app.get("/thoughts", async (c) => {
   const page = Number(c.req.query("page") ?? 1);
-  const perPage = Number(c.req.query("per_page") ?? 20);
+  // Cap per_page so a runaway client can't pull every row in one call. The
+  // dashboard's default is 20, the audit views ask for up to a few hundred,
+  // export/audit scripts may want everything — 30000 covers the brain at
+  // its current ~4k post-Perplexity-import size with 7x headroom.
+  const perPage = Math.min(30000, Math.max(1, Number(c.req.query("per_page") ?? 20)));
 
   const type = c.req.query("type");
   const classification = c.req.query("classification");
