@@ -49,14 +49,14 @@ if (-not $SkipSmoke) {
         if ($smokeCode -eq 0) {
             Write-Host "  Smoke OK ($smokeDur s)." -ForegroundColor Green
         } elseif ($smokeCode -eq 2) {
-            Write-Host "  Smoke setup-error ($smokeDur s) — missing env var; check above. Continuing in 4s..." -ForegroundColor Yellow
+            Write-Host "  Smoke setup-error ($smokeDur s) -- missing env var; check above. Continuing in 4s..." -ForegroundColor Yellow
             Start-Sleep -Seconds 4
         } else {
-            Write-Host "  Smoke FAIL ($smokeDur s) — see above. Continuing in 4s; Ctrl+C to abort..." -ForegroundColor Red
+            Write-Host "  Smoke FAIL ($smokeDur s) -- see above. Continuing in 4s; Ctrl+C to abort..." -ForegroundColor Red
             Start-Sleep -Seconds 4
         }
     } else {
-        Write-Host "  (smoke-gate.mjs not found — skipping)" -ForegroundColor DarkGray
+        Write-Host "  (smoke-gate.mjs not found -- skipping)" -ForegroundColor DarkGray
     }
 }
 
