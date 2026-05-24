@@ -624,24 +624,50 @@ export function WikiGraphView({
 
   // Resolve the search query against the full wiki index (canonical_name AND
   // every alias). Returns the matched entity_ids — these power both the
-  // graph filter and the auto-refocus refetch below. Aliases mean searching
-  // "nemsis" hits a page titled "Nemesis", and a former legal name still
-  // finds the entity under its current canonical_name.
+  // graph filter and the auto-refocus refetch below.
+  //
+  // Three layers of matching, most-specific first:
+  //  1. Full-substring: query appears as a substring of title/alias. Fast,
+  //     catches "tom" -> "Tom Falconar".
+  //  2. Token-overlap: any individual word in the query (>= 3 chars) appears
+  //     as a substring of a title/alias word. Catches "thomas falconar"
+  //     against "Tom Falconar" because "falconar" matches. Also catches
+  //     "scott pease" against "Dr Scott Pease" because both tokens match
+  //     somewhere in the title.
+  //  3. Aliases get the same treatment so legal-name <-> nickname mappings
+  //     also fuzzy-match. To get "Thomas" -> Tom Falconar, add "Thomas" as
+  //     an alias on entity #6 (token-overlap can't bridge "tom" vs "thomas"
+  //     since neither contains the other; alias is the right answer).
   const searchMatchIds = useMemo<Set<number>>(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q || wikiIndex.length === 0) return new Set();
+
+    // Tokenize the query — drop short fillers ("of", "an", numerics).
+    const queryTokens = q.split(/\s+/).filter((t) => t.length >= 3);
+
     const matched = new Set<number>();
     for (const p of wikiIndex) {
-      if (p.title.toLowerCase().includes(q)) {
+      const titleLower = p.title.toLowerCase();
+      const aliasLowers = p.aliases.map((a) => a.toLowerCase());
+
+      // Layer 1: full substring match
+      if (titleLower.includes(q) || aliasLowers.some((a) => a.includes(q))) {
         matched.add(p.entity_id);
         continue;
       }
-      for (const a of p.aliases) {
-        if (a.toLowerCase().includes(q)) {
-          matched.add(p.entity_id);
-          break;
-        }
-      }
+
+      // Layer 2: token overlap. Build the page's token set from title +
+      // aliases, then check if ANY query token has a substring match in
+      // ANY page token. Single-token overlap is enough — "falconar" alone
+      // identifies Tom Falconar even when the rest of the query is wrong.
+      if (queryTokens.length === 0) continue;
+      const pageTokens = [titleLower, ...aliasLowers]
+        .flatMap((s) => s.split(/\s+/))
+        .filter((t) => t.length >= 3);
+      const overlap = queryTokens.some((qt) =>
+        pageTokens.some((pt) => pt.includes(qt) || qt.includes(pt))
+      );
+      if (overlap) matched.add(p.entity_id);
     }
     return matched;
   }, [searchQuery, wikiIndex]);
@@ -829,10 +855,19 @@ export function WikiGraphView({
     return graph.nodes.filter((n) => keep.has(n.id));
   }, [graph.nodes, graph.edges, searchQuery, searchMatchIds]);
 
+  // Active search wins as the visual center. Without this, typing
+  // "tom falconar" while the Adam Ososki wiki is open would refetch the
+  // constellation centred on Tom (correct) BUT the visual pin would stay
+  // on Adam (wrong) because the wiki-page selection took precedence in
+  // the renderer. So Tom would appear as a small satellite of Adam,
+  // exactly the opposite of what a search-then-find UX expects.
   const selectedNode = useMemo(() => {
+    if (searchFocusId !== null) {
+      return graph.nodes.find((n) => n.id === searchFocusId) ?? null;
+    }
     if (!selected) return null;
     return graph.nodes.find((n) => n.slug === selected.slug) ?? null;
-  }, [graph.nodes, selected]);
+  }, [graph.nodes, selected, searchFocusId]);
 
   const sections = useMemo(
     () => (selected?.content ? parseSections(selected.content) : null),
