@@ -1830,6 +1830,82 @@ app.put("/wiki-pages/:slug", async (c) => {
   return c.json({ slug: data.slug, action: "updated", message: "Saved" }, 200, corsHeaders);
 });
 
+// On-demand wiki regen. Doesn't actually run the wiki compiler from inside
+// the Edge Function (the compiler is a local Node script using Ollama) —
+// instead it forces one of the entity's thoughts back through the entity-
+// extraction queue. The worker adds the entity_id to its dirtyEntityIds set
+// during extraction and regenerates the wiki when the queue drains. Round
+// trip is typically 30-60s depending on worker load. Useful for fixing one-
+// off LLM glitches (e.g. token loops, stale content) without restarting
+// anything.
+app.post("/wiki-pages/:slug/regen", async (c) => {
+  const slug = c.req.param("slug");
+
+  const { data: page, error: pageErr } = await supabase
+    .from("wiki_pages")
+    .select("id, slug, entity_id")
+    .eq("slug", slug)
+    .maybeSingle();
+  if (pageErr) return c.json({ error: pageErr.message }, 500, corsHeaders);
+  if (!page) return c.json({ error: "Wiki page not found" }, 404, corsHeaders);
+  if (!page.entity_id) {
+    return c.json(
+      { error: "Wiki page has no linked entity (legacy topic page) — cannot regen via worker" },
+      400,
+      corsHeaders
+    );
+  }
+
+  // Pick the most recent thought linked to this entity so the re-extraction
+  // gets meaningful content. Any thought works — the worker only needs to
+  // see the entity_id flow through extraction to mark it dirty.
+  const { data: link, error: linkErr } = await supabase
+    .from("thought_entities")
+    .select("thought_id, thoughts(id, created_at)")
+    .eq("entity_id", page.entity_id)
+    .order("thoughts(created_at)", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (linkErr) return c.json({ error: linkErr.message }, 500, corsHeaders);
+  if (!link?.thought_id) {
+    return c.json(
+      { error: "Entity has no linked thoughts to re-extract — wiki will stay as-is" },
+      400,
+      corsHeaders
+    );
+  }
+
+  // Upsert the queue row to pending. Force-upsert because the row may
+  // already exist in 'complete' state and a plain update would change
+  // nothing if the worker filters by status.
+  const { error: queueErr } = await supabase
+    .from("entity_extraction_queue")
+    .upsert(
+      {
+        thought_id: link.thought_id,
+        status: "pending",
+        last_error: null,
+        started_at: null,
+        processed_at: null,
+        queued_at: new Date().toISOString(),
+      },
+      { onConflict: "thought_id" }
+    );
+  if (queueErr) return c.json({ error: queueErr.message }, 500, corsHeaders);
+
+  return c.json(
+    {
+      ok: true,
+      slug,
+      entity_id: page.entity_id,
+      thought_id: link.thought_id,
+      message: "Queued for regeneration. The local worker will pick this up on its next poll; the wiki article typically refreshes within 30-60 seconds.",
+    },
+    200,
+    corsHeaders
+  );
+});
+
 // Entity merge — reassigns thought_entities + edges to target, then deletes source
 app.post("/entities/:id/merge", async (c) => {
   const sourceId = Number(c.req.param("id"));

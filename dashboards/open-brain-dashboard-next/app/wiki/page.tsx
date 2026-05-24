@@ -983,6 +983,9 @@ function WikiPageInner() {
   const [notesError, setNotesError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Wiki regen state: idle / queueing (request in flight) / queued
+  // (worker accepted it, refresh in ~60s to see the new article).
+  const [regenStatus, setRegenStatus] = useState<"idle" | "queueing" | "queued">("idle");
   const [view, setView] = useState<"graph" | "list">("graph");
 
   useEffect(() => {
@@ -1121,6 +1124,31 @@ function WikiPageInner() {
     );
   }, [selected?.slug]);
 
+  // Regen — queues one of the entity's thoughts back through the
+  // entity-extraction queue so the local worker re-extracts and then
+  // regenerates the wiki article on its next queue drain. Useful for
+  // one-off fixes when the LLM produced a corrupt article (e.g. a
+  // token loop in the TLDR). Async — the article won't change in
+  // place; the user has to refresh in 30-60s to see the new version.
+  const handleRegenerate = useCallback(async () => {
+    if (!selected?.slug) return;
+    setRegenStatus("queueing");
+    try {
+      const res = await fetch(
+        `/api/wiki/${encodeURIComponent(selected.slug)}/regen`,
+        { method: "POST" }
+      );
+      const d = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+      if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      setRegenStatus("queued");
+      // Reset status after a window so the button is re-usable.
+      setTimeout(() => setRegenStatus("idle"), 60_000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Regen failed");
+      setRegenStatus("idle");
+    }
+  }, [selected?.slug]);
+
   const handleDeleteEntity = useCallback(async () => {
     if (!selected?.entity_id) return;
     setDeleting(true);
@@ -1255,6 +1283,8 @@ function WikiPageInner() {
             onAbsorb={() => setShowAbsorbModal(true)}
             onMerge={() => setShowMergeModal(true)}
             onDelete={handleDeleteEntity}
+            onRegenerate={handleRegenerate}
+            regenStatus={regenStatus}
             onTypeChanged={handleTypeChanged}
             confirmDelete={confirmDelete}
             setConfirmDelete={setConfirmDelete}
@@ -1542,6 +1572,18 @@ function WikiPageInner() {
                         className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors"
                       >
                         Merge
+                      </button>
+                      <button
+                        onClick={handleRegenerate}
+                        disabled={regenStatus !== "idle"}
+                        title="Re-queue the entity's most recent thought so the local worker regenerates this wiki article on its next drain (~30-60s). Use for one-off LLM glitches."
+                        className="px-3 py-1.5 text-sm bg-bg-elevated border border-border rounded-lg text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        {regenStatus === "queueing"
+                          ? "Queueing…"
+                          : regenStatus === "queued"
+                            ? "Queued ✓ (refresh in ~60s)"
+                            : "Regenerate"}
                       </button>
                       {confirmDelete ? (
                         <div className="flex items-center gap-1">

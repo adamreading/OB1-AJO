@@ -61,6 +61,10 @@ interface WikiGraphViewProps {
   onAbsorb?: () => void;
   onMerge?: () => void;
   onDelete?: () => Promise<void> | void;
+  /** Status of the most recent regen request, surfaced in the Regen button
+   *  label so the user gets feedback that the request landed (the actual
+   *  article refresh happens out-of-band on the worker, 30-60s later). */
+  regenStatus?: "idle" | "queueing" | "queued";
   /** Fired when the inline entity-type dropdown saves a new type. Parent
    *  caches both list + selected detail and updates them. */
   onTypeChanged?: (newType: string) => void;
@@ -568,6 +572,7 @@ export function WikiGraphView({
   onAbsorb,
   onMerge,
   onDelete,
+  regenStatus = "idle",
   onTypeChanged,
   confirmDelete = false,
   setConfirmDelete,
@@ -1215,8 +1220,22 @@ export function WikiGraphView({
                 </button>
               )}
               {onRegenerate && (
-                <button type="button" onClick={onRegenerate} style={ghostBtn}>
-                  Regenerate
+                <button
+                  type="button"
+                  onClick={onRegenerate}
+                  disabled={regenStatus !== "idle"}
+                  title="Re-queue the entity's most recent thought so the local worker regenerates this article on its next drain (~30-60s)."
+                  style={{
+                    ...ghostBtn,
+                    opacity: regenStatus === "idle" ? 1 : 0.6,
+                    cursor: regenStatus === "idle" ? "pointer" : "not-allowed",
+                  }}
+                >
+                  {regenStatus === "queueing"
+                    ? "Queueing…"
+                    : regenStatus === "queued"
+                      ? "Queued ✓ (refresh in ~60s)"
+                      : "Regenerate"}
                 </button>
               )}
               {selected.entity_id != null && onDelete && (
