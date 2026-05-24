@@ -674,21 +674,39 @@ async function synthesize(env, model, payload) {
     `${fenceSnippets(payload)}` +
     curatorTail;
   const entityHeading = `# ${payload.entity}\n\n`;
-  const res = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userContent },
-        { role: "assistant", content: entityHeading },
-      ],
-      temperature: 0.3,
-      max_tokens: 4096,
-      think: false,
-    }),
-  });
+  // Hard ceiling on wiki generation. Real compiles finish in 5-60s on the
+  // 5090; past 180s the model is almost certainly stuck in a token loop
+  // (e.g. gemma's ",er,er,er,er..." failure). Abort and surface as a
+  // diagnosable error rather than letting Ollama burn 5m before 500'ing.
+  const wikiTimeoutMs = Number(process.env.WIKI_LLM_TIMEOUT_MS || 180_000);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), wikiTimeoutMs);
+  let res;
+  try {
+    res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent },
+          { role: "assistant", content: entityHeading },
+        ],
+        temperature: 0.3,
+        max_tokens: 4096,
+        think: false,
+      }),
+      signal: ctrl.signal,
+    });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(`Wiki LLM timeout after ${wikiTimeoutMs}ms (likely token loop with ${model})`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) throw new Error(`LLM call failed: ${res.status} ${await res.text()}`);
   const body = await res.json();
   const msg = body?.choices?.[0]?.message ?? {};

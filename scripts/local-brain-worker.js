@@ -286,20 +286,46 @@ A "newsletter" entity represents an EXTERNAL PUBLICATION the user's automation h
 - The user themselves never works_on a newsletter unless they are literally the publisher.`;
 }
 
+// Hard ceiling on Ollama response time. Real entity-extraction completes in
+// 1-30s on the 5090; anything past 90s is almost certainly gemma stuck in a
+// token loop (the ",er,er,er,er..." failure mode). Without a timeout the
+// worker waits the full 5m before Ollama 500s. With it we fail fast, mark
+// the row failed, and move on -- the row gets retried on the next worker
+// start via resetFailedItems(). Tune via OLLAMA_TIMEOUT_MS env var.
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 90_000);
+// Cap output tokens. Entity-extraction JSON is at most a few hundred tokens;
+// 4096 is generous headroom. Stops runaway generation cold even if the model
+// refuses to emit a stop token.
+const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT || 4096);
+
 async function callOllama(content) {
-  const response = await fetch(OLLAMA_GENERATE_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      prompt: buildPrompt(content),
-      stream: false,
-      format: "json",
-      options: {
-        temperature: 0,
-      },
-    }),
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), OLLAMA_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(OLLAMA_GENERATE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: MODEL,
+        prompt: buildPrompt(content),
+        stream: false,
+        format: "json",
+        options: {
+          temperature: 0,
+          num_predict: OLLAMA_NUM_PREDICT,
+        },
+      }),
+      signal: ctrl.signal,
+    });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(`Ollama timeout after ${OLLAMA_TIMEOUT_MS}ms (likely token loop with ${MODEL})`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!response.ok) throw new Error(`Ollama error ${response.status}: ${await response.text()}`);
   const result = await response.json();
@@ -886,12 +912,23 @@ async function processQueue() {
       }
       await processItem(item);
     } catch (err) {
-      console.error("Worker error:", err.message);
+      // Surface err.cause and err.code so failures aren't all the same
+      // bare "fetch failed". Node's fetch wraps network errors in a
+      // TypeError whose .cause holds the real ECONNREFUSED / EAI_AGAIN
+      // / AbortError. Without this every entry in queue.last_error
+      // reads "fetch failed" and you can't tell Ollama-hangs from
+      // PostgREST blips from network outages.
+      const causeMsg =
+        err && err.cause
+          ? `${err.cause.code || err.cause.name || ""} ${err.cause.message || err.cause}`.trim()
+          : "";
+      const fullMsg = causeMsg ? `${err.message} (cause: ${causeMsg})` : String(err.message || err);
+      console.error("Worker error:", fullMsg);
       if (item?.thought_id) {
         try {
           await queueUpdate(item.thought_id, {
             status: "failed",
-            last_error: String(err.message || err).slice(0, 500),
+            last_error: fullMsg.slice(0, 500),
             processed_at: new Date().toISOString(),
           });
         } catch (queueErr) {
