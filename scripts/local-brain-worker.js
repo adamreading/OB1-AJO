@@ -366,13 +366,19 @@ const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT || 4096);
 // transcript or a multi-paragraph capture never silently loses the tail.
 // The loaded runner (per server.log KvSize=65536) has headroom for this.
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX || 32768);
-// Single temperature knob for everything Ollama (extraction here, wiki
-// generation in recipes/entity-wiki/generate-wiki.mjs). Pure greedy
-// decoding (temp=0) gives gemma4 zero way out of token loops -- a small
-// amount of stochasticity is the standard defense. Override per-run via
-// OLLAMA_TEMPERATURE in .env.
+// Worker (JSON-mode) temperature. SEPARATE from the wiki compiler's temp
+// because JSON-mode reliability and prose loop-escape want opposite things:
+//   - JSON mode at temp=0 is rock-solid (deterministic grammar walk)
+//   - JSON mode at temp=0.5 we observed gemma4 falling into INTRA-OBJECT
+//     token loops (e.g. emitting "type": "tool" 80 times before stopping)
+//     that the structural-JSON-repair pass can't recover.
+// So worker stays at 0 (env: WORKER_TEMPERATURE) by default, and the wiki
+// compiler uses its own knob (OLLAMA_TEMPERATURE or its WIKI fallback)
+// where moderate stochasticity is desirable.
 const OLLAMA_TEMPERATURE = Number(
-  process.env.OLLAMA_TEMPERATURE !== undefined ? process.env.OLLAMA_TEMPERATURE : 0.5
+  process.env.WORKER_TEMPERATURE !== undefined
+    ? process.env.WORKER_TEMPERATURE
+    : 0
 );
 
 async function callOllama(content) {
