@@ -20,6 +20,7 @@ export async function GET(request: NextRequest) {
     "min_weight",
     "classification",
     "focus_id",
+    "focus_ids",
     "excluded_types",
   ]) {
     const v = request.nextUrl.searchParams.get(k);

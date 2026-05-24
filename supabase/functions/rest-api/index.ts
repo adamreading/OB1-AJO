@@ -1425,6 +1425,11 @@ app.get("/sources", async (c) => {
 //   on the currently-viewed entity without being trapped inside the global
 //   top-N.
 //
+// focus_ids: comma-separated list of entity IDs. When passed, returns the
+//   UNION of every focus's neighbourhood — used by wiki search when a query
+//   like "zoom" matches multiple entities (Zoom + Zoom Contact Centre + Zoom
+//   Virtual Agents) and the user wants all of them shown together.
+//
 // excluded_types: comma-separated entity_types to drop server-side. Honours
 //   the dashboard / wiki type-filter chips so toggled-off types don't eat
 //   slots in the top-N.
@@ -1437,7 +1442,12 @@ app.get("/constellation", async (c) => {
   const minWeight = Math.max(1, Number(c.req.query("min_weight")) || 2);
   const classification = c.req.query("classification") || null;
   const focusIdRaw = c.req.query("focus_id");
+  const focusIdsRaw = c.req.query("focus_ids") || "";
   const focusId = focusIdRaw ? Number(focusIdRaw) : null;
+  const focusIdsList = focusIdsRaw
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
   const excludedTypesRaw = c.req.query("excluded_types") || "";
   const excludedTypes = excludedTypesRaw
     .split(",")
@@ -1445,25 +1455,36 @@ app.get("/constellation", async (c) => {
     .filter(Boolean);
   const excludedTypesArg = excludedTypes.length > 0 ? excludedTypes : null;
 
-  // Two RPC calls. Each runs in Postgres (GROUP BY / self-join) so no row
-  // cap matters regardless of how big the brain gets.
-  // - focus mode → constellation_focus_neighbors centres on the given entity
-  // - default → constellation_top_entities ranks by mention count
-  const { data: topData, error: topErr } = focusId && !isNaN(focusId)
-    ? await supabase.rpc("constellation_focus_neighbors", {
-        p_focus_id: focusId,
+  // Three RPC paths depending on how the caller wants to scope the graph:
+  // - focus_ids[]      → constellation_focus_neighbors_multi (union of N hoods)
+  // - focus_id (single) → constellation_focus_neighbors
+  // - neither           → constellation_top_entities (default top-N)
+  const useMulti = focusIdsList.length > 0;
+  const useSingle = !useMulti && focusId !== null && !isNaN(focusId);
+  const { data: topData, error: topErr } = useMulti
+    ? await supabase.rpc("constellation_focus_neighbors_multi", {
+        p_focus_ids: focusIdsList,
         p_days: days,
         p_limit: limit,
         p_classification: classification,
         p_min_weight: 1,
         p_excluded_types: excludedTypesArg,
       })
-    : await supabase.rpc("constellation_top_entities", {
-        p_days: days,
-        p_limit: limit,
-        p_classification: classification,
-        p_excluded_types: excludedTypesArg,
-      });
+    : useSingle
+      ? await supabase.rpc("constellation_focus_neighbors", {
+          p_focus_id: focusId,
+          p_days: days,
+          p_limit: limit,
+          p_classification: classification,
+          p_min_weight: 1,
+          p_excluded_types: excludedTypesArg,
+        })
+      : await supabase.rpc("constellation_top_entities", {
+          p_days: days,
+          p_limit: limit,
+          p_classification: classification,
+          p_excluded_types: excludedTypesArg,
+        });
   if (topErr) return c.json({ error: topErr.message }, 500, corsHeaders);
 
   type TopRow = { entity_id: number; canonical_name: string; entity_type: string; mentions: number | string };

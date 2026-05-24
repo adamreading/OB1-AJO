@@ -696,36 +696,54 @@ export function WikiGraphView({
     return best?.entity_id ?? null;
   }, [searchMatchIds, searchQuery, wikiIndex]);
 
+  // When search matches multiple entities (e.g. "zoom" -> Zoom + Zoom Contact
+  // Centre + Zoom Virtual Agents), we want ALL of them on the graph at once,
+  // not just the best single match. Build a stable comma-separated id-list
+  // for the fetch effect's dep array so it only refires when the *set*
+  // actually changes (not on every re-render).
+  const searchFocusIdsCsv = useMemo<string>(() => {
+    if (!searchQuery.trim() || searchMatchIds.size === 0) return "";
+    // Cap to keep the union neighbourhood reasonable -- 12 matches is
+    // already a wider-than-necessary search result for a single query.
+    return Array.from(searchMatchIds).slice(0, 12).sort((a, b) => a - b).join(",");
+  }, [searchQuery, searchMatchIds]);
+
   // Pull constellation. Refetches when:
   //  - top-N chooser changes (slot count)
   //  - selected entity_id changes (focus mode → centre on that entity and
   //    fetch all its co-occurring neighbours, not just the global top-N)
   //  - hiddenTypes changes (type-filter chips → server excludes those types
   //    from selection so freed slots go to entities you actually want)
-  //  - searchFocusId changes (alias-aware search auto-centres the
-  //    constellation on the best match)
+  //  - searchFocusIdsCsv changes (alias-aware search; multi-match fetches
+  //    the union of every matched entity's neighbourhood at once)
   // The min_weight slider stays a pure client-side dim/filter — it doesn't
   // touch the fetch deps, so dragging it doesn't re-hit the server.
   useEffect(() => {
     let cancelled = false;
     setGraphLoading(true);
     // Focus precedence:
-    //   1. searchFocusId — a search match outside the current graph re-centres
-    //      so the matched entity actually becomes visible.
+    //   1. searchFocusIdsCsv (multiple matches) — send focus_ids[] so server
+    //      returns the UNION of every match's neighbourhood. "Zoom" matches
+    //      3 entities → all 3 show up together with their connections.
     //   2. selected.entity_id — the wiki page the user is reading.
     //   3. (neither) — default top-N by mention count.
     // Focus mode pulls the entity's full history (days=0) so sparsely-mentioned
     // entities (an old friend, a one-meeting project) still surface their
     // neighbourhood. Default mode keeps the 90-day window so the unfocused
     // constellation reflects what's currently hot.
-    const effectiveFocusId = searchFocusId ?? selected?.entity_id ?? null;
-    const inFocus = effectiveFocusId !== null;
+    const hasSearchFocus = searchFocusIdsCsv !== "";
+    const fallbackFocusId = selected?.entity_id ?? null;
+    const inFocus = hasSearchFocus || fallbackFocusId !== null;
     const params = new URLSearchParams({
       days: inFocus ? "0" : "90",
       limit: topN,
       min_weight: "1",
     });
-    if (inFocus) params.set("focus_id", String(effectiveFocusId));
+    if (hasSearchFocus) {
+      params.set("focus_ids", searchFocusIdsCsv);
+    } else if (fallbackFocusId !== null) {
+      params.set("focus_id", String(fallbackFocusId));
+    }
     if (hiddenTypes.size > 0) {
       params.set("excluded_types", Array.from(hiddenTypes).join(","));
     }
@@ -742,7 +760,7 @@ export function WikiGraphView({
     return () => {
       cancelled = true;
     };
-  }, [topN, selected?.entity_id, hiddenTypes, searchFocusId]);
+  }, [topN, selected?.entity_id, hiddenTypes, searchFocusIdsCsv]);
 
   // Build entity-name → slug map for [Entity Name] resolution in markdown
   // AND the searchable index for the constellation search box.
