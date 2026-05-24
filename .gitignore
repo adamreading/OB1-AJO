@@ -39,3 +39,4 @@ wikis/
 compiled-wiki/
 output/
 imports/
+worker-json-failures.log

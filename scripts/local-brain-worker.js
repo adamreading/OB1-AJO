@@ -170,14 +170,77 @@ function stripCodeFences(text) {
     .trim();
 }
 
+// LLM-targeted JSON repair. At higher temperatures (we use 0.5 to break
+// gemma4 token loops) the model occasionally produces almost-valid JSON
+// with small structural errors: trailing commas, missing commas between
+// array elements, unclosed brackets. Each repair is a single targeted
+// regex — anything more elaborate belongs in the `jsonrepair` package,
+// but adding a dep for this isolated case isn't worth it.
+function repairLikelyJsonErrors(s) {
+  return (
+    s
+      // Trailing commas before closing }/].
+      .replace(/,\s*([}\]])/g, "$1")
+      // Missing commas between string elements: `"a" "b"` -> `"a", "b"`.
+      // Watch out: don't break valid `"key": "value"` pairs.
+      .replace(/"\s*\n\s*"/g, '", "')
+      // Missing commas between an object close and a new object: `} {` -> `}, {`.
+      .replace(/}\s*\n\s*{/g, "}, {")
+      // Missing commas between array close and array open at same depth.
+      .replace(/]\s*\n\s*\[/g, "], [")
+  );
+}
+
+function balanceBrackets(s) {
+  // Append missing closers when counts don't match. Crude but catches the
+  // common truncated-output case where the model stops mid-array.
+  const opens = { "{": 0, "[": 0 };
+  const closes = { "}": 0, "]": 0 };
+  let inString = false;
+  let escape = false;
+  for (const ch of s) {
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') inString = !inString;
+    if (inString) continue;
+    if (ch === "{") opens["{"]++;
+    else if (ch === "[") opens["["]++;
+    else if (ch === "}") closes["}"]++;
+    else if (ch === "]") closes["]"]++;
+  }
+  let out = s;
+  const missingArr = opens["["] - closes["]"];
+  const missingObj = opens["{"] - closes["}"];
+  if (missingArr > 0) out += "]".repeat(missingArr);
+  if (missingObj > 0) out += "}".repeat(missingObj);
+  return out;
+}
+
 function parseJsonObject(text) {
   const cleaned = stripCodeFences(text);
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error(`No JSON object found in Ollama response: ${cleaned.slice(0, 300)}`);
-    return JSON.parse(match[0]);
+  // 1. As-is.
+  try { return JSON.parse(cleaned); } catch {}
+  // 2. Pull the first {...} block out of any surrounding chatter.
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  const candidate = match ? match[0] : cleaned;
+  try { return JSON.parse(candidate); } catch {}
+  // 3. Apply targeted LLM-error repairs.
+  const repaired = repairLikelyJsonErrors(candidate);
+  try { return JSON.parse(repaired); } catch {}
+  // 4. Balance brackets and try again.
+  const balanced = balanceBrackets(repaired);
+  try { return JSON.parse(balanced); } catch (finalErr) {
+    // Persist the raw input so we can diagnose the next time it happens.
+    // Single rolling file in the repo root — captures last 20 failures
+    // so we can pattern-match what gemma is doing wrong.
+    try {
+      const path = require("path");
+      const fs = require("fs");
+      const logPath = path.join(__dirname, "..", "worker-json-failures.log");
+      const stamp = new Date().toISOString();
+      fs.appendFileSync(logPath, `\n===== ${stamp} =====\n${cleaned.slice(0, 4000)}\n`);
+    } catch {}
+    throw new Error(`JSON parse failed after repairs: ${finalErr.message}`);
   }
 }
 
