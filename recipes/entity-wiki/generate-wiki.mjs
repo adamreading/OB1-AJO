@@ -693,7 +693,13 @@ async function synthesize(env, model, payload) {
           { role: "user", content: userContent },
           { role: "assistant", content: entityHeading },
         ],
-        temperature: 0.3,
+        // Single temperature knob, shared with the entity-extraction worker
+        // (scripts/local-brain-worker.js). Settable via OLLAMA_TEMPERATURE in
+        // .env; defaults to 0.5 — enough stochasticity to break gemma4 token
+        // loops while keeping output stable run-to-run.
+        temperature: Number(
+          env.OLLAMA_TEMPERATURE !== undefined ? env.OLLAMA_TEMPERATURE : 0.5
+        ),
         max_tokens: 4096,
         think: false,
       }),

@@ -297,6 +297,14 @@ const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 90_000);
 // 4096 is generous headroom. Stops runaway generation cold even if the model
 // refuses to emit a stop token.
 const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT || 4096);
+// Single temperature knob for everything Ollama (extraction here, wiki
+// generation in recipes/entity-wiki/generate-wiki.mjs). Pure greedy
+// decoding (temp=0) gives gemma4 zero way out of token loops -- a small
+// amount of stochasticity is the standard defense. Override per-run via
+// OLLAMA_TEMPERATURE in .env.
+const OLLAMA_TEMPERATURE = Number(
+  process.env.OLLAMA_TEMPERATURE !== undefined ? process.env.OLLAMA_TEMPERATURE : 0.5
+);
 
 async function callOllama(content) {
   const ctrl = new AbortController();
@@ -312,7 +320,7 @@ async function callOllama(content) {
         stream: false,
         format: "json",
         options: {
-          temperature: 0,
+          temperature: OLLAMA_TEMPERATURE,
           num_predict: OLLAMA_NUM_PREDICT,
         },
       }),
