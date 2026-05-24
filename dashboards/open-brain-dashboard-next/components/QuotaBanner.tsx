@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 
 interface QuotaCheck {
   name: string;
@@ -28,19 +29,24 @@ const DISMISS_KEY = "ob-quota-banner-dismissed-until";
 export function QuotaBanner() {
   const [quotas, setQuotas] = useState<QuotaResponse | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  const pathname = usePathname();
 
   useEffect(() => {
     const dismissedUntil = Number(localStorage.getItem(DISMISS_KEY) || 0);
     if (Date.now() < dismissedUntil) {
       setDismissed(true);
     }
+    // Skip the fetch on /login — the user isn't authed yet, so it would
+    // always 401. Cosmetic only (the API handles it gracefully) but it
+    // keeps the dev-server log clean.
+    if (pathname === "/login") return;
     fetch("/api/quotas")
       .then((r) => (r.ok ? r.json() : null))
       .then((d: QuotaResponse | null) => {
         if (d) setQuotas(d);
       })
       .catch(() => {});
-  }, []);
+  }, [pathname]);
 
   if (dismissed || !quotas) return null;
   if (!quotas.near_cap && !quotas.over_cap) return null;

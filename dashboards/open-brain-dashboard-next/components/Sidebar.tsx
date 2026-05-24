@@ -82,6 +82,10 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
   }, [showThemes]);
 
   useEffect(() => {
+    // Skip on /login — user isn't authed so the fetch would always 401.
+    // The return-null below stops the component rendering anyway; this
+    // keeps the dev-server log clean too.
+    if (pathname === "/login") return;
     let cancelled = false;
     fetch("/api/sidebar-counts")
       .then((r) => (r.ok ? r.json() : null))
@@ -92,7 +96,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [pathname]);
 
   if (pathname === "/login") return null;
 
