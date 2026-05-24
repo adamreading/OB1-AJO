@@ -714,6 +714,19 @@ async function synthesize(env, model, payload) {
         ),
         max_tokens: 4096,
         think: false,
+        // Input context window — Ollama's OpenAI-compat endpoint accepts
+        // `options` as a passthrough to its native API. Default is gemma's
+        // 2048 which silently truncates the prompt for high-coverage
+        // entities (60 linked × 500 chars + 30 semantic × 500 chars + edges
+        // + system prompt is ~14k tokens). Gated on Ollama base URL so
+        // non-Ollama providers (OpenRouter, etc.) aren't sent unknown fields.
+        ...(/(:11434|ollama|localhost|127\.0\.0\.1)/i.test(baseUrl)
+          ? {
+              options: {
+                num_ctx: Number(env.WIKI_NUM_CTX !== undefined ? env.WIKI_NUM_CTX : 65536),
+              },
+            }
+          : {}),
       }),
       signal: ctrl.signal,
     });

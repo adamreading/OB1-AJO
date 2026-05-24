@@ -297,6 +297,12 @@ const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 90_000);
 // 4096 is generous headroom. Stops runaway generation cold even if the model
 // refuses to emit a stop token.
 const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT || 4096);
+// Input context window. Ollama's default is 2048 — anything past that in the
+// prompt is silently truncated. Single-thought extraction rarely exceeds 5k
+// tokens (~20k chars) but we set 32768 so re-extracting a long Plaud
+// transcript or a multi-paragraph capture never silently loses the tail.
+// The loaded runner (per server.log KvSize=65536) has headroom for this.
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX || 32768);
 // Single temperature knob for everything Ollama (extraction here, wiki
 // generation in recipes/entity-wiki/generate-wiki.mjs). Pure greedy
 // decoding (temp=0) gives gemma4 zero way out of token loops -- a small
@@ -322,6 +328,7 @@ async function callOllama(content) {
         options: {
           temperature: OLLAMA_TEMPERATURE,
           num_predict: OLLAMA_NUM_PREDICT,
+          num_ctx: OLLAMA_NUM_CTX,
         },
       }),
       signal: ctrl.signal,
