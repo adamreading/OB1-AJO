@@ -581,6 +581,10 @@ Run the unified start script from the project root. This launches all four local
 
 > **Prerequisites**: `psmux` and Windows Terminal (`wt.exe`) must be on the system. Install psmux via `winget install psmux` (or equivalent). Paths to `psmux`, `wt`, and `powershell.exe` are pinned at the top of `start_brain.ps1` — edit if your install locations differ. `start_brain.ps1` also hardcodes Applaud's path (`$ApplaudPath`); edit if Applaud is cloned elsewhere.
 >
+> **Pre-launch smoke gate**: `start_brain.ps1` runs `scripts/smoke-gate.mjs` before the reaper. The gate wraps `recipes/brain-smoke-test/smoke-all.js`, mapping AJO env var names (`SUPABASE_KEY` → upstream's `SUPABASE_SERVICE_ROLE_KEY`) and probing ~30 surfaces of the deploy (MCP transport, REST endpoints, DB schema, RLS, access-key enforcement). Pass `-SkipSmoke` to bypass. Skips cleanly if `MCP_ACCESS_KEY` isn't in `.env`.
+>
+> **LLM tuning knobs**: All in `.env` — see `example.env` for the canonical list with rationale. Key ones: `WORKER_TEMPERATURE=0` (worker JSON mode, must stay near 0), `OLLAMA_TEMPERATURE=0.5` (wiki compiler prose), `OLLAMA_NUM_CTX=32768` / `WIKI_NUM_CTX=65536` (Ollama's per-request default is 2048 which silently truncates), `OLLAMA_TIMEOUT_MS=90000` / `WIKI_LLM_TIMEOUT_MS=180000` (fail-fast on gemma4 token loops), `WIKI_MAX_LINKED=60` / `WIKI_MAX_SEMANTIC=30` / `WIKI_SNIPPET_CHARS=500` (wiki input coverage).
+>
 > **Plaud ingestion (2026-05-17 onward — local curator edition)**: Adam applies the "Open Brain Ready Thought Extractor" template in Plaud after reviewing/correcting a transcript. Applaud fires the webhook → `scripts/plaud-webhook.js` (curator) parses each `---ENTRY---` block, applies `processor_prompt/entity_corrections.json` STT fixes, searches Open Brain via REST per entry's `SEARCH_HINTS` and `ENTITIES` fields, asks local Qwen3:30b to decide IGNORE / UPDATE / CAPTURE, and writes via `/capture-pending` so everything lands in the dashboard **Review** panel (`/review`) for manual approval. Curator state lives in `processor_prompt/` (gitignored — see CLAUDE.md for the file schemas).
 
 ### How the integrated workflow runs

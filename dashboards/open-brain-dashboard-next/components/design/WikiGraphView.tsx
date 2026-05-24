@@ -8,6 +8,7 @@ import {
   type EntityTypeInfo,
 } from "./ThoughtGraph";
 import { Card, SegBar } from "./Atoms";
+import { EntityQuickEditModal } from "./EntityQuickEditModal";
 
 interface WikiPageDetail {
   id: number;
@@ -598,6 +599,15 @@ export function WikiGraphView({
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [entityTypes, setEntityTypes] = useState<EntityTypeInfo[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  // Quick-edit modal state. Opens when the user clicks a constellation
+  // node whose slug is null (no wiki page yet). Lets them correct type /
+  // rename / delete without needing the entity to cross MIN_LINKED_FOR_WIKI.
+  const [quickEditNode, setQuickEditNode] = useState<
+    { id: number; name: string; type: string } | null
+  >(null);
+  // Bumped after every quick-edit save/delete so the constellation fetch
+  // effect re-runs and the canvas reflects the change.
+  const [refetchTick, setRefetchTick] = useState(0);
   const [edges, setEdges] = useState<EdgeRow[]>([]);
   const [edgesLoading, setEdgesLoading] = useState(false);
   const [reflections, setReflections] = useState<ReflectionRow[]>([]);
@@ -760,7 +770,7 @@ export function WikiGraphView({
     return () => {
       cancelled = true;
     };
-  }, [topN, selected?.entity_id, hiddenTypes, searchFocusIdsCsv]);
+  }, [topN, selected?.entity_id, hiddenTypes, searchFocusIdsCsv, refetchTick]);
 
   // Build entity-name → slug map for [Entity Name] resolution in markdown
   // AND the searchable index for the constellation search box.
@@ -893,7 +903,17 @@ export function WikiGraphView({
   );
 
   function handleNodeClick(node: ConstellationNode) {
-    if (node.slug) onSelectSlug(node.slug);
+    // Wiki-backed entity → open the article (existing behaviour).
+    if (node.slug) {
+      onSelectSlug(node.slug);
+      return;
+    }
+    // Sub-threshold entity (no wiki page) → quick-edit panel. Only path
+    // to correct the entity's type / name / delete it before it crosses
+    // MIN_LINKED_FOR_WIKI and gets a real page. Shift-click is still
+    // handled by ThoughtGraph itself (focus mode) before this callback
+    // fires.
+    setQuickEditNode({ id: node.id, name: node.label, type: node.type });
   }
 
   return (
@@ -1439,6 +1459,16 @@ export function WikiGraphView({
             </div>
           </div>
         </>
+      )}
+
+      {quickEditNode && (
+        <EntityQuickEditModal
+          entity={quickEditNode}
+          entityTypes={entityTypes}
+          onClose={() => setQuickEditNode(null)}
+          onUpdated={() => setRefetchTick((t) => t + 1)}
+          onDeleted={() => setRefetchTick((t) => t + 1)}
+        />
       )}
     </div>
   );
