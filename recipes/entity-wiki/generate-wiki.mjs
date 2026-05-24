@@ -71,8 +71,16 @@ function parseArgs(argv) {
     batchLimit: 25,
     semanticExpand: false,
     dryRun: false,
-    maxLinked: 25,
-    maxSemantic: 15,
+    // Input-context caps. Env vars give one knob per concern, CLI flags
+    // (--max-linked, --max-semantic, --snippet-chars) still override
+    // per-invocation. Defaults sized for gemma4:26b on the 5090 with
+    // plenty of headroom: 60 directly-linked thoughts + 30 semantic
+    // matches, each truncated to 500 chars. For Adam (139 linked) this
+    // means the model sees the 60 newest at 500 chars each instead of
+    // the previous 25 newest at 300 chars each — roughly 4x more signal.
+    maxLinked: Number(process.env.WIKI_MAX_LINKED ?? 60),
+    maxSemantic: Number(process.env.WIKI_MAX_SEMANTIC ?? 30),
+    snippetChars: Number(process.env.WIKI_SNIPPET_CHARS ?? 500),
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -101,6 +109,8 @@ function parseArgs(argv) {
     else if (a.startsWith("--max-linked=")) args.maxLinked = Number(a.slice(13));
     else if (a === "--max-semantic") args.maxSemantic = Number(next());
     else if (a.startsWith("--max-semantic=")) args.maxSemantic = Number(a.slice(15));
+    else if (a === "--snippet-chars") args.snippetChars = Number(next());
+    else if (a.startsWith("--snippet-chars=")) args.snippetChars = Number(a.slice(16));
     else if (a === "--help" || a === "-h") {
       args.help = true;
     }
@@ -384,14 +394,16 @@ async function semanticExpand(sb, env, entity) {
 // LLM synthesis (provider-agnostic Chat Completions)
 // ---------------------------------------------------------------
 
-function buildSynthesisInput(entity, linked, semantic, nameMap, relatedWikiLinks, maxLinked, maxSemantic) {
+function buildSynthesisInput(entity, linked, semantic, nameMap, relatedWikiLinks, maxLinked, maxSemantic, snippetChars = 500) {
   // Prepare snippets: truncate long content, cap counts, prefer typed mentions.
+  // snippetChars caps per-snippet content; tuned via --snippet-chars CLI flag
+  // or WIKI_SNIPPET_CHARS env var.
   const linkedSnippets = (linked || []).slice(0, maxLinked).map((t) => ({
     id: t.id,
     date: String(t.created_at || "").slice(0, 10),
     type: t.type,
     role: t.mention_role,
-    content: String(t.content || "").slice(0, 300),
+    content: String(t.content || "").slice(0, snippetChars),
   }));
 
   const linkedIds = new Set(linkedSnippets.map((l) => l.id));
@@ -402,7 +414,7 @@ function buildSynthesisInput(entity, linked, semantic, nameMap, relatedWikiLinks
       id: t.id,
       date: String(t.created_at || "").slice(0, 10),
       type: t.type,
-      content: String(t.content || "").slice(0, 300),
+      content: String(t.content || "").slice(0, snippetChars),
     }));
 
   // Edges: resolve names, group by relation. Note: fetchTypedEdges already
@@ -1109,6 +1121,7 @@ async function generateForEntity(sb, env, entity, args, knownEntityIds = new Set
     relatedWikiLinks,
     args.maxLinked,
     args.maxSemantic,
+    args.snippetChars,
   );
   const model = args.model || env.LLM_MODEL || env.OLLAMA_MODEL || "anthropic/claude-haiku-4-5";
   const wiki = await synthesize(env, model, payload);
