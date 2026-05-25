@@ -92,8 +92,16 @@ export function DashboardClient({
   }>({ nodes: [], edges: [], strongest: null });
   const [graphLoading, setGraphLoading] = useState(true);
   const [minWeight, setMinWeight] = useState(2);
-  const [topN, setTopN] = useState<"30" | "60" | "100">("30");
+  // Bumped to 2000 (effectively "all entities") so the hero matches the
+  // wiki constellation experience: zoom is the affordance for "show more
+  // / show less" now, not a coarse Top-N chooser.
+  const topN = "2000";
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
+  // Hide-self drops the dominant hub entity (the user) so topical
+  // structure is visible. Isolated-only is the inverse view — entities
+  // that don't co-occur with the user at all.
+  const [hideSelf, setHideSelf] = useState(false);
+  const [isolatedOnly, setIsolatedOnly] = useState(false);
   const [entityTypes, setEntityTypes] = useState<EntityTypeInfo[]>([]);
 
   function toggleType(t: string) {
@@ -468,17 +476,46 @@ export function DashboardClient({
                     return `showing ${liveNodes.size} entities · ${liveEdges.length} of ${graph.edges.length} links`;
                   })()}
                 </span>
-                {/* Top-N chooser. Server returns top N entities by mention
-                    count; raise to see more of the brain. */}
-                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span className="eyebrow">Top</span>
-                  <SegBar
-                    options={["30", "60", "100"] as const}
-                    active={topN}
-                    onChange={setTopN}
-                    size="sm"
-                  />
-                </span>
+                {/* Hide-me + isolated-only toggles. Match the wiki view's
+                    filter rail so the hero behaves consistently. */}
+                <button
+                  type="button"
+                  onClick={() => setHideSelf((v) => !v)}
+                  style={{
+                    fontSize: 11,
+                    padding: "4px 10px",
+                    borderRadius: 6,
+                    background: hideSelf ? "rgba(157,131,255,0.15)" : "transparent",
+                    border: `1px solid ${
+                      hideSelf ? "rgba(157,131,255,0.5)" : "var(--line)"
+                    }`,
+                    color: hideSelf ? "var(--violet-200)" : "var(--fg-3)",
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                  title="Drop the user's own entity from the graph"
+                >
+                  {hideSelf ? "✓ hide me" : "hide me"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsolatedOnly((v) => !v)}
+                  style={{
+                    fontSize: 11,
+                    padding: "4px 10px",
+                    borderRadius: 6,
+                    background: isolatedOnly ? "rgba(255,150,80,0.15)" : "transparent",
+                    border: `1px solid ${
+                      isolatedOnly ? "rgba(255,150,80,0.5)" : "var(--line)"
+                    }`,
+                    color: isolatedOnly ? "#ffb787" : "var(--fg-3)",
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                  title="Show ONLY entities that don't co-occur with the user themself"
+                >
+                  {isolatedOnly ? "✓ isolated only" : "isolated only"}
+                </button>
               </div>
             );
           })()}
@@ -498,7 +535,27 @@ export function DashboardClient({
               </div>
             ) : (
               <ThoughtGraph
-                nodes={graph.nodes}
+                nodes={(() => {
+                  // Apply hide-self / isolated-only filters before ThoughtGraph
+                  // sees the nodes. Same rules as the wiki view: self is the
+                  // highest-mention entity; isolated = doesn't co-occur with self.
+                  if (graph.nodes.length === 0) return graph.nodes;
+                  const selfId = graph.nodes.reduce((b, n) =>
+                    n.mentions > b.mentions ? n : b
+                  ).id;
+                  if (isolatedOnly) {
+                    const conn = new Set<number>();
+                    for (const e of graph.edges) {
+                      if (e.source === selfId) conn.add(e.target);
+                      if (e.target === selfId) conn.add(e.source);
+                    }
+                    return graph.nodes.filter(
+                      (n) => n.id !== selfId && !conn.has(n.id)
+                    );
+                  }
+                  if (hideSelf) return graph.nodes.filter((n) => n.id !== selfId);
+                  return graph.nodes;
+                })()}
                 edges={graph.edges}
                 // Smaller viewBox on mobile so nodes appear larger when the
                 // SVG scales to the narrow viewport.

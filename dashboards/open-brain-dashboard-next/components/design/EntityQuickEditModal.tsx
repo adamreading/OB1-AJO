@@ -1,7 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { EntityTypeInfo } from "./ThoughtGraph";
+
+interface SourceThought {
+  serial_id: number;
+  content_preview: string;
+  type: string | null;
+  classification: string | null;
+  source_type: string | null;
+  created_at: string;
+}
 
 interface Props {
   entity: { id: number; name: string; type: string };
@@ -34,6 +43,32 @@ export function EntityQuickEditModal({
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Source thoughts — the thoughts where this entity was extracted from.
+  // Often the fastest fix for a mis-typed entity is to edit one of these
+  // and re-extract; the entity may even disappear if its name no longer
+  // appears in any thought after the edit.
+  const [sources, setSources] = useState<SourceThought[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(true);
+  const [sourcesTotal, setSourcesTotal] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSourcesLoading(true);
+    fetch(`/api/entities/${entity.id}/thoughts?limit=20`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d) return;
+        setSources(d.thoughts || []);
+        setSourcesTotal(d.total || 0);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setSourcesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [entity.id]);
 
   const dirty = name.trim() !== entity.name || type !== entity.type;
 
@@ -180,6 +215,86 @@ export function EntityQuickEditModal({
             )}
           </select>
         </label>
+
+        {/* Source thoughts — the thoughts where this entity is mentioned.
+            Often the fastest fix for a mis-typed or noisy entity is to
+            edit one of these directly. After the edit the worker
+            re-extracts and the entity may even disappear if its name
+            no longer appears anywhere. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span className="eyebrow">
+            Source thoughts
+            {sourcesTotal > 0 && (
+              <span style={{ color: "var(--fg-4)", marginLeft: 6 }}>
+                ({sourcesTotal})
+              </span>
+            )}
+          </span>
+          {sourcesLoading ? (
+            <span style={{ fontSize: 12, color: "var(--fg-4)" }}>Loading…</span>
+          ) : sources.length === 0 ? (
+            <span style={{ fontSize: 12, color: "var(--fg-4)" }}>
+              No linked thoughts. The entity may be orphaned — Delete is safe.
+            </span>
+          ) : (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+                maxHeight: 160,
+                overflowY: "auto",
+                border: "1px solid var(--line)",
+                borderRadius: 8,
+                background: "var(--bg-2)",
+              }}
+            >
+              {sources.map((t) => (
+                <a
+                  key={t.serial_id}
+                  href={`/thoughts/${t.serial_id}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    gap: 8,
+                    padding: "6px 10px",
+                    fontSize: 12,
+                    color: "var(--fg-2)",
+                    textDecoration: "none",
+                    borderBottom: "1px solid var(--line)",
+                  }}
+                  title="Open thought · edit content · worker re-extracts on save"
+                >
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                      color: "var(--violet-300)",
+                      flexShrink: 0,
+                      width: 36,
+                    }}
+                  >
+                    #{t.serial_id}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {t.content_preview}
+                  </span>
+                </a>
+              ))}
+            </div>
+          )}
+          <span style={{ fontSize: 10.5, color: "var(--fg-4)" }}>
+            Edit a thought → save → worker re-extracts → this entity may
+            be auto-removed if its name no longer appears.
+          </span>
+        </div>
 
         {error && (
           <div

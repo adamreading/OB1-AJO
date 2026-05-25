@@ -408,6 +408,33 @@ export function ThoughtGraph({
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
+  // Responsive width. The `width` prop is a fallback / minimum; in reality
+  // the constellation should fill its container, which on desktop is often
+  // 1600-1800px (wider than the 1100 default). Without this, the viewBox
+  // aspect mismatches the container aspect and preserveAspectRatio="meet"
+  // letterboxes 300-400px of empty space on each side. ResizeObserver
+  // measures the actual container width and we use that for the viewBox +
+  // the layout's spread area.
+  const [actualWidth, setActualWidth] = useState<number>(width);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        const w = Math.round(e.contentRect.width);
+        // Only update if meaningfully different (>2px) so micro-jitter
+        // doesn't yo-yo the layout.
+        if (w > 0 && Math.abs(w - actualWidth) > 2) setActualWidth(w);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Effective width used by layout + viewBox. Use the larger of the prop
+  // width (minimum) and the measured container width.
+  const effWidth = Math.max(width, actualWidth);
+
   // Viewport transform: scale (k) and translate (x, y) of the world-space
   // graph relative to the SVG viewBox. Wheel/pinch updates k; click-drag
   // updates x/y. Pointer-vs-click is resolved via a movement threshold so
@@ -530,9 +557,11 @@ export function ThoughtGraph({
   // Anchor priority: explicit focus > caller-provided selection > hottest node
   const pinnedId = focused ?? selectedId ?? hottestId;
 
+  // Layout uses the effective (container-measured) width so positions
+  // spread to fill the actual canvas, not just the fallback 1100.
   const positions = useMemo(
-    () => layout(visibleNodes, filteredEdges, width, height, pinnedId),
-    [visibleNodes, filteredEdges, width, height, pinnedId]
+    () => layout(visibleNodes, filteredEdges, effWidth, height, pinnedId),
+    [visibleNodes, filteredEdges, effWidth, height, pinnedId]
   );
 
   // Active node for label emphasis (focus is centered; non-focus uses hover)
@@ -731,12 +760,12 @@ export function ThoughtGraph({
     const pad = 80;
     const bboxW = Math.max(1, maxX - minX);
     const bboxH = Math.max(1, maxY - minY);
-    const k = Math.min((width - pad * 2) / bboxW, (height - pad * 2) / bboxH, 1.6);
+    const k = Math.min((effWidth - pad * 2) / bboxW, (height - pad * 2) / bboxH, 1.6);
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;
     setViewport({
       k,
-      x: width / 2 - cx * k,
+      x: effWidth / 2 - cx * k,
       y: height / 2 - cy * k,
     });
   }
@@ -745,16 +774,23 @@ export function ThoughtGraph({
   // tight blob. Only runs once per mount; the user's wheel/pinch takes over
   // from there. Re-fitting on every filter change would yo-yo the zoom.
   // The ⌖ fit button gives a manual escape hatch.
+  //
+  // ALSO re-fit when effWidth changes meaningfully (container resize / first
+  // ResizeObserver tick). Otherwise the initial fit uses the fallback width
+  // (1100) and the user sees a tight cluster, then the container measures
+  // its real ~1700px width but the viewport doesn't re-fit.
+  const prevEffWidth = useRef(effWidth);
   useEffect(() => {
-    if (didAutoFit.current) return;
     if (positions.size === 0) return;
+    const widthChanged = Math.abs(effWidth - prevEffWidth.current) > 20;
+    if (didAutoFit.current && !widthChanged) return;
     applyAutoFit();
     didAutoFit.current = true;
-    // applyAutoFit is intentionally not in deps — it closes over positions,
-    // which is in deps already, and re-creating it on every render would
-    // cause infinite re-runs.
+    prevEffWidth.current = effWidth;
+    // applyAutoFit closes over positions/effWidth, both already in deps;
+    // re-creating it on every render would cause loops.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [positions, width, height]);
+  }, [positions, effWidth, height]);
 
   function handleNodeClick(node: ConstellationNode, e: React.MouseEvent) {
     e.preventDefault();
@@ -936,7 +972,7 @@ export function ThoughtGraph({
         ref={svgRef}
         width="100%"
         height={height}
-        viewBox={`0 0 ${width} ${height}`}
+        viewBox={`0 0 ${effWidth} ${height}`}
         style={{
           display: "block",
           cursor: dragState.current?.moved
@@ -966,7 +1002,7 @@ export function ThoughtGraph({
         <rect
           x="0"
           y="0"
-          width={width}
+          width={effWidth}
           height={height}
           fill="url(#constellation-canvas-glow)"
           onClick={() => {

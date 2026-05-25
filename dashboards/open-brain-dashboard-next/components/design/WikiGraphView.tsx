@@ -606,6 +606,11 @@ export function WikiGraphView({
   // it off reveals what the brain actually knows ABOUT (clusters of work,
   // tools, topics) rather than what's connected to YOU.
   const [hideSelf, setHideSelf] = useState(false);
+  // "Isolated only" — inverse view: shows ONLY entities that don't co-occur
+  // with the self entity. ~40% of entities never share a thought with the
+  // user themself (Jira tickets, machine-captured topics, indirectly-
+  // referenced people). This is the audit view for those.
+  const [isolatedOnly, setIsolatedOnly] = useState(false);
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [entityTypes, setEntityTypes] = useState<EntityTypeInfo[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -886,15 +891,33 @@ export function WikiGraphView({
     ).id;
   }, [graph.nodes]);
 
+  // IDs that co-occur with the self entity at least once. Used by
+  // "isolated only" to keep the inverse (entities that don't co-occur
+  // with self) — and by hide-self to know who to keep when we hide them.
+  const selfConnectedIds = useMemo<Set<number>>(() => {
+    if (selfEntityId === null) return new Set();
+    const conn = new Set<number>();
+    for (const e of graph.edges) {
+      if (e.source === selfEntityId) conn.add(e.target);
+      if (e.target === selfEntityId) conn.add(e.source);
+    }
+    return conn;
+  }, [graph.edges, selfEntityId]);
+
   // Apply search filter to nodes. When searching, keep matches PLUS their
   // first-degree neighbors so the user can see what the matched entity is
   // connected to — searching "gemini" alone with no neighbors is just a
   // single floating node, useless for navigation.
   const filteredNodes = useMemo(() => {
-    const base =
-      hideSelf && selfEntityId !== null
-        ? graph.nodes.filter((n) => n.id !== selfEntityId)
-        : graph.nodes;
+    let base = graph.nodes;
+    if (isolatedOnly && selfEntityId !== null) {
+      // Keep entities NOT co-occurring with self, AND not the self itself
+      base = base.filter(
+        (n) => n.id !== selfEntityId && !selfConnectedIds.has(n.id)
+      );
+    } else if (hideSelf && selfEntityId !== null) {
+      base = base.filter((n) => n.id !== selfEntityId);
+    }
     if (!searchQuery.trim()) return base;
     // Use the alias-aware match set against the graph
     const matchIds = new Set(
@@ -907,7 +930,16 @@ export function WikiGraphView({
       if (matchIds.has(e.target)) keep.add(e.source);
     }
     return base.filter((n) => keep.has(n.id));
-  }, [graph.nodes, graph.edges, searchQuery, searchMatchIds, hideSelf, selfEntityId]);
+  }, [
+    graph.nodes,
+    graph.edges,
+    searchQuery,
+    searchMatchIds,
+    hideSelf,
+    selfEntityId,
+    isolatedOnly,
+    selfConnectedIds,
+  ]);
 
   // Active search wins as the visual center. Without this, typing
   // "tom falconar" while the Adam Ososki wiki is open would refetch the
@@ -1034,6 +1066,33 @@ export function WikiGraphView({
             title="Drop the user's own entity from the graph so topical structure is visible"
           >
             {hideSelf ? "✓ hide me" : "hide me"}
+          </button>
+
+          {/* Isolated-only toggle. Inverse view: only entities that don't
+              co-occur with the self entity. Audit surface for things like
+              Jira tickets and machine-captured topics that aren't linked
+              to the user themself. */}
+          <button
+            type="button"
+            onClick={() => setIsolatedOnly((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 11,
+              padding: "4px 10px",
+              borderRadius: 6,
+              background: isolatedOnly ? "rgba(255,150,80,0.15)" : "transparent",
+              border: `1px solid ${
+                isolatedOnly ? "rgba(255,150,80,0.5)" : "var(--line)"
+              }`,
+              color: isolatedOnly ? "#ffb787" : "var(--fg-3)",
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+            title="Show ONLY entities that don't co-occur with the user themself"
+          >
+            {isolatedOnly ? "✓ isolated only" : "isolated only"}
           </button>
 
           {/* Type toggle chips */}

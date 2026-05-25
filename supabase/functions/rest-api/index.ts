@@ -1639,6 +1639,46 @@ app.get("/entities/:id/edges", async (c) => {
   return c.json({ edges }, 200, corsHeaders);
 });
 
+// Thoughts that mention this entity (via thought_entities). Used by the
+// constellation quick-edit modal to give a user one-click access to the
+// source thoughts so they can be edited / deleted directly — after a
+// thought edit + worker re-extraction, a stale entity often disappears
+// because the new content no longer mentions it.
+//
+// Returns the top N most recent thoughts as { serial_id, content_preview,
+// type, classification, created_at }. Defaults to 20; ?limit=N up to 200.
+app.get("/entities/:id/thoughts", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!id || isNaN(id)) return c.json({ error: "Valid entity id required" }, 400, corsHeaders);
+  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 20));
+
+  const { data: links, error: linksErr } = await supabase
+    .from("thought_entities")
+    .select("thought_id")
+    .eq("entity_id", id);
+  if (linksErr) return c.json({ error: linksErr.message }, 500, corsHeaders);
+  const thoughtIds = Array.from(new Set((links ?? []).map((l: { thought_id: string }) => l.thought_id)));
+  if (thoughtIds.length === 0) return c.json({ thoughts: [], total: 0 }, 200, corsHeaders);
+
+  const { data: thoughts, error: thoughtsErr } = await supabase
+    .from("thoughts")
+    .select("id, serial_id, content, type, classification, source_type, created_at")
+    .in("id", thoughtIds)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (thoughtsErr) return c.json({ error: thoughtsErr.message }, 500, corsHeaders);
+
+  const rows = (thoughts ?? []).map((t: { id: string; serial_id: number; content: string; type: string; classification: string; source_type: string; created_at: string }) => ({
+    serial_id: t.serial_id,
+    content_preview: (t.content || "").slice(0, 200),
+    type: t.type,
+    classification: t.classification,
+    source_type: t.source_type,
+    created_at: t.created_at,
+  }));
+  return c.json({ thoughts: rows, total: thoughtIds.length }, 200, corsHeaders);
+});
+
 // Reflections attached to any thought that links to this entity. Used by the
 // wiki page to surface lessons / decisions / retrospectives / hypotheses
 // alongside the entity itself, so they don't get marooned on the single
