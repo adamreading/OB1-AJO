@@ -526,6 +526,14 @@ interface EdgeRow {
   other: { id: number; canonical_name: string; entity_type: string };
 }
 
+interface RecentBlockEntry {
+  from_entity_id: number;
+  to_entity_id: number;
+  relation: string;
+  other_name: string;
+  blocked_at: string;
+}
+
 function EdgesModal({
   page,
   onClose,
@@ -538,6 +546,16 @@ function EdgesModal({
   const [edges, setEdges] = useState<EdgeRow[] | null>(null);
   const [removing, setRemoving] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Recent-undo state — populated on mount if there were any blocklist
+  // entries on this entity in the last 30 minutes. Catches the "panic
+  // delete" pattern where the user nuked a bunch of edges thinking they
+  // were on a different entity.
+  const [recentBlocks, setRecentBlocks] = useState<RecentBlockEntry[]>([]);
+  const [undoLoading, setUndoLoading] = useState(false);
+  const [undoStatus, setUndoStatus] = useState<string | null>(null);
+
+  const entityType =
+    ((page.metadata as { entity_type?: string } | undefined)?.entity_type) ?? page.type;
 
   useEffect(() => {
     if (!page.entity_id) return;
@@ -548,7 +566,43 @@ function EdgesModal({
       })
       .then((d: { edges: EdgeRow[] }) => setEdges(d.edges || []))
       .catch((e: Error) => setError(e.message));
+    // Look for recent block activity on this entity (last 30 min). If any
+    // show up, surface the "undo last session" button so a panic-delete
+    // run is one click to reverse.
+    fetch(`/api/entities/${page.entity_id}/recent-blocks?minutes=30`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { entries?: RecentBlockEntry[] } | null) => {
+        if (d?.entries) setRecentBlocks(d.entries);
+      })
+      .catch(() => {});
   }, [page.entity_id]);
+
+  const handleUndoRecent = useCallback(async () => {
+    if (!page.entity_id) return;
+    setUndoLoading(true);
+    setUndoStatus(null);
+    try {
+      const res = await fetch(
+        `/api/entities/${page.entity_id}/undo-recent-blocks?minutes=30`,
+        { method: "POST" }
+      );
+      const d = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        restored?: number;
+        requeued?: number;
+      };
+      if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      setUndoStatus(
+        `Restored ${d.restored ?? 0} edges, re-queued ${d.requeued ?? 0} thoughts. Worker will rebuild in ~30-60s.`
+      );
+      setRecentBlocks([]);
+      onEdgeRemoved(); // bump parent so it refetches edges
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Undo failed");
+    } finally {
+      setUndoLoading(false);
+    }
+  }, [page.entity_id, onEdgeRemoved]);
 
   const handleRemove = useCallback(async (edge: EdgeRow) => {
     if (!page.entity_id) return;
@@ -593,19 +647,79 @@ function EdgesModal({
         className="bg-bg-surface border border-border rounded-xl shadow-xl w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between p-5 border-b border-border">
-          <h3 className="text-sm font-semibold text-text-primary">
-            Relationships — {page.title}
-          </h3>
-          <button onClick={onClose} className="text-text-muted hover:text-text-secondary transition-colors text-lg leading-none">
-            ×
-          </button>
+        {/* Prominent entity header — answers "which entity am I editing?"
+            so the user never confuses one entity for another mid-session.
+            Wrong-target panic deletes turned out to be a real failure mode
+            (May 2026: user nuked 94 edges on Adam Ososki thinking they
+            were on PostgreSQL). */}
+        <div className="p-5 border-b border-border">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet/15 border border-violet/30 text-violet-200 font-mono">
+                  {entityType}
+                </span>
+                <span className="text-[10px] text-text-muted font-mono">
+                  #{page.entity_id}
+                </span>
+              </div>
+              <h3 className="text-xl font-semibold text-text-primary truncate">
+                {page.title}
+              </h3>
+              <p className="text-xs text-text-muted mt-1">
+                Editing relationships for this entity
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="text-text-muted hover:text-text-secondary transition-colors text-2xl leading-none shrink-0"
+            >
+              ×
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5">
           <p className="text-xs text-text-muted mb-4">
             Removing an edge here also blocklists it. The worker will not recreate this relationship from extraction even if future thoughts mention both entities together. Use this for relationships the LLM keeps inferring incorrectly.
           </p>
+
+          {/* Undo-recent banner. Shows when there have been recent
+              blocklist entries on THIS entity in the last 30 minutes —
+              the signature of a panic-delete burst. One click restores
+              them all (deletes the blocklist rows + re-queues the
+              entity's thoughts so the worker rebuilds edges). */}
+          {recentBlocks.length > 0 && (
+            <div className="mb-4 p-3 rounded-lg border border-violet/40 bg-violet/10">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-violet-200 mb-1">
+                    Recent activity: {recentBlocks.length}{" "}
+                    {recentBlocks.length === 1 ? "edge" : "edges"} removed
+                    on this entity in the last 30 minutes
+                  </p>
+                  <p className="text-[11px] text-text-muted">
+                    e.g. {recentBlocks
+                      .slice(0, 3)
+                      .map((b) => `${b.relation} → ${b.other_name}`)
+                      .join(", ")}
+                    {recentBlocks.length > 3 ? `, +${recentBlocks.length - 3} more` : ""}
+                  </p>
+                </div>
+                <button
+                  onClick={handleUndoRecent}
+                  disabled={undoLoading}
+                  className="shrink-0 px-3 py-1.5 rounded-md text-xs font-medium bg-violet/20 hover:bg-violet/30 border border-violet/50 text-violet-100 transition-colors disabled:opacity-60"
+                  title="Delete the recent blocklist entries and re-queue this entity's thoughts so the worker rebuilds the edges"
+                >
+                  {undoLoading ? "Restoring…" : "↶ Undo last session"}
+                </button>
+              </div>
+              {undoStatus && (
+                <p className="mt-2 text-[11px] text-violet-200">{undoStatus}</p>
+              )}
+            </div>
+          )}
 
           {edges === null && !error && (
             <p className="text-xs text-text-muted">Loading edges…</p>

@@ -1797,6 +1797,116 @@ app.delete("/edges", async (c) => {
   return c.json({ deleted: true, blocklisted: true, from_entity_id: from, to_entity_id: to, relation, requeued: true }, 200, corsHeaders);
 });
 
+// Recent edge_blocklist entries touching this entity. Used by the Edges
+// modal to detect a "panic delete" session — a burst of removals in a
+// short window — and offer a one-click undo. Defaults to 5 minutes which
+// catches a single-session click-storm without sweeping up legitimate
+// older edits.
+app.get("/entities/:id/recent-blocks", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!id || isNaN(id)) return c.json({ error: "Valid entity id required" }, 400, corsHeaders);
+  const minutes = Math.max(1, Math.min(720, Number(c.req.query("minutes")) || 5));
+  const cutoff = new Date(Date.now() - minutes * 60_000).toISOString();
+
+  const { data, error } = await supabase
+    .from("edge_blocklist")
+    .select("from_entity_id, to_entity_id, relation, reason, blocked_at")
+    .gte("blocked_at", cutoff)
+    .or(`from_entity_id.eq.${id},to_entity_id.eq.${id}`)
+    .order("blocked_at", { ascending: false });
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+
+  // Resolve other-entity names so the UI can render readable previews.
+  const otherIds = Array.from(
+    new Set((data || []).map((r) => (r.from_entity_id === id ? r.to_entity_id : r.from_entity_id)))
+  );
+  const nameMap = new Map<number, string>();
+  if (otherIds.length > 0) {
+    const { data: ents } = await supabase
+      .from("entities")
+      .select("id, canonical_name")
+      .in("id", otherIds);
+    for (const e of ents || []) nameMap.set(e.id, e.canonical_name);
+  }
+  const entries = (data || []).map((r) => ({
+    ...r,
+    other_name: nameMap.get(r.from_entity_id === id ? r.to_entity_id : r.from_entity_id) ??
+      `#${r.from_entity_id === id ? r.to_entity_id : r.from_entity_id}`,
+  }));
+  return c.json({ entries, count: entries.length, minutes }, 200, corsHeaders);
+});
+
+// Undo recent blocklist deletions on an entity. Deletes the blocklist rows
+// touching this entity within the last `minutes`, then re-queues every
+// thought linked to this entity so the worker re-extracts the previously-
+// deleted relationships. Round-trip is ~30-60s after the worker picks it
+// up. Used by the Edges modal's "Undo last session" button.
+app.post("/entities/:id/undo-recent-blocks", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!id || isNaN(id)) return c.json({ error: "Valid entity id required" }, 400, corsHeaders);
+  const minutes = Math.max(1, Math.min(720, Number(c.req.query("minutes")) || 5));
+  const cutoff = new Date(Date.now() - minutes * 60_000).toISOString();
+
+  // Step 1: find the recent blocklist entries touching this entity
+  const { data: doomed, error: findErr } = await supabase
+    .from("edge_blocklist")
+    .select("from_entity_id, to_entity_id, relation")
+    .gte("blocked_at", cutoff)
+    .or(`from_entity_id.eq.${id},to_entity_id.eq.${id}`);
+  if (findErr) return c.json({ error: findErr.message }, 500, corsHeaders);
+  if (!doomed || doomed.length === 0) {
+    return c.json({ ok: true, restored: 0, requeued: 0, message: "Nothing to undo in this window." }, 200, corsHeaders);
+  }
+
+  // Step 2: delete the blocklist entries one at a time (composite key)
+  let removed = 0;
+  for (const b of doomed) {
+    const { error } = await supabase
+      .from("edge_blocklist")
+      .delete()
+      .eq("from_entity_id", b.from_entity_id)
+      .eq("to_entity_id", b.to_entity_id)
+      .eq("relation", b.relation);
+    if (error) return c.json({ error: error.message, partial_removed: removed }, 500, corsHeaders);
+    removed++;
+  }
+
+  // Step 3: re-queue every thought linked to this entity so the worker
+  // re-extracts the relationships that were just unblocked. We can't be
+  // surgical about which specific thoughts produced which edges, so we
+  // re-queue them all and let the worker rebuild.
+  const { data: links } = await supabase
+    .from("thought_entities")
+    .select("thought_id")
+    .eq("entity_id", id);
+  const thoughtIds = Array.from(new Set((links || []).map((l) => l.thought_id)));
+  let requeued = 0;
+  for (let i = 0; i < thoughtIds.length; i += 100) {
+    const batch = thoughtIds.slice(i, i + 100);
+    const { error: qErr } = await supabase.from("entity_extraction_queue").upsert(
+      batch.map((tid) => ({
+        thought_id: tid,
+        status: "pending",
+        started_at: null,
+        processed_at: null,
+        last_error: null,
+        queued_at: new Date().toISOString(),
+      })),
+      { onConflict: "thought_id" }
+    );
+    if (qErr) return c.json({ error: qErr.message, partial_requeued: requeued, restored: removed }, 500, corsHeaders);
+    requeued += batch.length;
+  }
+
+  return c.json({
+    ok: true,
+    restored: removed,
+    requeued,
+    minutes,
+    message: `Cleared ${removed} blocklist entries and re-queued ${requeued} thoughts. Worker will rebuild edges in ~30-60s once it picks up the queue.`,
+  }, 200, corsHeaders);
+});
+
 // List all blocked edges with entity names joined for display.
 app.get("/edge-blocklist", async (c) => {
   const { data, error } = await supabase
