@@ -226,17 +226,21 @@ async function resolveEntityByName(sb, name, type) {
 
 async function fetchLinkedThoughts(sb, entityId, limit = 200) {
   // thought_entities rows carry mention_role + confidence + evidence; join to thoughts for content.
-  // PostgREST embedded resources syntax.
+  // PostgREST embedded resources syntax. We pull source_type so we can skip
+  // synthetic curator-note thoughts — they exist for the entity-extraction
+  // worker (to mint new entities/edges from the note text) but their content
+  // is already in the regen prompt verbatim via wiki_pages.notes, so passing
+  // them as evidence would duplicate the note and waste context.
   const query = [
     `entity_id=eq.${entityId}`,
-    `select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts(id,serial_id,content,metadata,created_at)`,
+    `select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts(id,serial_id,content,metadata,created_at,source_type)`,
     `order=created_at.desc`,
     `limit=${limit}`,
   ].join("&");
   const rows = (await sb.get("thought_entities", query)) || [];
   // Flatten: prefer thought-level data for the model.
   return rows
-    .filter((r) => r.thoughts)
+    .filter((r) => r.thoughts && r.thoughts.source_type !== "curator_note")
     .map((r) => ({
       id: r.thoughts.serial_id ?? r.thoughts.id,
       content: r.thoughts.content,

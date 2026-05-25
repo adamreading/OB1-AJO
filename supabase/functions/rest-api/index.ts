@@ -1986,6 +1986,7 @@ app.patch("/wiki-pages/:slug/notes", async (c) => {
   if (typeof body.notes !== "string") {
     return c.json({ error: "notes (string) is required" }, 400, corsHeaders);
   }
+  const notesText = body.notes.trim();
   // Pull entity_id at the same time so we can enqueue a regen straight after
   // the update — the user expectation is that saving a curator note feeds
   // immediately into a rebuild, not on the next manual Regenerate click.
@@ -1998,39 +1999,133 @@ app.patch("/wiki-pages/:slug/notes", async (c) => {
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
   if (!data) return c.json({ error: "Not found" }, 404, corsHeaders);
 
-  // Best-effort regen enqueue. Mirrors POST /wiki-pages/:slug/regen — pick
-  // the entity's most recent linked thought, force-upsert its
-  // entity_extraction_queue row to 'pending'. The worker re-extracts, marks
-  // the entity dirty, and the wiki compiler runs with the new notes loaded.
-  // Failures here don't fail the request — the notes still saved.
-  let regenStatus: "queued" | "no_entity" | "no_thoughts" | "failed" = "no_entity";
+  // Curator-note → synthetic thought flow. The note text contains new
+  // entities/relationships (Rowan, Lead Allocation Automation, …) that don't
+  // exist anywhere in the user's captured thoughts. Without a thought, the
+  // entity-extraction worker has nothing to read those names FROM — the wiki
+  // compiler only writes prose, it doesn't touch the entities/edges tables.
+  //
+  // Solution: keep ONE synthetic thought per entity's curator note. Its
+  // content is the note text prefixed with the host entity's name so the
+  // worker has full context. metadata.curator_note_for_entity_id ties it
+  // back to the host. source_type='curator_note' lets the wiki compiler
+  // exclude it from evidence summaries (it's already in the notes column).
+  //
+  //   - Empty notes → delete the synthetic thought entirely (FK cascade
+  //     clears thought_entities + thought_entity_edges; trigger recomputes
+  //     edges.support_count and removes any orphaned inferences).
+  //   - Non-empty notes → upsert the synthetic thought, then enqueue it
+  //     for entity extraction. Worker runs, creates new entities, writes
+  //     edges, marks the host entity dirty, wiki compiler runs.
+  //
+  // This replaces the old "queue the entity's most recent existing thought"
+  // path — that approach never let new names in the note become entities.
+  let regenStatus: "queued" | "no_entity" | "no_thoughts" | "cleared" | "failed" = "no_entity";
   let regenThoughtId: string | null = null;
   if (data.entity_id) {
-    const { data: link } = await supabase
-      .from("thought_entities")
-      .select("thought_id, thoughts(id, created_at)")
-      .eq("entity_id", data.entity_id)
-      .order("thoughts(created_at)", { ascending: false })
-      .limit(1)
+    // Find any existing synthetic thought for this entity.
+    const { data: existing } = await supabase
+      .from("thoughts")
+      .select("id")
+      .eq("source_type", "curator_note")
+      .filter("metadata->>curator_note_for_entity_id", "eq", String(data.entity_id))
       .maybeSingle();
-    if (link?.thought_id) {
-      regenThoughtId = link.thought_id;
-      const { error: queueErr } = await supabase
-        .from("entity_extraction_queue")
-        .upsert(
-          {
-            thought_id: link.thought_id,
-            status: "pending",
-            last_error: null,
-            started_at: null,
-            processed_at: null,
-            queued_at: new Date().toISOString(),
-          },
-          { onConflict: "thought_id" }
-        );
-      regenStatus = queueErr ? "failed" : "queued";
+
+    if (notesText.length === 0) {
+      // Note cleared — delete the synthetic thought and re-queue any
+      // remaining real thoughts so the article rebuilds without the note.
+      if (existing?.id) {
+        await supabase.from("thoughts").delete().eq("id", existing.id);
+        // Also requeue a real thought to trigger a regen pass without
+        // the now-deleted synthetic contributing.
+        const { data: realLink } = await supabase
+          .from("thought_entities")
+          .select("thought_id, thoughts(id, created_at)")
+          .eq("entity_id", data.entity_id)
+          .order("thoughts(created_at)", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (realLink?.thought_id) {
+          await supabase.from("entity_extraction_queue").upsert(
+            {
+              thought_id: realLink.thought_id,
+              status: "pending",
+              last_error: null,
+              started_at: null,
+              processed_at: null,
+              queued_at: new Date().toISOString(),
+            },
+            { onConflict: "thought_id" }
+          );
+          regenThoughtId = realLink.thought_id;
+        }
+      }
+      regenStatus = "cleared";
     } else {
-      regenStatus = "no_thoughts";
+      // Build the synthetic thought content. Prefixing with the host
+      // entity's canonical name ensures the worker extracts the host as
+      // a participant (so thought_entities + edges reach the host).
+      const { data: ent } = await supabase
+        .from("entities")
+        .select("canonical_name, entity_type")
+        .eq("id", data.entity_id)
+        .maybeSingle();
+      const hostName = ent?.canonical_name ?? `Entity #${data.entity_id}`;
+      const synthContent = `Curator note for ${hostName}: ${notesText}`;
+
+      let thoughtId: string | null = existing?.id ?? null;
+      if (thoughtId) {
+        await supabase
+          .from("thoughts")
+          .update({
+            content: synthContent,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", thoughtId);
+      } else {
+        const { data: ins, error: insErr } = await supabase
+          .from("thoughts")
+          .insert({
+            content: synthContent,
+            source_type: "curator_note",
+            type: "note",
+            importance: 3,
+            quality_score: 60,
+            metadata: {
+              curator_note_for_entity_id: data.entity_id,
+              generated_by: "curator_note_save",
+              host_entity_name: hostName,
+              host_entity_type: ent?.entity_type ?? null,
+            },
+          })
+          .select("id")
+          .maybeSingle();
+        if (insErr) {
+          regenStatus = "failed";
+        } else {
+          thoughtId = ins?.id ?? null;
+        }
+      }
+
+      if (thoughtId) {
+        const { error: queueErr } = await supabase
+          .from("entity_extraction_queue")
+          .upsert(
+            {
+              thought_id: thoughtId,
+              status: "pending",
+              last_error: null,
+              started_at: null,
+              processed_at: null,
+              queued_at: new Date().toISOString(),
+            },
+            { onConflict: "thought_id" }
+          );
+        regenStatus = queueErr ? "failed" : "queued";
+        regenThoughtId = thoughtId;
+      } else if (regenStatus !== "failed") {
+        regenStatus = "no_thoughts";
+      }
     }
   }
 
@@ -2042,12 +2137,14 @@ app.patch("/wiki-pages/:slug/notes", async (c) => {
       regen_thought_id: regenThoughtId,
       message:
         regenStatus === "queued"
-          ? "Notes saved. Wiki regen queued — typically refreshes within 30-60s."
-          : regenStatus === "no_thoughts"
-            ? "Notes saved. No linked thoughts to re-extract — wiki will not auto-regen."
-            : regenStatus === "no_entity"
-              ? "Notes saved. Legacy topic page has no linked entity — wiki will not auto-regen."
-              : "Notes saved but regen queue update failed — click Regenerate to retry.",
+          ? "Notes saved. Curator-note thought queued for extraction — new entities/edges from the note will appear within ~60s, wiki article rebuilds straight after."
+          : regenStatus === "cleared"
+            ? "Notes cleared. Synthetic curator-note thought removed; wiki will rebuild without it."
+            : regenStatus === "no_thoughts"
+              ? "Notes saved. Couldn't create synthetic thought — wiki will not auto-regen."
+              : regenStatus === "no_entity"
+                ? "Notes saved. Legacy topic page has no linked entity — wiki will not auto-regen."
+                : "Notes saved but synthetic-thought extraction failed — click Regenerate to retry.",
     },
     200,
     corsHeaders
