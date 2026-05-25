@@ -457,6 +457,25 @@ function normalizeAnalysis(raw, existingThought) {
   // Build a name → type map so we can enforce newsletter-specific edge rules.
   const entityTypeByName = new Map(entities.map((entity) => [normalizeName(entity.name), entity.type]));
   const entityNames = new Set(entityTypeByName.keys());
+
+  // When the THOUGHT itself is a newsletter capture, identify the author(s)
+  // via the LLM's published_by edges. Authors must NOT inherit edges to
+  // the user's projects/topics/tools just because the article the user
+  // captured happened to mention them — the author is a publisher, not a
+  // collaborator. Same person tagged in a non-newsletter thought (a
+  // meeting note, a personal capture) does still pick up edges; the
+  // isolation is per-thought, not per-author globally.
+  const isNewsletterThought = rawType === "newsletter";
+  const authorNames = new Set();
+  if (isNewsletterThought && Array.isArray(raw.relationships)) {
+    for (const r of raw.relationships) {
+      const rel = String(r?.relation || "").trim().toLowerCase();
+      if (rel === "published_by" && r?.to) {
+        authorNames.add(normalizeName(sanitizeEntityName(r.to)));
+      }
+    }
+  }
+
   const relationships = Array.isArray(raw.relationships)
     ? raw.relationships
         .map((rel) => {
@@ -504,6 +523,23 @@ function normalizeAnalysis(raw, existingThought) {
           if (rel.relation === "references" && toType !== "newsletter") {
             console.log(`[newsletter-filter] references must target a newsletter; dropping`);
             return false;
+          }
+
+          // Newsletter-thought author isolation: when THIS thought is a
+          // newsletter capture and an edge involves the author, only
+          // the published_by edge itself is allowed. Drops the spurious
+          // Author→Project / Author→Tool / etc. edges the LLM sometimes
+          // emits because the article and the user's project share
+          // topic keywords. The author still gets edges from OTHER
+          // (non-newsletter) thoughts where they appear as a real
+          // collaborator — this filter is per-thought, not per-author.
+          if (isNewsletterThought && rel.relation !== "published_by") {
+            const fromIsAuthor = authorNames.has(normalizeName(rel.from));
+            const toIsAuthor = authorNames.has(normalizeName(rel.to));
+            if (fromIsAuthor || toIsAuthor) {
+              console.log(`[newsletter-filter] Dropping author-involved ${rel.relation}: ${rel.from} → ${rel.to} (newsletter thought)`);
+              return false;
+            }
           }
           return true;
         })
