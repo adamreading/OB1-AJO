@@ -1491,13 +1491,15 @@ app.get("/constellation", async (c) => {
         });
   if (topErr) return c.json({ error: topErr.message }, 500, corsHeaders);
 
-  type TopRow = { entity_id: number; canonical_name: string; entity_type: string; mentions: number | string };
+  type TopRow = { entity_id: number; canonical_name: string; entity_type: string; mentions: number | string; dominant_classification: string | null };
   const top = (topData ?? []) as TopRow[];
   const entityIds = top.map((r) => r.entity_id);
 
   let edgesRaw: { source: number; target: number; weight: number | string }[] = [];
+  let inferredEdgesRaw: { source: number; target: number; weight: number | string; relation: string }[] = [];
   if (entityIds.length > 0) {
-    const { data: edgeData, error: edgeErr } = await supabase.rpc(
+    // Co-occurrence edges (thought-derived). Existing behaviour.
+    const coRes = await supabase.rpc(
       "constellation_co_occurrence",
       {
         p_entity_ids: entityIds,
@@ -1506,8 +1508,17 @@ app.get("/constellation", async (c) => {
         p_min_weight: minWeight,
       }
     );
-    if (edgeErr) return c.json({ error: edgeErr.message }, 500, corsHeaders);
-    edgesRaw = (edgeData ?? []) as typeof edgesRaw;
+    if (coRes.error) return c.json({ error: coRes.error.message }, 500, corsHeaders);
+    edgesRaw = (coRes.data ?? []) as typeof edgesRaw;
+
+    // Inferred edges from infer-entity-edges.mjs. These have no co-occurrence
+    // backing — they're written directly to `edges` with metadata.source='inferred'.
+    // Merged below; the dashboard renders them dashed.
+    const infRes = await supabase.rpc(
+      "constellation_inferred_edges",
+      { p_entity_ids: entityIds }
+    );
+    if (!infRes.error) inferredEdgesRaw = (infRes.data ?? []) as typeof inferredEdgesRaw;
   }
 
   // Resolve wiki slugs for the top entities so the dashboard can deep-link
@@ -1529,12 +1540,28 @@ app.get("/constellation", async (c) => {
     type: r.entity_type,
     mentions: Number(r.mentions),
     slug: slugMap.get(r.entity_id) ?? null,
+    classification: r.dominant_classification ?? null,
   }));
-  const edges = edgesRaw.map((e) => ({
+  // Merge inferred edges in. For any pair already in the co-occurrence set,
+  // we leave the co-occurrence row alone (extracted/co-occurrence > inferred).
+  // For pairs that ONLY have an inferred edge, push a new edge row with
+  // `inferred: true` so the dashboard can render it dashed.
+  const seenPairs = new Set<string>();
+  for (const e of edgesRaw) {
+    const key = `${Math.min(e.source, e.target)}:${Math.max(e.source, e.target)}`;
+    seenPairs.add(key);
+  }
+  const edges: Array<{ source: number; target: number; weight: number; inferred?: boolean; relation?: string }> = edgesRaw.map((e) => ({
     source: e.source,
     target: e.target,
     weight: Number(e.weight),
   }));
+  for (const ie of inferredEdgesRaw) {
+    const key = `${Math.min(ie.source, ie.target)}:${Math.max(ie.source, ie.target)}`;
+    if (seenPairs.has(key)) continue;
+    seenPairs.add(key);
+    edges.push({ source: ie.source, target: ie.target, weight: Number(ie.weight), inferred: true, relation: ie.relation });
+  }
 
   // Strongest cluster — the heaviest edge
   const strongest = edges[0]

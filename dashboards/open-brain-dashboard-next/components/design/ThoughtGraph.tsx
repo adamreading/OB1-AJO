@@ -9,12 +9,19 @@ export interface ConstellationNode {
   type: string;
   mentions: number;
   slug?: string | null;
+  /** Dominant classification across linked thoughts. 'work' pulls layout left, 'personal' pulls right; null is neutral. */
+  classification?: string | null;
 }
 
 export interface ConstellationEdge {
   source: number;
   target: number;
   weight: number;
+  /** True for edges produced by scripts/infer-entity-edges.mjs (cross-thought LLM inference).
+   *  Rendered dashed and contributes at half weight to the spring force. */
+  inferred?: boolean;
+  /** Optional relation type (e.g. lives_in, family_of). Currently only set on inferred edges. */
+  relation?: string;
 }
 
 export interface EntityTypeInfo {
@@ -133,6 +140,46 @@ function layout(
   const SPRING = 0.013;
   const CENTER_PULL = 0.018;
   const DAMPING = 0.82;
+  // Type-centroid + classification-gradient pulls. Both deliberately weak vs
+  // repulsion + spring so they bias the layout without rigidly grouping. The
+  // user's complaint was "things don't cluster nicely by type/work/personal"
+  // — purely physics has no semantic awareness. These give people their own
+  // region, places another, etc. The angles are around the canvas centre.
+  const TYPE_PULL = 0.006;        // ~33% of CENTER_PULL — gentle bias
+  const CLASSIFICATION_PULL = 0.003; // ~17% of CENTER_PULL — softer tiebreaker
+  // Anchor angles (radians from canvas centre). Distance from centre = 35%
+  // of canvas half-min, so type clusters appear meaningfully off-centre but
+  // still inside the visible area after auto-fit.
+  const TYPE_ANCHOR_RADIUS = Math.min(width, height) * 0.35;
+  const typeAnchor = (type: string): { x: number; y: number } | null => {
+    const t = (type || "").toLowerCase();
+    // Match colour-palette categories: keep upper-half = people/orgs (social),
+    // lower-half = places/tools (physical/instrumental), edges = projects/topics
+    // (work concepts).
+    const angles: Record<string, number> = {
+      person: Math.PI * 0.75,        // upper-left
+      organization: Math.PI * 0.25,  // upper-right
+      org: Math.PI * 0.25,
+      place: Math.PI * 1.25,         // bottom-left
+      tool: Math.PI * 1.75,          // bottom-right
+      project: Math.PI,              // left edge
+      topic: 0,                      // right edge
+    };
+    const a = angles[t];
+    if (a === undefined) return null;
+    return {
+      x: cx + Math.cos(a) * TYPE_ANCHOR_RADIUS,
+      y: cy + Math.sin(a) * TYPE_ANCHOR_RADIUS,
+    };
+  };
+  // Work entities lean toward left third, personal toward right third. The
+  // dominant_classification field comes from entity_dominant_classification
+  // RPC and is set on each node by the /constellation handler.
+  const classificationAnchorX = (cls: string | null | undefined): number | null => {
+    if (cls === "work") return cx - TYPE_ANCHOR_RADIUS * 0.6;
+    if (cls === "personal") return cx + TYPE_ANCHOR_RADIUS * 0.6;
+    return null;
+  };
   // Aspect-aware center pull: on wide canvases (width >> height), pull
   // horizontally less so the cluster spreads along the longer axis instead
   // of being yanked back into a tight ball. Square canvas → both 1.0; wide
@@ -195,14 +242,25 @@ function layout(
       }
     }
 
-    // Spring (edges) — heavier edges pull harder
+    // Spring (edges) — heavier edges pull harder, inferred at half magnitude
+    // so they nudge without dominating.
+    // Edge-weight scaling: previously `Math.min(3, weight)` clamped at weight=3.
+    // For a brain with heavy hubs (Adam at 200+ co-occurrences) that cap meant
+    // weight-1 and weight-200 edges pulled almost identically — the layout
+    // couldn't tell which connections were tight clusters. Switching to
+    // sqrt-normalised scaling lets heavy edges pull ~2x harder than weak ones
+    // without runaway concentration.
     for (const e of edges) {
       const pa = positions.get(e.source);
       const pb = positions.get(e.target);
       if (!pa || !pb) continue;
       const dx = pb.x - pa.x;
       const dy = pb.y - pa.y;
-      const k = SPRING * Math.min(3, e.weight);
+      const w = Number(e.weight) || 1;
+      // sqrt-scaled with a soft cap; weight=1 → 1.0, weight=4 → 2.0, weight=16 → 4.0 (capped at 2.5)
+      const weightFactor = Math.min(2.5, Math.sqrt(w));
+      const inferredFactor = e.inferred ? 0.5 : 1.0;
+      const k = SPRING * weightFactor * inferredFactor;
       if (!pa.pinned) {
         pa.vx += dx * k;
         pa.vy += dy * k;
@@ -210,6 +268,23 @@ function layout(
       if (!pb.pinned) {
         pb.vx -= dx * k;
         pb.vy -= dy * k;
+      }
+    }
+
+    // Type-centroid + classification-gradient pulls. Both weak vs center-pull
+    // so the layout still settles into a coherent cluster; these just bias
+    // *where* within the cluster each entity lands.
+    for (const n of nodes) {
+      const p = positions.get(n.id)!;
+      if (p.pinned) continue;
+      const anchor = typeAnchor(n.type);
+      if (anchor) {
+        p.vx += (anchor.x - p.x) * TYPE_PULL;
+        p.vy += (anchor.y - p.y) * TYPE_PULL;
+      }
+      const targetX = classificationAnchorX(n.classification);
+      if (targetX !== null) {
+        p.vx += (targetX - p.x) * CLASSIFICATION_PULL;
       }
     }
 
@@ -1046,17 +1121,22 @@ export function ThoughtGraph({
             Scaling/panning happens here; labels are rendered outside this
             group so they stay readable at any zoom level. */}
         <g transform={`translate(${viewport.x},${viewport.y}) scale(${viewport.k})`}>
-          {/* Edges */}
+          {/* Edges — inferred ones render dashed + thinner + dimmer so the
+              user can tell at a glance which connections came from a thought
+              vs. cross-thought LLM inference (scripts/infer-entity-edges.mjs). */}
           {filteredEdges.map((e, i) => {
             const a = positions.get(e.source);
             const b = positions.get(e.target);
             if (!a || !b) return null;
             const isHoverEdge =
               hover !== null && (e.source === hover || e.target === hover);
+            const baseAlpha = Math.min(1, 0.25 + e.weight * 0.04);
+            const inferredAlphaScale = e.inferred ? 0.55 : 1;
             const dimmed =
               hover !== null && focused === null && !isHoverEdge
                 ? 0.06
-                : Math.min(1, 0.25 + e.weight * 0.04);
+                : baseAlpha * inferredAlphaScale;
+            const widthBase = e.inferred ? 0.5 : 0.8;
             return (
               <line
                 key={i}
@@ -1066,12 +1146,13 @@ export function ThoughtGraph({
                 y2={b.y}
                 stroke={
                   isHoverEdge
-                    ? "rgba(157,131,255,0.9)"
+                    ? `rgba(157,131,255,${e.inferred ? 0.7 : 0.9})`
                     : `rgba(157,131,255,${dimmed})`
                 }
+                strokeDasharray={e.inferred ? `${4 / Math.max(0.5, viewport.k)} ${3 / Math.max(0.5, viewport.k)}` : undefined}
                 // Scale stroke width inversely with zoom so edges stay 1px-ish
                 // at any zoom level rather than getting comically thick.
-                strokeWidth={(isHoverEdge ? 1.5 : 0.8) / Math.max(0.5, viewport.k)}
+                strokeWidth={(isHoverEdge ? 1.5 : widthBase) / Math.max(0.5, viewport.k)}
               />
             );
           })}
