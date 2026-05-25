@@ -7,7 +7,7 @@ import {
   type ConstellationNode,
   type EntityTypeInfo,
 } from "./ThoughtGraph";
-import { Card, SegBar } from "./Atoms";
+import { Card } from "./Atoms";
 import { EntityQuickEditModal } from "./EntityQuickEditModal";
 
 interface WikiPageDetail {
@@ -595,7 +595,17 @@ export function WikiGraphView({
   }, []);
   const [graphLoading, setGraphLoading] = useState(true);
   const [minWeight, setMinWeight] = useState(2);
-  const [topN, setTopN] = useState<"30" | "60" | "100">("60");
+  // Cap on entities fetched from /api/constellation. 2000 effectively means
+  // "give me everything" — we have ~650 entities in the DB so 2000 covers it
+  // with huge headroom. Drop the 30/60/100 chooser: zoom-on-the-canvas now
+  // does the "show fewer / show more" job better than a coarse picker.
+  const topN = "2000";
+  // "Hide self" — drops the user's own person entity (e.g. Adam Ososki) from
+  // the constellation. That entity is in nearly every thought so it acts as
+  // a dense hub that drowns out the underlying topical structure. Toggling
+  // it off reveals what the brain actually knows ABOUT (clusters of work,
+  // tools, topics) rather than what's connected to YOU.
+  const [hideSelf, setHideSelf] = useState(false);
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   const [entityTypes, setEntityTypes] = useState<EntityTypeInfo[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -864,15 +874,31 @@ export function WikiGraphView({
     });
   }
 
+  // "Self" entity = the entity with the most mentions across the brain.
+  // In a single-user setup like AJO that's reliably the user themself
+  // (their name is tagged in every thought they capture). When hideSelf
+  // is on we drop that entity from the constellation so the underlying
+  // topical structure can be seen without the hub-and-spoke dominance.
+  const selfEntityId = useMemo<number | null>(() => {
+    if (graph.nodes.length === 0) return null;
+    return graph.nodes.reduce((best, n) =>
+      n.mentions > best.mentions ? n : best
+    ).id;
+  }, [graph.nodes]);
+
   // Apply search filter to nodes. When searching, keep matches PLUS their
   // first-degree neighbors so the user can see what the matched entity is
   // connected to — searching "gemini" alone with no neighbors is just a
   // single floating node, useless for navigation.
   const filteredNodes = useMemo(() => {
-    if (!searchQuery.trim()) return graph.nodes;
+    const base =
+      hideSelf && selfEntityId !== null
+        ? graph.nodes.filter((n) => n.id !== selfEntityId)
+        : graph.nodes;
+    if (!searchQuery.trim()) return base;
     // Use the alias-aware match set against the graph
     const matchIds = new Set(
-      graph.nodes.filter((n) => searchMatchIds.has(n.id)).map((n) => n.id)
+      base.filter((n) => searchMatchIds.has(n.id)).map((n) => n.id)
     );
     if (matchIds.size === 0) return [];
     const keep = new Set(matchIds);
@@ -880,8 +906,8 @@ export function WikiGraphView({
       if (matchIds.has(e.source)) keep.add(e.target);
       if (matchIds.has(e.target)) keep.add(e.source);
     }
-    return graph.nodes.filter((n) => keep.has(n.id));
-  }, [graph.nodes, graph.edges, searchQuery, searchMatchIds]);
+    return base.filter((n) => keep.has(n.id));
+  }, [graph.nodes, graph.edges, searchQuery, searchMatchIds, hideSelf, selfEntityId]);
 
   // Active search wins as the visual center. Without this, typing
   // "tom falconar" while the Adam Ososki wiki is open would refetch the
@@ -984,22 +1010,31 @@ export function WikiGraphView({
             </span>
           </div>
 
-          {/* Top-N — server returns top-N entities by mention count */}
-          <div
+          {/* Hide-self toggle. The user's own entity dominates the layout
+              (every captured thought tags them as the subject), so hiding
+              them reveals the underlying topical structure of the brain. */}
+          <button
+            type="button"
+            onClick={() => setHideSelf((v) => !v)}
             style={{
               display: "flex",
               alignItems: "center",
               gap: 6,
+              fontSize: 11,
+              padding: "4px 10px",
+              borderRadius: 6,
+              background: hideSelf ? "rgba(157,131,255,0.15)" : "transparent",
+              border: `1px solid ${
+                hideSelf ? "rgba(157,131,255,0.5)" : "var(--line)"
+              }`,
+              color: hideSelf ? "var(--violet-200)" : "var(--fg-3)",
+              cursor: "pointer",
+              fontFamily: "inherit",
             }}
+            title="Drop the user's own entity from the graph so topical structure is visible"
           >
-            <span className="eyebrow">top</span>
-            <SegBar
-              options={["30", "60", "100"] as const}
-              active={topN}
-              onChange={setTopN}
-              size="sm"
-            />
-          </div>
+            {hideSelf ? "✓ hide me" : "hide me"}
+          </button>
 
           {/* Type toggle chips */}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

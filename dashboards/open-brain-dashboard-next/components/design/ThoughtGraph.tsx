@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 export interface ConstellationNode {
@@ -406,6 +406,34 @@ export function ThoughtGraph({
   const [hover, setHover] = useState<number | null>(null);
   const [focused, setFocused] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  // Viewport transform: scale (k) and translate (x, y) of the world-space
+  // graph relative to the SVG viewBox. Wheel/pinch updates k; click-drag
+  // updates x/y. Pointer-vs-click is resolved via a movement threshold so
+  // node selection still works for non-drag clicks.
+  const [viewport, setViewport] = useState<{ k: number; x: number; y: number }>({
+    k: 1,
+    x: 0,
+    y: 0,
+  });
+  // True after the first time we auto-fit to content. Stops the layout
+  // useEffect from re-fitting (and zooming the user back out) every time
+  // they pan or filter nodes.
+  const didAutoFit = useRef(false);
+  const pointers = useRef<
+    Map<number, { x: number; y: number; startK: number; startX: number; startY: number }>
+  >(new Map());
+  const dragState = useRef<{
+    moved: boolean;
+    pointerId: number;
+    nodeId: number | null;
+    startX: number;
+    startY: number;
+    startVx: number;
+    startVy: number;
+  } | null>(null);
+  const pinchState = useRef<{ initialDist: number; initialK: number; centerWorld: { x: number; y: number } } | null>(null);
 
   // Filter nodes by entity_type visibility (legend toggle)
   const categoryVisibleNodes = useMemo(() => {
@@ -457,28 +485,21 @@ export function ThoughtGraph({
   }, [categoryVisibleNodes, baseEdges]);
 
   // Visible nodes:
-  // - Focus mode → focused node + its first-degree neighbors only
-  // - Otherwise → drop orphans (no edges at current min-weight). Always keep
-  //   the hottest visible entity as a center anchor.
+  // - Focus mode (shift+click drilldown) → focused node + first-degree neighbors only
+  // - Otherwise → keep EVERY node from the server response, including orphans
+  //   (nodes with no edges at the current min_weight). The min_weight slider
+  //   filters edges; orphans drift into their own clusters via the force
+  //   layout's repulsion. This is what surfaces disconnected entities like
+  //   Jira-ticket clusters or work-topic islands that don't co-occur with the
+  //   user themself — previously these were silently filtered out.
   const visibleNodes = useMemo(() => {
     if (focused !== null && baseAdjacency.has(focused)) {
       const neighbors = baseAdjacency.get(focused) ?? new Set();
       const keep = new Set<number>([focused, ...neighbors]);
       return categoryVisibleNodes.filter((n) => keep.has(n.id));
     }
-    const connected = new Set<number>();
-    for (const e of baseEdges) {
-      connected.add(e.source);
-      connected.add(e.target);
-    }
-    const hottest = categoryVisibleNodes.length
-      ? categoryVisibleNodes.reduce((best, n) =>
-          n.mentions > best.mentions ? n : best
-        )
-      : null;
-    if (hottest) connected.add(hottest.id);
-    return categoryVisibleNodes.filter((n) => connected.has(n.id));
-  }, [categoryVisibleNodes, baseEdges, focused, baseAdjacency]);
+    return categoryVisibleNodes;
+  }, [categoryVisibleNodes, focused, baseAdjacency]);
 
   const visibleIds = useMemo(
     () => new Set(visibleNodes.map((n) => n.id)),
@@ -539,9 +560,212 @@ export function ThoughtGraph({
     return placeLabels(visibleNodes, positions, force);
   }, [visibleNodes, positions, hottestId, activeId, activeNeighbors, visibleIds]);
 
+  // ─── Zoom + pan plumbing ─────────────────────────────────────────────────
+  // World coord = position the layout produced (in viewBox units before
+  // viewport transform). Screen coord = position the user actually sees in
+  // viewBox units after the transform. Labels are positioned in screen
+  // space so they stay readable at any zoom level.
+
+  // Convert a client (clientX/clientY) point into viewBox coords by
+  // inverting the SVG's CTM. Handles the fact that the SVG element may be
+  // rendered at any client size; viewBox stays at width×height.
+  const clientToViewBox = (cx: number, cy: number) => {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const pt = svg.createSVGPoint();
+    pt.x = cx;
+    pt.y = cy;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return null;
+    return pt.matrixTransform(ctm.inverse());
+  };
+
+  // Wheel zoom — toward cursor position. React's onWheel is registered as
+  // a passive listener and can't preventDefault, which causes the page to
+  // scroll instead of the graph zooming. We attach a non-passive native
+  // listener via useEffect instead.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    function onWheel(this: SVGSVGElement, e: WheelEvent) {
+      e.preventDefault();
+      const pt = clientToViewBox(e.clientX, e.clientY);
+      if (!pt) return;
+      const wx = (pt.x - viewport.x) / viewport.k;
+      const wy = (pt.y - viewport.y) / viewport.k;
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const newK = Math.max(0.15, Math.min(12, viewport.k * factor));
+      setViewport({
+        k: newK,
+        x: pt.x - wx * newK,
+        y: pt.y - wy * newK,
+      });
+    }
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+    // viewport intentionally in deps so the handler closure picks up the
+    // latest transform state on each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewport.k, viewport.x, viewport.y]);
+
+  function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
+    if (e.button !== 0 && e.pointerType !== "touch") return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY, startK: viewport.k, startX: viewport.x, startY: viewport.y });
+    if (pointers.current.size === 1) {
+      // Single pointer → potential pan. Set dragState; real pan triggers
+      // when movement crosses the threshold in pointermove.
+      dragState.current = {
+        moved: false,
+        pointerId: e.pointerId,
+        nodeId: null,
+        startX: e.clientX,
+        startY: e.clientY,
+        startVx: viewport.x,
+        startVy: viewport.y,
+      };
+    } else if (pointers.current.size === 2) {
+      // Two pointers → pinch zoom. Cancel any in-progress pan.
+      const pts = Array.from(pointers.current.values());
+      const dx = pts[0].x - pts[1].x;
+      const dy = pts[0].y - pts[1].y;
+      pinchState.current = {
+        initialDist: Math.hypot(dx, dy),
+        initialK: viewport.k,
+        centerWorld: { x: 0, y: 0 }, // recomputed on first pinch move
+      };
+      dragState.current = null;
+    }
+  }
+
+  // Pan/pinch updates fire on window so they survive the pointer leaving the
+  // SVG bounds mid-drag. Cleanup runs when pointers go back to zero.
+  useEffect(() => {
+    function onMove(e: PointerEvent) {
+      if (!pointers.current.has(e.pointerId)) return;
+      pointers.current.set(e.pointerId, {
+        ...pointers.current.get(e.pointerId)!,
+        x: e.clientX,
+        y: e.clientY,
+      });
+      // Pinch (two pointers)
+      if (pinchState.current && pointers.current.size === 2) {
+        const pts = Array.from(pointers.current.values());
+        const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        const factor = dist / pinchState.current.initialDist;
+        const newK = Math.max(0.15, Math.min(12, pinchState.current.initialK * factor));
+        // Centroid (in client coords) → viewBox → world. Keep that world
+        // point under the centroid as scale changes.
+        const cx = (pts[0].x + pts[1].x) / 2;
+        const cy = (pts[0].y + pts[1].y) / 2;
+        const pt = clientToViewBox(cx, cy);
+        if (pt) {
+          const wx = (pt.x - viewport.x) / viewport.k;
+          const wy = (pt.y - viewport.y) / viewport.k;
+          setViewport({ k: newK, x: pt.x - wx * newK, y: pt.y - wy * newK });
+        }
+        if (dragState.current) dragState.current.moved = true;
+        return;
+      }
+      // Pan (single pointer)
+      if (dragState.current && dragState.current.pointerId === e.pointerId) {
+        const dx = e.clientX - dragState.current.startX;
+        const dy = e.clientY - dragState.current.startY;
+        if (!dragState.current.moved && Math.hypot(dx, dy) < 5) return;
+        dragState.current.moved = true;
+        // Translate client px → SVG units. Reuse one CTM-inverse multiply
+        // by transforming both endpoints and subtracting.
+        const a = clientToViewBox(dragState.current.startX, dragState.current.startY);
+        const b = clientToViewBox(e.clientX, e.clientY);
+        if (!a || !b) return;
+        setViewport({
+          k: viewport.k,
+          x: dragState.current.startVx + (b.x - a.x),
+          y: dragState.current.startVy + (b.y - a.y),
+        });
+      }
+    }
+    function onUp(e: PointerEvent) {
+      pointers.current.delete(e.pointerId);
+      if (pointers.current.size === 0) {
+        pinchState.current = null;
+        // Leave dragState.moved set until the next pointerdown — handleNodeClick
+        // checks it to suppress clicks that were actually drags.
+      } else if (pointers.current.size === 1 && pinchState.current) {
+        // Pinch ended, fall back to pan on the remaining pointer
+        pinchState.current = null;
+        const remaining = Array.from(pointers.current.entries())[0];
+        dragState.current = {
+          moved: true,
+          pointerId: remaining[0],
+          nodeId: null,
+          startX: remaining[1].x,
+          startY: remaining[1].y,
+          startVx: viewport.x,
+          startVy: viewport.y,
+        };
+      }
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewport.k, viewport.x, viewport.y]);
+
+  // Auto-fit: zoom-to-fit so the bounding box of all positions fills 80% of
+  // the canvas. Extracted so the useEffect and the manual "⌖ fit" button
+  // can share the same code path.
+  function applyAutoFit() {
+    if (positions.size === 0) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const [, pos] of positions) {
+      minX = Math.min(minX, pos.x - pos.r);
+      maxX = Math.max(maxX, pos.x + pos.r);
+      minY = Math.min(minY, pos.y - pos.r);
+      maxY = Math.max(maxY, pos.y + pos.r);
+    }
+    const pad = 80;
+    const bboxW = Math.max(1, maxX - minX);
+    const bboxH = Math.max(1, maxY - minY);
+    const k = Math.min((width - pad * 2) / bboxW, (height - pad * 2) / bboxH, 1.6);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    setViewport({
+      k,
+      x: width / 2 - cx * k,
+      y: height / 2 - cy * k,
+    });
+  }
+
+  // Auto-fit on first render so the user sees the whole graph rather than a
+  // tight blob. Only runs once per mount; the user's wheel/pinch takes over
+  // from there. Re-fitting on every filter change would yo-yo the zoom.
+  // The ⌖ fit button gives a manual escape hatch.
+  useEffect(() => {
+    if (didAutoFit.current) return;
+    if (positions.size === 0) return;
+    applyAutoFit();
+    didAutoFit.current = true;
+    // applyAutoFit is intentionally not in deps — it closes over positions,
+    // which is in deps already, and re-creating it on every render would
+    // cause infinite re-runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positions, width, height]);
+
   function handleNodeClick(node: ConstellationNode, e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
+    // Drag suppression: if the user just panned (movement > threshold during
+    // pointer-down→up), don't fire the node click. Reset the flag for the
+    // next pointer interaction.
+    if (dragState.current?.moved) {
+      dragState.current.moved = false;
+      return;
+    }
     // Shift/cmd-click → focus mode (always, regardless of onNodeClick override)
     if (e.shiftKey || e.metaKey || e.ctrlKey) {
       setFocused((f) => (f === node.id ? null : node.id));
@@ -709,10 +933,20 @@ export function ThoughtGraph({
         );
       })()}
       <svg
+        ref={svgRef}
         width="100%"
         height={height}
         viewBox={`0 0 ${width} ${height}`}
-        style={{ display: "block", cursor: hover !== null ? "pointer" : "default" }}
+        style={{
+          display: "block",
+          cursor: dragState.current?.moved
+            ? "grabbing"
+            : hover !== null
+              ? "pointer"
+              : "grab",
+          touchAction: "none", // Prevent native browser pinch/scroll on touch
+        }}
+        onPointerDown={handlePointerDown}
       >
         <defs>
           <radialGradient id="constellation-hot-glow" cx="50%" cy="50%" r="50%">
@@ -735,107 +969,186 @@ export function ThoughtGraph({
           width={width}
           height={height}
           fill="url(#constellation-canvas-glow)"
-          onClick={() => setFocused(null)}
-          style={{ cursor: focused !== null ? "pointer" : "default" }}
+          onClick={() => {
+            // Empty-canvas click resets focus only if it wasn't a drag.
+            if (dragState.current?.moved) {
+              dragState.current.moved = false;
+              return;
+            }
+            setFocused(null);
+          }}
+          style={{ cursor: focused !== null ? "pointer" : "inherit" }}
         />
 
-        {/* Edges */}
-        {filteredEdges.map((e, i) => {
-          const a = positions.get(e.source);
-          const b = positions.get(e.target);
-          if (!a || !b) return null;
-          // In hover mode, dim edges that don't touch the hovered node.
-          // Focus mode already filters non-relevant nodes out, so all
-          // remaining edges are by definition the focused entity's network.
-          const isHoverEdge =
-            hover !== null && (e.source === hover || e.target === hover);
-          const dimmed =
-            hover !== null && focused === null && !isHoverEdge
-              ? 0.06
-              : Math.min(1, 0.25 + e.weight * 0.04);
-          return (
-            <line
-              key={i}
-              x1={a.x}
-              y1={a.y}
-              x2={b.x}
-              y2={b.y}
-              stroke={
-                isHoverEdge
-                  ? "rgba(157,131,255,0.9)"
-                  : `rgba(157,131,255,${dimmed})`
-              }
-              strokeWidth={isHoverEdge ? 1.5 : 0.8}
-            />
-          );
-        })}
-
-        {/* Hot-node glow */}
-        {hottestId !== null &&
-          (() => {
-            const node = visibleNodes.find((n) => n.id === hottestId);
-            const pos = positions.get(hottestId);
-            if (!node || !pos) return null;
+        {/* World-space content (edges + nodes) inside the viewport transform.
+            Scaling/panning happens here; labels are rendered outside this
+            group so they stay readable at any zoom level. */}
+        <g transform={`translate(${viewport.x},${viewport.y}) scale(${viewport.k})`}>
+          {/* Edges */}
+          {filteredEdges.map((e, i) => {
+            const a = positions.get(e.source);
+            const b = positions.get(e.target);
+            if (!a || !b) return null;
+            const isHoverEdge =
+              hover !== null && (e.source === hover || e.target === hover);
+            const dimmed =
+              hover !== null && focused === null && !isHoverEdge
+                ? 0.06
+                : Math.min(1, 0.25 + e.weight * 0.04);
             return (
-              <circle
-                cx={pos.x}
-                cy={pos.y}
-                r={pos.r * 2.4}
-                fill="url(#constellation-hot-glow)"
-                opacity={isHoverDimmed(hottestId) ? 0.15 : 1}
+              <line
+                key={i}
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+                stroke={
+                  isHoverEdge
+                    ? "rgba(157,131,255,0.9)"
+                    : `rgba(157,131,255,${dimmed})`
+                }
+                // Scale stroke width inversely with zoom so edges stay 1px-ish
+                // at any zoom level rather than getting comically thick.
+                strokeWidth={(isHoverEdge ? 1.5 : 0.8) / Math.max(0.5, viewport.k)}
               />
             );
-          })()}
+          })}
 
-        {/* Nodes */}
-        {visibleNodes.map((n) => {
-          const pos = positions.get(n.id);
-          if (!pos) return null;
-          const color = colorFor(n.type, entityTypes);
-          const isHot = n.id === hottestId;
-          const isActive = n.id === activeId;
-          const isSelected = selectedId !== null && n.id === selectedId;
-          const dimmed = isHoverDimmed(n.id);
-          const placement = labelPlacements.get(n.id);
-          const showLabel = !dimmed && !!placement;
-          const labelEmphasis = isActive || isHot || isSelected;
-
-          const NodeContent = (
-            <g
-              onMouseEnter={() => setHover(n.id)}
-              onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
-              onClick={(e) => handleNodeClick(n, e)}
-              opacity={dimmed ? 0.18 : 1}
-              style={{ cursor: "pointer", transition: "opacity 160ms" }}
-            >
-              {/* Selection ring — wiki "you are here" indicator */}
-              {isSelected && (
+          {/* Hot-node glow */}
+          {hottestId !== null &&
+            (() => {
+              const node = visibleNodes.find((n) => n.id === hottestId);
+              const pos = positions.get(hottestId);
+              if (!node || !pos) return null;
+              return (
                 <circle
                   cx={pos.x}
                   cy={pos.y}
-                  r={pos.r + 6}
-                  fill="none"
-                  stroke="#ffffff"
-                  strokeOpacity={0.7}
-                  strokeWidth={1.5}
+                  r={pos.r * 2.4}
+                  fill="url(#constellation-hot-glow)"
+                  opacity={isHoverDimmed(hottestId) ? 0.15 : 1}
                 />
-              )}
-              <circle
-                cx={pos.x}
-                cy={pos.y}
-                r={pos.r}
-                fill={color}
-                fillOpacity={isSelected ? 0.42 : isActive ? 0.32 : isHot ? 0.25 : 0.15}
-                stroke={color}
-                strokeWidth={isSelected ? 2 : isActive ? 2 : isHot ? 1.5 : 1}
-              />
-              <circle
-                cx={pos.x}
-                cy={pos.y}
-                r={Math.max(2, pos.r * 0.25)}
-                fill={color}
-              />
-              {showLabel && placement && (
+              );
+            })()}
+
+          {/* Node circles only (no text — text rendered in screen space below). */}
+          {visibleNodes.map((n) => {
+            const pos = positions.get(n.id);
+            if (!pos) return null;
+            const color = colorFor(n.type, entityTypes);
+            const isHot = n.id === hottestId;
+            const isActive = n.id === activeId;
+            const isSelected = selectedId !== null && n.id === selectedId;
+            const dimmed = isHoverDimmed(n.id);
+
+            return (
+              <g
+                key={n.id}
+                onMouseEnter={() => setHover(n.id)}
+                onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
+                onClick={(e) => handleNodeClick(n, e)}
+                opacity={dimmed ? 0.18 : 1}
+                style={{ cursor: "pointer", transition: "opacity 160ms" }}
+              >
+                {isSelected && (
+                  <circle
+                    cx={pos.x}
+                    cy={pos.y}
+                    r={pos.r + 6 / viewport.k}
+                    fill="none"
+                    stroke="#ffffff"
+                    strokeOpacity={0.7}
+                    strokeWidth={1.5 / Math.max(0.5, viewport.k)}
+                  />
+                )}
+                <circle
+                  cx={pos.x}
+                  cy={pos.y}
+                  r={pos.r}
+                  fill={color}
+                  fillOpacity={isSelected ? 0.42 : isActive ? 0.32 : isHot ? 0.25 : 0.15}
+                  stroke={color}
+                  strokeWidth={(isSelected ? 2 : isActive ? 2 : isHot ? 1.5 : 1) / Math.max(0.5, viewport.k)}
+                />
+                <circle
+                  cx={pos.x}
+                  cy={pos.y}
+                  r={Math.max(2 / viewport.k, pos.r * 0.25)}
+                  fill={color}
+                />
+                <title>{`${n.label} · ${n.mentions} mentions${
+                  n.slug ? " · click to open wiki, ⇧-click to focus" : " · click to focus"
+                }`}</title>
+              </g>
+            );
+          })}
+        </g>
+
+        {/* Labels in screen space — outside the viewport transform so they
+            stay readable at any zoom level. Includes leader lines from each
+            labeled node to its label position so the user can always tell
+            which label belongs to which node. */}
+        {(() => {
+          // Recompute labels at the current viewport so more labels surface
+          // as the user zooms in (more screen space per node = more slots
+          // for non-overlapping labels).
+          const screenPositions = new Map<number, { x: number; y: number; r: number }>();
+          for (const [id, pos] of positions) {
+            screenPositions.set(id, {
+              x: pos.x * viewport.k + viewport.x,
+              y: pos.y * viewport.k + viewport.y,
+              r: pos.r * viewport.k,
+            });
+          }
+          const force = new Set<number>();
+          if (hottestId !== null) force.add(hottestId);
+          if (activeId !== null) {
+            force.add(activeId);
+            activeNeighbors?.forEach((nId) => {
+              if (visibleIds.has(nId)) force.add(nId);
+            });
+          }
+          if (selectedId !== null) force.add(selectedId);
+          const zoomPlacements = placeLabels(visibleNodes, screenPositions, force);
+          return visibleNodes.map((n) => {
+            const sp = screenPositions.get(n.id);
+            const placement = zoomPlacements.get(n.id);
+            if (!sp || !placement) return null;
+            const isHot = n.id === hottestId;
+            const isActive = n.id === activeId;
+            const isSelected = selectedId !== null && n.id === selectedId;
+            const dimmed = isHoverDimmed(n.id);
+            if (dimmed) return null;
+            const labelEmphasis = isActive || isHot || isSelected;
+
+            // Leader line from node centre to label position — drawn when
+            // the label is offset more than the node radius from the node.
+            const dx = placement.x - sp.x;
+            const dy = placement.y - sp.y;
+            const dist = Math.hypot(dx, dy);
+            const showLeader = dist > sp.r + 6;
+            // Pull leader endpoint slightly off the label baseline so it
+            // attaches to the label visually rather than overlapping.
+            const labelAttachX =
+              placement.anchor === "start"
+                ? placement.x - 2
+                : placement.anchor === "end"
+                  ? placement.x + 2
+                  : placement.x;
+            const labelAttachY = placement.y - 3;
+
+            return (
+              <g key={`label-${n.id}`} style={{ pointerEvents: "none" }}>
+                {showLeader && (
+                  <line
+                    x1={sp.x}
+                    y1={sp.y}
+                    x2={labelAttachX}
+                    y2={labelAttachY}
+                    stroke={labelEmphasis ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.15)"}
+                    strokeWidth={0.6}
+                  />
+                )}
                 <text
                   x={placement.x}
                   y={placement.y}
@@ -843,32 +1156,25 @@ export function ThoughtGraph({
                   fill={labelEmphasis ? "var(--fg)" : "var(--fg-3)"}
                   fontSize={labelEmphasis ? 12 : 10.5}
                   fontWeight={labelEmphasis ? 500 : 400}
-                  style={{ pointerEvents: "none" }}
                 >
                   {n.label}
                 </text>
-              )}
-              {isHot && !isActive && (
-                <text
-                  x={pos.x}
-                  y={pos.y + 4}
-                  textAnchor="middle"
-                  fill="var(--fg)"
-                  fontSize="13"
-                  fontWeight="600"
-                  style={{ pointerEvents: "none" }}
-                >
-                  {n.mentions}
-                </text>
-              )}
-              <title>{`${n.label} · ${n.mentions} mentions${
-                n.slug ? " · click to open wiki, ⇧-click to focus" : " · click to focus"
-              }`}</title>
-            </g>
-          );
-
-          return <g key={n.id}>{NodeContent}</g>;
-        })}
+                {isHot && !isActive && (
+                  <text
+                    x={sp.x}
+                    y={sp.y + 4}
+                    textAnchor="middle"
+                    fill="var(--fg)"
+                    fontSize="13"
+                    fontWeight="600"
+                  >
+                    {n.mentions}
+                  </text>
+                )}
+              </g>
+            );
+          });
+        })()}
       </svg>
       <div
         style={{
@@ -881,8 +1187,28 @@ export function ThoughtGraph({
           pointerEvents: "none",
         }}
       >
-        click → wiki · ⇧-click → focus · click empty → reset
+        click → wiki · ⇧-click → focus · drag → pan · wheel/pinch → zoom
       </div>
+      <button
+        type="button"
+        onClick={applyAutoFit}
+        style={{
+          position: "absolute",
+          bottom: 8,
+          right: 12,
+          padding: "4px 9px",
+          borderRadius: 6,
+          fontSize: 10,
+          background: "var(--bg-2)",
+          border: "1px solid var(--line)",
+          color: "var(--fg-3)",
+          fontFamily: "var(--font-mono)",
+          cursor: "pointer",
+        }}
+        title="Reset zoom — fit the whole graph in view"
+      >
+        ⌖ fit
+      </button>
     </div>
   );
 }
