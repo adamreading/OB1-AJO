@@ -1496,7 +1496,11 @@ app.get("/constellation", async (c) => {
   const entityIds = top.map((r) => r.entity_id);
 
   let edgesRaw: { source: number; target: number; weight: number | string }[] = [];
-  let inferredEdgesRaw: { source: number; target: number; weight: number | string; relation: string }[] = [];
+  // Curated edges = both inferred (from infer-entity-edges.mjs) and manual
+  // (from POST /edges/manual). Both live in `edges` with metadata.source set.
+  // RPC returns inferred:boolean + edge_source:text so the dashboard can
+  // distinguish render — inferred dashed, manual solid.
+  let curatedEdgesRaw: { source: number; target: number; weight: number | string; relation: string; inferred: boolean; edge_source: string }[] = [];
   if (entityIds.length > 0) {
     // Co-occurrence edges (thought-derived). Existing behaviour.
     const coRes = await supabase.rpc(
@@ -1511,14 +1515,13 @@ app.get("/constellation", async (c) => {
     if (coRes.error) return c.json({ error: coRes.error.message }, 500, corsHeaders);
     edgesRaw = (coRes.data ?? []) as typeof edgesRaw;
 
-    // Inferred edges from infer-entity-edges.mjs. These have no co-occurrence
-    // backing — they're written directly to `edges` with metadata.source='inferred'.
-    // Merged below; the dashboard renders them dashed.
+    // Curated edges (inferred + manual). RPC name kept for backwards
+    // compat even though it now returns both source types.
     const infRes = await supabase.rpc(
       "constellation_inferred_edges",
       { p_entity_ids: entityIds }
     );
-    if (!infRes.error) inferredEdgesRaw = (infRes.data ?? []) as typeof inferredEdgesRaw;
+    if (!infRes.error) curatedEdgesRaw = (infRes.data ?? []) as typeof curatedEdgesRaw;
   }
 
   // Resolve wiki slugs for the top entities so the dashboard can deep-link
@@ -1551,16 +1554,24 @@ app.get("/constellation", async (c) => {
     const key = `${Math.min(e.source, e.target)}:${Math.max(e.source, e.target)}`;
     seenPairs.add(key);
   }
-  const edges: Array<{ source: number; target: number; weight: number; inferred?: boolean; relation?: string }> = edgesRaw.map((e) => ({
+  const edges: Array<{ source: number; target: number; weight: number; inferred?: boolean; manual?: boolean; relation?: string }> = edgesRaw.map((e) => ({
     source: e.source,
     target: e.target,
     weight: Number(e.weight),
   }));
-  for (const ie of inferredEdgesRaw) {
+  for (const ie of curatedEdgesRaw) {
     const key = `${Math.min(ie.source, ie.target)}:${Math.max(ie.source, ie.target)}`;
     if (seenPairs.has(key)) continue;
     seenPairs.add(key);
-    edges.push({ source: ie.source, target: ie.target, weight: Number(ie.weight), inferred: true, relation: ie.relation });
+    const isManual = ie.edge_source === "manual";
+    edges.push({
+      source: ie.source,
+      target: ie.target,
+      weight: Number(ie.weight),
+      inferred: !isManual,
+      manual: isManual,
+      relation: ie.relation,
+    });
   }
 
   // Strongest cluster — the heaviest edge
@@ -1763,6 +1774,134 @@ app.get("/entities/:id/reflections", async (c) => {
   }
 
   return c.json({ reflections: enriched, by_type: byType }, 200, corsHeaders);
+});
+
+// Create a manual edge between two entities. Different from
+// thought-derived edges (which come from the worker reading a thought) and
+// from inferred edges (cross-thought LLM inference): this is the user
+// asserting a relationship directly. Highest trust tier.
+//
+// Body: { from_entity_id, to_entity_id, relation, confidence? }
+// Writes to `edges` with metadata.source='manual'. Does NOT go through
+// `thought_entity_edges` — there's no backing thought. The trigger that
+// maintains support_count from thought_entity_edges doesn't fire, so the
+// manual support_count stays at whatever we set (1) until the worker happens
+// to also extract the same pair+relation from a real thought, at which
+// point the trigger upserts and the metadata stays as 'manual'.
+//
+// If the pair+relation already has a row in `edges`, return existed:true
+// without writing — manual add over an existing edge is a no-op.
+// If the pair+relation is in `edge_blocklist`, return blocked:true with 409;
+// caller can prompt the user to unblock first.
+const MANUAL_EDGE_RELATIONS = new Set([
+  "works_on", "uses", "uses_tool", "collaborates_with", "integrates_with",
+  "alternative_to", "evaluates", "member_of", "located_in", "related_to",
+  "published_by", "references",
+  "knew", "friend_of", "family_of", "mentor_of", "introduced_via",
+  "lives_in", "is_part_of",
+]);
+
+app.post("/edges/manual", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const fromIdRaw = Number(body.from_entity_id);
+  const toIdRaw = Number(body.to_entity_id);
+  const relation = typeof body.relation === "string" ? body.relation.trim().toLowerCase() : "";
+  const confidence = Number(body.confidence ?? 0.95);
+
+  if (!fromIdRaw || !toIdRaw || isNaN(fromIdRaw) || isNaN(toIdRaw) || fromIdRaw === toIdRaw) {
+    return c.json({ error: "from_entity_id and to_entity_id required (distinct integers)" }, 400, corsHeaders);
+  }
+  if (!relation || !MANUAL_EDGE_RELATIONS.has(relation)) {
+    return c.json({
+      error: `relation must be one of: ${[...MANUAL_EDGE_RELATIONS].join(", ")}`,
+    }, 400, corsHeaders);
+  }
+  const { from, to } = normalizeEdgeKey(fromIdRaw, toIdRaw, relation);
+
+  // Blocklist check — if the user previously removed this edge, refuse to
+  // re-add silently. The dashboard prompts them to unblock first.
+  const { data: blocked } = await supabase
+    .from("edge_blocklist")
+    .select("relation, reason")
+    .eq("from_entity_id", from)
+    .eq("to_entity_id", to)
+    .eq("relation", relation)
+    .maybeSingle();
+  if (blocked) {
+    return c.json({
+      blocked: true,
+      reason: blocked.reason,
+      message: "This edge is in edge_blocklist (previously removed). Unblock it before re-adding.",
+    }, 409, corsHeaders);
+  }
+
+  // Existing-edge check (any direction for symmetric).
+  const { data: existing } = await supabase
+    .from("edges")
+    .select("id, support_count, confidence, metadata")
+    .eq("from_entity_id", from)
+    .eq("to_entity_id", to)
+    .eq("relation", relation)
+    .maybeSingle();
+  if (existing) {
+    return c.json({
+      existed: true,
+      edge_id: existing.id,
+      from_entity_id: from,
+      to_entity_id: to,
+      relation,
+      message: "Edge already exists. Manual add is a no-op.",
+    }, 200, corsHeaders);
+  }
+
+  const { data: inserted, error: insErr } = await supabase
+    .from("edges")
+    .insert({
+      from_entity_id: from,
+      to_entity_id: to,
+      relation,
+      support_count: 1,
+      confidence: Math.max(0, Math.min(1, isNaN(confidence) ? 0.95 : confidence)),
+      metadata: {
+        source: "manual",
+        added_at: new Date().toISOString(),
+        added_via: "POST /edges/manual",
+      },
+    })
+    .select("id")
+    .maybeSingle();
+  if (insErr) return c.json({ error: insErr.message }, 500, corsHeaders);
+
+  // Requeue thoughts so both endpoints' wiki articles regenerate with the
+  // new relationship in their Relationships section.
+  for (const entityId of [from, to]) {
+    const { data: link } = await supabase
+      .from("thought_entities")
+      .select("thought_id")
+      .eq("entity_id", entityId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (link?.thought_id) {
+      await supabase.from("entity_extraction_queue").upsert({
+        thought_id: link.thought_id,
+        status: "pending",
+        attempt_count: 0,
+        last_error: null,
+        queued_at: new Date().toISOString(),
+      }, { onConflict: "thought_id" });
+    }
+  }
+
+  return c.json({
+    created: true,
+    edge_id: inserted?.id ?? null,
+    from_entity_id: from,
+    to_entity_id: to,
+    relation,
+    source: "manual",
+    requeued: true,
+  }, 200, corsHeaders);
 });
 
 // Delete an edge AND add it to edge_blocklist so the worker won't recreate it.

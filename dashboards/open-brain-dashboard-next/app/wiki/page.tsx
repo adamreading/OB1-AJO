@@ -534,6 +534,38 @@ interface RecentBlockEntry {
   blocked_at: string;
 }
 
+// Relation vocabulary for manual edge adds. Must match MANUAL_EDGE_RELATIONS
+// in supabase/functions/rest-api/index.ts. The few extras here (lives_in,
+// is_part_of) are inference-time relations the worker doesn't emit but the
+// user might want to assert directly.
+const MANUAL_RELATIONS: { value: string; label: string; hint: string }[] = [
+  { value: "works_on", label: "works_on", hint: "person/org → project (actively building)" },
+  { value: "uses", label: "uses", hint: "person/org → tool" },
+  { value: "collaborates_with", label: "collaborates_with", hint: "person ↔ person (work)" },
+  { value: "evaluates", label: "evaluates", hint: "person → tool/project (assessing)" },
+  { value: "member_of", label: "member_of", hint: "person → organization" },
+  { value: "located_in", label: "located_in", hint: "org/place → place" },
+  { value: "lives_in", label: "lives_in", hint: "person → place (home)" },
+  { value: "is_part_of", label: "is_part_of", hint: "place → place" },
+  { value: "knew", label: "knew", hint: "person ↔ person (acquaintance)" },
+  { value: "friend_of", label: "friend_of", hint: "person ↔ person (close)" },
+  { value: "family_of", label: "family_of", hint: "person ↔ person (relative)" },
+  { value: "mentor_of", label: "mentor_of", hint: "person → person (taught/guided)" },
+  { value: "introduced_via", label: "introduced_via", hint: "person → org/place (met through)" },
+  { value: "integrates_with", label: "integrates_with", hint: "tool ↔ tool" },
+  { value: "alternative_to", label: "alternative_to", hint: "tool/project ↔ tool/project" },
+  { value: "related_to", label: "related_to", hint: "topic ↔ topic (weak)" },
+  { value: "published_by", label: "published_by", hint: "newsletter → person (author)" },
+  { value: "references", label: "references", hint: "any → newsletter (cites)" },
+];
+
+interface EntitySearchResult {
+  id: number;
+  canonical_name: string;
+  entity_type: string;
+  aliases?: string[];
+}
+
 function EdgesModal({
   page,
   onClose,
@@ -553,6 +585,14 @@ function EdgesModal({
   const [recentBlocks, setRecentBlocks] = useState<RecentBlockEntry[]>([]);
   const [undoLoading, setUndoLoading] = useState(false);
   const [undoStatus, setUndoStatus] = useState<string | null>(null);
+  // Add-edge inline form state. Hidden until user clicks "+ Add edge".
+  const [adding, setAdding] = useState(false);
+  const [addQuery, setAddQuery] = useState("");
+  const [addResults, setAddResults] = useState<EntitySearchResult[]>([]);
+  const [addTarget, setAddTarget] = useState<EntitySearchResult | null>(null);
+  const [addRelation, setAddRelation] = useState<string>("knew");
+  const [addLoading, setAddLoading] = useState(false);
+  const [addStatus, setAddStatus] = useState<string | null>(null);
 
   const entityType =
     ((page.metadata as { entity_type?: string } | undefined)?.entity_type) ?? page.type;
@@ -603,6 +643,74 @@ function EdgesModal({
       setUndoLoading(false);
     }
   }, [page.entity_id, onEdgeRemoved]);
+
+  // Debounced search-as-you-type for the add-edge target. Re-uses the
+  // alias-aware /api/entities?search=… RPC under the hood.
+  useEffect(() => {
+    if (!adding) return;
+    const trimmed = addQuery.trim();
+    if (trimmed.length < 2) { setAddResults([]); return; }
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/entities?search=${encodeURIComponent(trimmed)}&limit=8`);
+        if (!res.ok) return;
+        const d = (await res.json()) as { data?: EntitySearchResult[]; entities?: EntitySearchResult[] };
+        const rows = (d.data || d.entities || []).filter((e) => e.id !== page.entity_id);
+        setAddResults(rows);
+      } catch { /* ignore */ }
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [adding, addQuery, page.entity_id]);
+
+  const handleAddEdge = useCallback(async () => {
+    if (!page.entity_id || !addTarget || !addRelation) return;
+    setAddLoading(true);
+    setAddStatus(null);
+    setError(null);
+    try {
+      const res = await fetch(`/api/edges/manual`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_entity_id: page.entity_id,
+          to_entity_id: addTarget.id,
+          relation: addRelation,
+        }),
+      });
+      const d = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        existed?: boolean;
+        blocked?: boolean;
+        message?: string;
+        created?: boolean;
+      };
+      if (res.status === 409 && d.blocked) {
+        setAddStatus(d.message || "Edge is blocklisted — remove from blocklist first.");
+        return;
+      }
+      if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      if (d.existed) {
+        setAddStatus("Edge already exists — no change.");
+      } else {
+        setAddStatus(`Added ${addRelation} → ${addTarget.canonical_name}. Wiki rebuild queued.`);
+        // Reset form for another add
+        setAddQuery("");
+        setAddResults([]);
+        setAddTarget(null);
+        // Refresh edges list
+        const er = await fetch(`/api/entities/${page.entity_id}/edges`);
+        if (er.ok) {
+          const ed = (await er.json()) as { edges: EdgeRow[] };
+          setEdges(ed.edges || []);
+        }
+        onEdgeRemoved(); // parent refetches too
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Add failed");
+    } finally {
+      setAddLoading(false);
+    }
+  }, [page.entity_id, addTarget, addRelation, onEdgeRemoved]);
 
   const handleRemove = useCallback(async (edge: EdgeRow) => {
     if (!page.entity_id) return;
@@ -683,6 +791,126 @@ function EdgesModal({
           <p className="text-xs text-text-muted mb-4">
             Removing an edge here also blocklists it. The worker will not recreate this relationship from extraction even if future thoughts mention both entities together. Use this for relationships the LLM keeps inferring incorrectly.
           </p>
+
+          {/* Add-edge inline form. Click "+ Add edge" to expand. Search a
+              target entity, pick a relation, click Add. Edge is written as
+              source=manual (highest trust, renders solid in the graph).
+              Re-queues both endpoints' thoughts so wiki rebuilds with the
+              new relationship in its Relationships section. */}
+          {!adding && (
+            <button
+              onClick={() => setAdding(true)}
+              className="mb-4 text-xs px-2.5 py-1 rounded border border-violet/40 bg-violet/10 hover:bg-violet/20 text-violet-200 transition-colors"
+              title="Add a relationship between this entity and another"
+            >
+              + Add edge
+            </button>
+          )}
+
+          {adding && (
+            <div className="mb-4 p-3 rounded-lg border border-violet/40 bg-violet/5">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[10px] uppercase tracking-wider font-mono text-violet-200">
+                  add edge from {page.title}
+                </span>
+                <button
+                  onClick={() => {
+                    setAdding(false);
+                    setAddQuery("");
+                    setAddResults([]);
+                    setAddTarget(null);
+                    setAddStatus(null);
+                  }}
+                  className="text-text-muted hover:text-text-secondary text-sm"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                {/* Target search */}
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={addQuery}
+                    onChange={(e) => { setAddQuery(e.target.value); setAddTarget(null); }}
+                    placeholder="Search for the other entity by name or alias…"
+                    className="w-full px-2.5 py-1.5 rounded border border-border bg-bg-elevated text-text-primary text-sm focus:outline-none focus:border-violet/60"
+                  />
+                  {addTarget && (
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                      <span className="text-[10px] text-violet-200 font-mono">
+                        → #{addTarget.id} {addTarget.canonical_name}
+                      </span>
+                      <button
+                        onClick={() => { setAddTarget(null); setAddQuery(""); }}
+                        className="text-text-muted hover:text-text-secondary text-xs"
+                        title="Clear selection"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Search results dropdown */}
+                {!addTarget && addResults.length > 0 && (
+                  <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto rounded border border-border bg-bg-elevated">
+                    {addResults.map((r) => (
+                      <button
+                        key={r.id}
+                        onClick={() => { setAddTarget(r); setAddQuery(r.canonical_name); setAddResults([]); }}
+                        className="text-left px-2.5 py-1.5 hover:bg-violet/10 transition-colors flex items-center gap-2"
+                      >
+                        <span className="text-sm text-text-primary">{r.canonical_name}</span>
+                        <span className="text-[10px] text-text-muted font-mono">
+                          ({r.entity_type}, #{r.id})
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Relation selector */}
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] uppercase tracking-wider font-mono text-text-muted">
+                    relation
+                  </label>
+                  <select
+                    value={addRelation}
+                    onChange={(e) => setAddRelation(e.target.value)}
+                    className="flex-1 px-2.5 py-1.5 rounded border border-border bg-bg-elevated text-text-primary text-sm focus:outline-none focus:border-violet/60"
+                  >
+                    {MANUAL_RELATIONS.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label} — {r.hint}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Action row */}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-text-muted">
+                    {addTarget
+                      ? `${page.title} → ${addRelation} → ${addTarget.canonical_name}`
+                      : "pick a target entity above"}
+                  </span>
+                  <button
+                    onClick={handleAddEdge}
+                    disabled={!addTarget || addLoading}
+                    className="px-3 py-1 rounded text-xs font-medium bg-violet/20 hover:bg-violet/30 border border-violet/50 text-violet-100 transition-colors disabled:opacity-50"
+                  >
+                    {addLoading ? "Adding…" : "Add edge"}
+                  </button>
+                </div>
+
+                {addStatus && (
+                  <p className="text-[11px] text-violet-200">{addStatus}</p>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Undo-recent banner. Shows when there have been recent
               blocklist entries on THIS entity in the last 30 minutes —

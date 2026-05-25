@@ -50,6 +50,10 @@ interface Props {
   bypassMinWeightIds?: Set<number>;
   /** Override the default plain-click behavior. If provided, click calls this instead of router.push. */
   onNodeClick?: (node: ConstellationNode) => void;
+  /** Fires when the user right-clicks (or context-menus on touch) a node.
+   *  Used to open a "+ add edge from this entity" affordance at the page
+   *  level. Suppresses the native browser context menu when set. */
+  onNodeContextMenu?: (node: ConstellationNode, screen: { x: number; y: number }) => void;
   /** Compact strip mode — only renders selected node + first-degree neighbors in a row. */
   collapsed?: boolean;
 }
@@ -501,6 +505,7 @@ export function ThoughtGraph({
   selectedId = null,
   bypassMinWeightIds,
   onNodeClick,
+  onNodeContextMenu,
   collapsed = false,
 }: Props) {
   const router = useRouter();
@@ -1190,6 +1195,12 @@ export function ThoughtGraph({
                 onMouseEnter={() => setHover(n.id)}
                 onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
                 onClick={(e) => handleNodeClick(n, e)}
+                onContextMenu={(e) => {
+                  if (!onNodeContextMenu) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onNodeContextMenu(n, { x: e.clientX, y: e.clientY });
+                }}
                 opacity={dimmed ? 0.18 : 1}
                 style={{ cursor: "pointer", transition: "opacity 160ms" }}
               >

@@ -620,6 +620,13 @@ export function WikiGraphView({
   const [quickEditNode, setQuickEditNode] = useState<
     { id: number; name: string; type: string } | null
   >(null);
+  // Right-click-add-edge state. Opens when the user right-clicks a node in
+  // the constellation. The picked node becomes the "from" entity; the user
+  // picks the target + relation in the modal.
+  const [addEdgeFrom, setAddEdgeFrom] = useState<
+    { id: number; name: string; type: string } | null
+  >(null);
+  const [addEdgeStatus, setAddEdgeStatus] = useState<string | null>(null);
   // Bumped after every quick-edit save/delete so the constellation fetch
   // effect re-runs and the canvas reflects the change.
   const [refetchTick, setRefetchTick] = useState(0);
@@ -1225,6 +1232,10 @@ export function WikiGraphView({
               selectedId={selectedNode?.id ?? null}
               bypassMinWeightIds={searchMatchIds.size > 0 ? searchMatchIds : undefined}
               onNodeClick={handleNodeClick}
+              onNodeContextMenu={(node) => {
+                setAddEdgeFrom({ id: node.id, name: node.label, type: node.type });
+                setAddEdgeStatus(null);
+              }}
               collapsed={collapsed}
             />
           )}
@@ -1564,6 +1575,237 @@ export function WikiGraphView({
           onDeleted={() => setRefetchTick((t) => t + 1)}
         />
       )}
+
+      {addEdgeFrom && (
+        <ConstellationAddEdgeModal
+          fromEntity={addEdgeFrom}
+          status={addEdgeStatus}
+          setStatus={setAddEdgeStatus}
+          onClose={() => setAddEdgeFrom(null)}
+          onAdded={() => setRefetchTick((t) => t + 1)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Small standalone modal for adding a manual edge from a constellation
+// right-click. Mirrors the entity-search + relation-dropdown pattern in
+// EdgesModal (wiki/page.tsx) but stays here to avoid cross-file imports.
+// ─────────────────────────────────────────────────────────────────────────
+
+const CONSTELLATION_ADD_RELATIONS: { value: string; hint: string }[] = [
+  { value: "works_on", hint: "person/org → project" },
+  { value: "uses", hint: "person/org → tool" },
+  { value: "collaborates_with", hint: "person ↔ person" },
+  { value: "evaluates", hint: "person → tool/project" },
+  { value: "member_of", hint: "person → organization" },
+  { value: "located_in", hint: "org/place → place" },
+  { value: "lives_in", hint: "person → place (home)" },
+  { value: "is_part_of", hint: "place → place" },
+  { value: "knew", hint: "person ↔ person" },
+  { value: "friend_of", hint: "person ↔ person (close)" },
+  { value: "family_of", hint: "person ↔ person (relative)" },
+  { value: "mentor_of", hint: "person → person" },
+  { value: "introduced_via", hint: "person → org/place" },
+  { value: "integrates_with", hint: "tool ↔ tool" },
+  { value: "alternative_to", hint: "tool/project ↔ tool/project" },
+  { value: "related_to", hint: "topic ↔ topic" },
+  { value: "published_by", hint: "newsletter → person" },
+  { value: "references", hint: "any → newsletter" },
+];
+
+function ConstellationAddEdgeModal({
+  fromEntity,
+  status,
+  setStatus,
+  onClose,
+  onAdded,
+}: {
+  fromEntity: { id: number; name: string; type: string };
+  status: string | null;
+  setStatus: (s: string | null) => void;
+  onClose: () => void;
+  onAdded: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Array<{ id: number; canonical_name: string; entity_type: string }>>([]);
+  const [target, setTarget] = useState<{ id: number; canonical_name: string; entity_type: string } | null>(null);
+  const [relation, setRelation] = useState("knew");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const t = query.trim();
+    if (t.length < 2) { setResults([]); return; }
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/entities?search=${encodeURIComponent(t)}&limit=8`);
+        if (!res.ok) return;
+        const d = (await res.json()) as { data?: typeof results; entities?: typeof results };
+        const rows = (d.data || d.entities || []).filter((e) => e.id !== fromEntity.id);
+        setResults(rows);
+      } catch { /* ignore */ }
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [query, fromEntity.id]);
+
+  async function handleAdd() {
+    if (!target) return;
+    setLoading(true);
+    setStatus(null);
+    try {
+      const res = await fetch("/api/edges/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_entity_id: fromEntity.id,
+          to_entity_id: target.id,
+          relation,
+        }),
+      });
+      const d = (await res.json().catch(() => ({}))) as {
+        error?: string; existed?: boolean; blocked?: boolean; message?: string;
+      };
+      if (res.status === 409 && d.blocked) { setStatus(d.message || "Blocklisted."); return; }
+      if (!res.ok) { setStatus(d.error || `HTTP ${res.status}`); return; }
+      if (d.existed) {
+        setStatus("Edge already exists — no change.");
+      } else {
+        setStatus(`Added ${relation} → ${target.canonical_name}. Constellation will refresh.`);
+        onAdded();
+      }
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Add failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 60,
+        background: "rgba(0,0,0,0.5)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%",
+          maxWidth: 460,
+          margin: "0 16px",
+          padding: 18,
+          background: "var(--bg-1)",
+          border: "1px solid var(--line-strong)",
+          borderRadius: 12,
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--violet-200)" }}>
+              + add edge
+            </div>
+            <div style={{ marginTop: 6, fontSize: 15, color: "var(--fg)" }}>
+              from <strong>{fromEntity.name}</strong>{" "}
+              <span style={{ fontSize: 11, color: "var(--fg-4)", fontFamily: "var(--font-mono)" }}>
+                ({fromEntity.type}, #{fromEntity.id})
+              </span>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: "var(--fg-3)", fontSize: 22, cursor: "pointer", lineHeight: 1 }}>
+            ×
+          </button>
+        </div>
+
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); setTarget(null); }}
+          placeholder="Search for the other entity…"
+          style={{
+            padding: "8px 10px",
+            borderRadius: 8,
+            border: "1px solid var(--line-strong)",
+            background: "var(--bg-2)",
+            color: "var(--fg)",
+            fontSize: 13,
+            outline: "none",
+          }}
+        />
+
+        {!target && results.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 200, overflowY: "auto", border: "1px solid var(--line)", borderRadius: 8 }}>
+            {results.map((r) => (
+              <button
+                key={r.id}
+                onClick={() => { setTarget(r); setQuery(r.canonical_name); setResults([]); }}
+                style={{ textAlign: "left", padding: "7px 10px", background: "transparent", border: "none", color: "var(--fg)", cursor: "pointer", fontSize: 13, display: "flex", justifyContent: "space-between", gap: 8 }}
+              >
+                <span>{r.canonical_name}</span>
+                <span style={{ fontSize: 10, color: "var(--fg-4)", fontFamily: "var(--font-mono)" }}>
+                  {r.entity_type} · #{r.id}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 10, color: "var(--fg-4)", fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+            relation
+          </span>
+          <select
+            value={relation}
+            onChange={(e) => setRelation(e.target.value)}
+            style={{ flex: 1, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg-2)", color: "var(--fg)", fontSize: 12 }}
+          >
+            {CONSTELLATION_ADD_RELATIONS.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.value} — {r.hint}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 11, color: "var(--fg-3)" }}>
+            {target
+              ? `${fromEntity.name} → ${relation} → ${target.canonical_name}`
+              : "pick a target above"}
+          </span>
+          <button
+            onClick={handleAdd}
+            disabled={!target || loading}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 6,
+              border: "1px solid rgba(157,131,255,0.5)",
+              background: "rgba(157,131,255,0.2)",
+              color: "var(--violet-100)",
+              fontSize: 12,
+              fontWeight: 500,
+              cursor: target && !loading ? "pointer" : "default",
+              opacity: target && !loading ? 1 : 0.5,
+            }}
+          >
+            {loading ? "Adding…" : "Add edge"}
+          </button>
+        </div>
+
+        {status && (
+          <p style={{ fontSize: 11, color: "var(--violet-200)", margin: 0 }}>{status}</p>
+        )}
+      </div>
     </div>
   );
 }
