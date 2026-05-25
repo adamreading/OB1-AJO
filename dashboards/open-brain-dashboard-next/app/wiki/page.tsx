@@ -1310,9 +1310,14 @@ function WikiPageInner() {
   }, [pages]);
 
   // Save curator notes — used by both views.
+  // Returns the server's response so the CuratorNotePanel can surface the
+  // regen status (`queued` | `no_entity` | `no_thoughts` | `failed`).
+  // Saving now auto-enqueues a wiki regen on the server side; clicking
+  // "Regenerate" separately is only needed if the auto-enqueue reported
+  // a failure.
   const saveNotes = useCallback(
-    async (notes: string) => {
-      if (!selected) return;
+    async (notes: string): Promise<{ regen_status?: string; message?: string }> => {
+      if (!selected) return {};
       const res = await fetch(`/api/wiki/${encodeURIComponent(selected.slug)}/notes`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1322,8 +1327,10 @@ function WikiPageInner() {
         const d = await res.json().catch(() => ({}));
         throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
       }
+      const data = (await res.json().catch(() => ({}))) as { regen_status?: string; message?: string };
       setSelected((prev) => (prev ? { ...prev, notes: notes || null } : prev));
       setNotesContent(notes);
+      return data;
     },
     [selected]
   );

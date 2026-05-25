@@ -124,7 +124,7 @@ Legacy pages compiled before this change still have `## Summary` / `## Key Facts
 
 **Wiki pipeline**:
 - Compiler (`generate-wiki.mjs`) always regenerates all pages — `manually_edited` is ignored.
-- Curator notes → `wiki_pages.notes` column. Treated as **HIGHEST AUTHORITY** in the regen prompt: explicit override of conflicting thought snippets, drop-the-thought conflict-resolution rule, plus a tail reminder appended to the user message when notes are present (sits in the model's recency window). The wiki UI surfaces this in a violet-bordered "curator note" panel — the only writable surface on the wiki page.
+- Curator notes → `wiki_pages.notes` column. Treated as **HIGHEST AUTHORITY** in the regen prompt: explicit override of conflicting thought snippets, drop-the-thought conflict-resolution rule, plus a tail reminder appended to the user message when notes are present (sits in the model's recency window). The wiki UI surfaces this in a violet-bordered "curator note" panel — the only writable surface on the wiki page. **Saving a curator note auto-enqueues a wiki regen** (added 2026-05-25) — `PATCH /wiki-pages/:slug/notes` updates the column then force-upserts the entity's most-recent thought to `entity_extraction_queue.status='pending'`, same path the manual Regenerate button uses. The response carries `regen_status: queued | no_entity | no_thoughts | failed` so the dashboard can show a status pill. Notes are permanent — they steer every future regen too, not just the one immediately after save.
 - Citations format: `[#42]` (integer serial_id). Entity cross-links: `/wiki?slug=entity-slug`.
 - Wiki output files are gitignored (`wikis/`, `compiled-wiki/`, `output/`).
 - Wiki page has two views toggleable in the header:

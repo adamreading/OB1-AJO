@@ -52,7 +52,7 @@ interface ReflectionRow {
 interface WikiGraphViewProps {
   selected: WikiPageDetail | null;
   onSelectSlug: (slug: string) => void;
-  onSaveNotes: (notes: string) => Promise<void>;
+  onSaveNotes: (notes: string) => Promise<{ regen_status?: string; message?: string } | void>;
   onRegenerate?: () => void;
   onOpenThoughts?: () => void;
   /** Entity-management triggers — re-use the same modals the List view opens. */
@@ -2027,12 +2027,16 @@ function CuratorNotePanel({
   onSave,
 }: {
   note: string;
-  onSave: (notes: string) => Promise<void>;
+  onSave: (notes: string) => Promise<{ regen_status?: string; message?: string } | void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(note);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Surfaces the server's regen_status from the save response so the user
+  // knows the wiki is being rebuilt (or sees why it isn't). The pill clears
+  // on next edit.
+  const [regenStatus, setRegenStatus] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(note);
@@ -2041,9 +2045,13 @@ function CuratorNotePanel({
   async function handleSave() {
     setSaving(true);
     setError(null);
+    setRegenStatus(null);
     try {
-      await onSave(draft);
+      const res = await onSave(draft);
       setEditing(false);
+      if (res && typeof res === "object" && "regen_status" in res && res.regen_status) {
+        setRegenStatus(res.regen_status);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
     } finally {
@@ -2202,10 +2210,27 @@ function CuratorNotePanel({
           style={{
             fontSize: 10.5,
             fontFamily: "var(--font-mono)",
-            color: "var(--fg-4)",
+            color:
+              regenStatus === "queued"
+                ? "var(--violet-300)"
+                : regenStatus && regenStatus !== "queued"
+                  ? "var(--warn, #d8a85a)"
+                  : "var(--fg-4)",
           }}
         >
-          {editing ? "⌘↵ to save" : note ? "click Edit to update" : ""}
+          {editing
+            ? "⌘↵ to save"
+            : regenStatus === "queued"
+              ? "Saved ✓ — regenerating in ~30-60s"
+              : regenStatus === "no_thoughts"
+                ? "Saved ✓ — no linked thoughts to re-extract"
+                : regenStatus === "no_entity"
+                  ? "Saved ✓ — legacy topic page, no auto-regen"
+                  : regenStatus === "failed"
+                    ? "Saved ✓ but regen queue failed — click Regenerate"
+                    : note
+                      ? "click Edit to update"
+                      : ""}
         </span>
         <div style={{ display: "flex", gap: 8 }}>
           {editing ? (

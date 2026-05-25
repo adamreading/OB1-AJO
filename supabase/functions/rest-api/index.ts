@@ -1986,15 +1986,72 @@ app.patch("/wiki-pages/:slug/notes", async (c) => {
   if (typeof body.notes !== "string") {
     return c.json({ error: "notes (string) is required" }, 400, corsHeaders);
   }
+  // Pull entity_id at the same time so we can enqueue a regen straight after
+  // the update — the user expectation is that saving a curator note feeds
+  // immediately into a rebuild, not on the next manual Regenerate click.
   const { data, error } = await supabase
     .from("wiki_pages")
     .update({ notes: body.notes || null, updated_at: new Date().toISOString() })
     .eq("slug", slug)
-    .select("id, slug")
+    .select("id, slug, entity_id")
     .maybeSingle();
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
   if (!data) return c.json({ error: "Not found" }, 404, corsHeaders);
-  return c.json({ slug: data.slug, action: "notes_updated" }, 200, corsHeaders);
+
+  // Best-effort regen enqueue. Mirrors POST /wiki-pages/:slug/regen — pick
+  // the entity's most recent linked thought, force-upsert its
+  // entity_extraction_queue row to 'pending'. The worker re-extracts, marks
+  // the entity dirty, and the wiki compiler runs with the new notes loaded.
+  // Failures here don't fail the request — the notes still saved.
+  let regenStatus: "queued" | "no_entity" | "no_thoughts" | "failed" = "no_entity";
+  let regenThoughtId: string | null = null;
+  if (data.entity_id) {
+    const { data: link } = await supabase
+      .from("thought_entities")
+      .select("thought_id, thoughts(id, created_at)")
+      .eq("entity_id", data.entity_id)
+      .order("thoughts(created_at)", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (link?.thought_id) {
+      regenThoughtId = link.thought_id;
+      const { error: queueErr } = await supabase
+        .from("entity_extraction_queue")
+        .upsert(
+          {
+            thought_id: link.thought_id,
+            status: "pending",
+            last_error: null,
+            started_at: null,
+            processed_at: null,
+            queued_at: new Date().toISOString(),
+          },
+          { onConflict: "thought_id" }
+        );
+      regenStatus = queueErr ? "failed" : "queued";
+    } else {
+      regenStatus = "no_thoughts";
+    }
+  }
+
+  return c.json(
+    {
+      slug: data.slug,
+      action: "notes_updated",
+      regen_status: regenStatus,
+      regen_thought_id: regenThoughtId,
+      message:
+        regenStatus === "queued"
+          ? "Notes saved. Wiki regen queued — typically refreshes within 30-60s."
+          : regenStatus === "no_thoughts"
+            ? "Notes saved. No linked thoughts to re-extract — wiki will not auto-regen."
+            : regenStatus === "no_entity"
+              ? "Notes saved. Legacy topic page has no linked entity — wiki will not auto-regen."
+              : "Notes saved but regen queue update failed — click Regenerate to retry.",
+    },
+    200,
+    corsHeaders
+  );
 });
 
 // Wiki pages — single page with full content
