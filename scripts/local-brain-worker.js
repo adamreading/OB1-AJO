@@ -25,6 +25,23 @@ const WORKER_VERSION = "ajo-local-brain-worker-v2";
 const MIN_LINKED_FOR_WIKI = Number(process.env.MIN_LINKED_FOR_WIKI || 3);
 const WIKI_SCRIPT = path.join(__dirname, "../recipes/entity-wiki/generate-wiki.mjs");
 const WIKI_REPO_ROOT = path.join(__dirname, "..");
+const INFER_SCRIPT = path.join(__dirname, "infer-entity-edges.mjs");
+// Auto-run cross-thought edge inference for dirty entities after the queue
+// drains, just before the wiki compiler fires. Default ON — opt out with
+// INFER_ON_DIRTY=false. Filtered to entity_types that benefit from
+// inference; tools/topics/newsletters are skipped (worker handles those
+// fine single-thought).
+const INFER_ON_DIRTY = String(process.env.INFER_ON_DIRTY ?? "true").toLowerCase() !== "false";
+const INFER_ENTITY_TYPES = new Set(
+  (process.env.INFER_ENTITY_TYPES || "person,place,organization,org")
+    .split(",").map((s) => s.trim()).filter(Boolean)
+);
+// In-process retry cap. On worker error we requeue as pending until this
+// many attempts; after that the row is marked failed and only a restart
+// (resetFailedItems) requeues it. Keeps a deterministic-failure thought
+// from spinning the worker forever, while transient Ollama / network
+// blips self-heal without waiting for a restart.
+const MAX_ATTEMPTS = Number(process.env.WORKER_MAX_ATTEMPTS || 3);
 
 // Entity IDs touched since the last queue drain — wiki is regenerated for these when queue empties
 const dirtyEntityIds = new Set();
@@ -1012,10 +1029,42 @@ function spawnWiki(entityId) {
   });
 }
 
+function spawnInference(entityId) {
+  // Run scripts/infer-entity-edges.mjs --entity-id <id> --apply against ONE
+  // entity. Writes inferred edges directly to `edges` with
+  // metadata.source='inferred'. Uses the model fallback chain in the script
+  // itself (gpt-oss:120b-cloud → gemma4:26b → qwen3:30b).
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      ["--env-file=.env", INFER_SCRIPT, "--entity-id", String(entityId), "--apply"],
+      { stdio: "inherit", env: process.env, cwd: WIKI_REPO_ROOT }
+    );
+    child.on("close", () => resolve());
+    child.on("error", (err) => {
+      console.error(`[infer] Failed to spawn inference for #${entityId}: ${err.message}`);
+      resolve();
+    });
+  });
+}
+
+async function fetchEntityTypes(entityIds) {
+  if (!entityIds.length) return new Map();
+  const { data, error } = await supabase
+    .from("entities")
+    .select("id, entity_type")
+    .in("id", entityIds);
+  if (error) {
+    console.error(`[infer] Failed to fetch entity_types: ${error.message}`);
+    return new Map();
+  }
+  return new Map((data ?? []).map((r) => [r.id, r.entity_type]));
+}
+
 async function processQueue() {
   await resetFailedItems();
   await detectGraphTables();
-  console.log(`Starting Open Brain local worker using ${MODEL}. Poll interval: ${POLL_MS}ms.`);
+  console.log(`Starting Open Brain local worker using ${MODEL}. Poll interval: ${POLL_MS}ms. Max attempts: ${MAX_ATTEMPTS}. Infer-on-dirty: ${INFER_ON_DIRTY}.`);
 
   while (true) {
     let item = null;
@@ -1034,6 +1083,22 @@ async function processQueue() {
             console.log(`[wiki] Skipping ${skipped} entit${skipped === 1 ? "y" : "ies"} below min-linked threshold (${MIN_LINKED_FOR_WIKI})`);
           }
           if (eligible.length > 0) {
+            // Cross-thought edge inference BEFORE wiki regen so the article
+            // sees the new edges in its Relationships section on this pass.
+            // Only runs for entity_types in INFER_ENTITY_TYPES (default:
+            // person/place/organization) — tool/topic/newsletter entities
+            // don't benefit, and inference takes ~30-60s per entity. The
+            // script itself respects edge_blocklist and skips pairs that
+            // already have an edge, so re-running is cheap.
+            if (INFER_ON_DIRTY) {
+              const typeMap = await fetchEntityTypes(eligible);
+              const inferrable = eligible.filter((id) => INFER_ENTITY_TYPES.has(String(typeMap.get(id) || "").toLowerCase()));
+              if (inferrable.length > 0) {
+                console.log(`[infer] Running cross-thought inference for ${inferrable.length} entit${inferrable.length === 1 ? "y" : "ies"} before wiki regen...`);
+                for (const id of inferrable) await spawnInference(id);
+                console.log("[infer] Done.");
+              }
+            }
             console.log(`[wiki] Queue drained — regenerating wiki for ${eligible.length} entit${eligible.length === 1 ? "y" : "ies"}...`);
             for (const id of eligible) await spawnWiki(id);
             console.log("[wiki] Done.");
@@ -1059,13 +1124,30 @@ async function processQueue() {
       console.error("Worker error:", fullMsg);
       if (item?.thought_id) {
         try {
+          // In-process retry: read current attempt_count, increment, requeue
+          // as 'pending' if under MAX_ATTEMPTS. Only stamp 'failed' at the
+          // cap. Previously we always marked failed and waited for restart
+          // — transient Ollama timeouts spun up a giant manual-restart
+          // backlog. Now they self-heal.
+          const { data: existing } = await supabase
+            .from("entity_extraction_queue")
+            .select("attempt_count")
+            .eq("thought_id", item.thought_id)
+            .maybeSingle();
+          const nextAttempt = (existing?.attempt_count ?? 0) + 1;
+          const willRetry = nextAttempt < MAX_ATTEMPTS;
           await queueUpdate(item.thought_id, {
-            status: "failed",
+            status: willRetry ? "pending" : "failed",
+            attempt_count: nextAttempt,
             last_error: fullMsg.slice(0, 500),
-            processed_at: new Date().toISOString(),
+            processed_at: willRetry ? null : new Date().toISOString(),
+            started_at: null,
           });
+          console.log(
+            `[retry] ${item.thought_id.slice(0, 8)}: attempt ${nextAttempt}/${MAX_ATTEMPTS} — ${willRetry ? "requeued" : "marked failed (cap reached)"}`
+          );
         } catch (queueErr) {
-          console.error("Failed to mark queue item failed:", queueErr.message);
+          console.error("Failed to update queue item:", queueErr.message);
         }
       }
       await sleep(5000);
