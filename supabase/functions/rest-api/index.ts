@@ -1437,7 +1437,11 @@ app.get("/constellation", async (c) => {
   // Cap at 200 — well above the UI's 100 option, leaves room for future
   // expansion. The Postgres RPCs underneath have no row cap; this is just
   // a sanity ceiling against runaway client requests.
-  const limit = Math.min(200, Math.max(5, Number(c.req.query("limit")) || 30));
+  // Cap at 5000 — the wiki view sends limit=2000 to effectively get every
+  // entity (~650 in the brain). Old cap of 200 was the actual bug behind
+  // "showing 200 of 200 entities" on the dashboard hero: the wiki bumped
+  // its requested limit but the server silently clamped to 200.
+  const limit = Math.min(5000, Math.max(5, Number(c.req.query("limit")) || 30));
   const days = c.req.query("days") === undefined ? 90 : Number(c.req.query("days"));
   const minWeight = Math.max(1, Number(c.req.query("min_weight")) || 2);
   const classification = c.req.query("classification") || null;

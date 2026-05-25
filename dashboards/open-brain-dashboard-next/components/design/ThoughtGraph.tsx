@@ -89,7 +89,13 @@ function layout(
   >();
   const cx = width / 2;
   const cy = height / 2;
-  const radius = Math.min(width, height) * 0.38;
+  // Elliptical seed — rx/ry track the canvas aspect ratio so a wide canvas
+  // gets a wide initial spread. Was `Math.min(width, height) * 0.38` which
+  // produced a circular cluster bounded by the smaller dimension, leaving
+  // wide canvases mostly empty after force iterations couldn't fight the
+  // center-pull back out toward the corners.
+  const rx = width * 0.4;
+  const ry = height * 0.4;
 
   // Seed: pinned node anchored at center, others on a sunflower (golden-ratio)
   // distribution. The sunflower fills 2D space evenly — far less prone to
@@ -102,10 +108,10 @@ function layout(
   others.forEach((n, i) => {
     const t = i + 1;
     const angle = t * goldenAngle;
-    const r = radius * Math.sqrt(t / Math.max(1, others.length));
+    const f = Math.sqrt(t / Math.max(1, others.length));
     positions.set(n.id, {
-      x: cx + Math.cos(angle) * r,
-      y: cy + Math.sin(angle) * r,
+      x: cx + Math.cos(angle) * rx * f,
+      y: cy + Math.sin(angle) * ry * f,
       vx: 0,
       vy: 0,
       pinned: false,
@@ -127,6 +133,13 @@ function layout(
   const SPRING = 0.013;
   const CENTER_PULL = 0.018;
   const DAMPING = 0.82;
+  // Aspect-aware center pull: on wide canvases (width >> height), pull
+  // horizontally less so the cluster spreads along the longer axis instead
+  // of being yanked back into a tight ball. Square canvas → both 1.0; wide
+  // canvas (3:1) → X pull at ~0.33 of Y pull.
+  const aspect = Math.min(width, height) / Math.max(width, height);
+  const pullX = width >= height ? CENTER_PULL * aspect : CENTER_PULL;
+  const pullY = height >= width ? CENTER_PULL * aspect : CENTER_PULL;
   // Hard separation floor — must clear the larger of the two nodes' radii
   // plus a label-height buffer so labels don't crash into other circles.
   const minDist = (a: ConstellationNode, b: ConstellationNode) =>
@@ -205,8 +218,8 @@ function layout(
     for (const n of nodes) {
       const p = positions.get(n.id)!;
       if (p.pinned) continue;
-      p.vx += (cx - p.x) * CENTER_PULL;
-      p.vy += (cy - p.y) * CENTER_PULL;
+      p.vx += (cx - p.x) * pullX;
+      p.vy += (cy - p.y) * pullY;
       p.vx *= DAMPING;
       p.vy *= DAMPING;
       const speed = Math.hypot(p.vx, p.vy);
@@ -241,16 +254,29 @@ function layout(
   const targetH = height - padTop - padBottom;
   const scaleX = bboxW > 0 ? targetW / bboxW : 1;
   const scaleY = bboxH > 0 ? targetH / bboxH : 1;
-  // Cap zoom-in at 2.2× and zoom-out at 0.45× (so nothing vanishes).
-  const finalScale = Math.max(0.45, Math.min(scaleX, scaleY, 2.2));
+
+  // Independent X/Y stretching with a sanity cap. Previously we used
+  // Math.min(scaleX, scaleY) which preserved the cluster's aspect ratio
+  // — fine for square-ish canvases but terrible on wide ones (a circular
+  // cluster in a 3:1 canvas left 60% of the width empty). Now we stretch
+  // X and Y independently so the cluster fills the rectangle. Nodes are
+  // rendered with cx/cy/r (round) so they don't distort; only the spatial
+  // distribution stretches. The 3.2 ceiling and 0.45 floor keep behaviour
+  // sensible at both extremes — runaway stretch at very low node counts
+  // and runaway compression at very high counts are both bounded.
+  const stretchCap = 3.2;
+  const finalScaleX = Math.max(0.45, Math.min(scaleX, stretchCap));
+  const finalScaleY = Math.max(0.45, Math.min(scaleY, stretchCap));
+  // Node radius uses the smaller of the two scales so the dots don't
+  // become tiny on extreme stretches.
+  const radiusScale = Math.min(finalScaleX, finalScaleY);
 
   const out = new Map<number, { x: number; y: number; r: number }>();
   for (const p of raw) {
     out.set(p.id, {
-      x: padX + (p.x - minX) * finalScale + (targetW - bboxW * finalScale) / 2,
-      y:
-        padTop + (p.y - minY) * finalScale + (targetH - bboxH * finalScale) / 2,
-      r: p.r * finalScale,
+      x: padX + (p.x - minX) * finalScaleX + (targetW - bboxW * finalScaleX) / 2,
+      y: padTop + (p.y - minY) * finalScaleY + (targetH - bboxH * finalScaleY) / 2,
+      r: p.r * radiusScale,
     });
   }
   return out;
