@@ -2,6 +2,11 @@
 
 > LLM-powered document extraction that turns raw text into atomic thoughts with fingerprint and semantic deduplication, dry-run preview, and safe job execution.
 
+> [!IMPORTANT]
+> **This folder ships the backend only. There is no bundled browser UI or Claude Desktop integration.**
+>
+> Today you need a terminal or a CLI agent (Claude Code, Codex, Cursor) to send text to this Edge Function. If you want a paste-in-a-textarea experience, the Next.js dashboard at `dashboards/open-brain-dashboard-next` includes an "Add to Brain" page that wraps this function — install the dashboard separately. The planned `integrations/enhanced-mcp` (for Claude Desktop via MCP) is not yet built; that folder currently ships empty.
+
 ## What It Does
 
 Accepts raw text (meeting notes, articles, journal entries, email threads) and uses an LLM to extract atomic, self-contained thoughts. Each extracted thought is then deduplicated against your existing thoughts using both content fingerprinting and semantic similarity. The results can be previewed in dry-run mode before committing to the database.
@@ -238,9 +243,15 @@ Execute a previously dry-run job.
 
 ## How It Connects to Other Components
 
-The Enhanced MCP Server (`integrations/enhanced-mcp`) exposes `ingest_document` and `execute_ingestion_job` tools that call this Edge Function under the hood. If you only interact with your brain through MCP tools, you may not need to call this function directly — the MCP server handles it for you.
+**Today's user-facing surfaces:**
 
-For teams building custom capture pipelines, webhooks, or batch import scripts, this Edge Function provides direct HTTP access to the same ingest pipeline.
+- **Browser (dashboard):** The Next.js dashboard at `dashboards/open-brain-dashboard-next` includes an "Add to Brain" page that POSTs to this Edge Function and auto-decides between single-thought capture and multi-thought extraction. Install the dashboard separately if you want a non-CLI capture surface.
+- **CLI / scripts / webhooks:** The HTTP API documented above. Suitable for batch imports, custom capture pipelines, or terminal workflows.
+- **CLI agents:** Claude Code, Codex, Cursor, and similar tools can call the HTTP endpoint directly through their shell.
+
+**Planned (not yet built):**
+
+- **Claude Desktop via MCP:** `integrations/enhanced-mcp` is intended to expose `ingest_document` and `execute_ingestion_job` tools so Claude Desktop users can ingest documents through MCP without a terminal. The folder currently ships empty.
 
 For guidance on managing tool count and token overhead as you add more integrations, see the [tool audit guide](../../docs/05-tool-audit.md).
 
