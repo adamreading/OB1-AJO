@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ThoughtGraph,
   type ConstellationEdge,
@@ -627,6 +627,15 @@ export function WikiGraphView({
     { id: number; name: string; type: string } | null
   >(null);
   const [addEdgeStatus, setAddEdgeStatus] = useState<string | null>(null);
+  // Edit-edge state. Opens when the user right-clicks a LINE in the
+  // constellation. We pass both endpoints + the edge metadata so the modal
+  // can fetch all typed edges between the pair (the visible line may
+  // represent multiple — e.g. Adam works_on Foo + Adam member_of Foo).
+  const [editEdge, setEditEdge] = useState<{
+    from: { id: number; name: string; type: string };
+    to: { id: number; name: string; type: string };
+    visible: { relation?: string; inferred?: boolean; manual?: boolean; weight?: number };
+  } | null>(null);
   // Bumped after every quick-edit save/delete so the constellation fetch
   // effect re-runs and the canvas reflects the change.
   const [refetchTick, setRefetchTick] = useState(0);
@@ -1236,6 +1245,13 @@ export function WikiGraphView({
                 setAddEdgeFrom({ id: node.id, name: node.label, type: node.type });
                 setAddEdgeStatus(null);
               }}
+              onEdgeContextMenu={(edge, fromNode, toNode) => {
+                setEditEdge({
+                  from: { id: fromNode.id, name: fromNode.label, type: fromNode.type },
+                  to: { id: toNode.id, name: toNode.label, type: toNode.type },
+                  visible: { relation: edge.relation, inferred: edge.inferred, manual: edge.manual, weight: edge.weight },
+                });
+              }}
               collapsed={collapsed}
             />
           )}
@@ -1585,6 +1601,16 @@ export function WikiGraphView({
           onAdded={() => setRefetchTick((t) => t + 1)}
         />
       )}
+
+      {editEdge && (
+        <EditEdgeModal
+          from={editEdge.from}
+          to={editEdge.to}
+          visible={editEdge.visible}
+          onClose={() => setEditEdge(null)}
+          onChanged={() => setRefetchTick((t) => t + 1)}
+        />
+      )}
     </div>
   );
 }
@@ -1594,6 +1620,303 @@ export function WikiGraphView({
 // right-click. Mirrors the entity-search + relation-dropdown pattern in
 // EdgesModal (wiki/page.tsx) but stays here to avoid cross-file imports.
 // ─────────────────────────────────────────────────────────────────────────
+
+// Symmetric relations — for these the dashboard shouldn't show direction
+// arrows when describing the edge. Matches SYMMETRIC_RELATIONS in
+// rest-api/index.ts.
+const SYMMETRIC_REL = new Set([
+  "co_occurs_with", "related_to", "collaborates_with", "integrates_with",
+  "alternative_to", "knew", "friend_of", "family_of",
+]);
+
+function EditEdgeModal({
+  from,
+  to,
+  visible,
+  onClose,
+  onChanged,
+}: {
+  from: { id: number; name: string; type: string };
+  to: { id: number; name: string; type: string };
+  visible: { relation?: string; inferred?: boolean; manual?: boolean; weight?: number };
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  // Fetch all typed edges touching `from` and filter to those involving `to`.
+  // The visible constellation line may collapse multiple typed edges into one
+  // (e.g. Adam works_on Foo + Adam member_of Foo) — show them all so the
+  // user can edit each individually.
+  type EdgeInfo = {
+    id: number;
+    from_entity_id: number;
+    to_entity_id: number;
+    relation: string;
+    direction: "out" | "in";
+    support_count: number;
+    confidence: number | null;
+    edge_source: string | null;
+  };
+  const [edges, setEdges] = useState<EdgeInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null); // edge id being acted on
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [newRelation, setNewRelation] = useState<string>("");
+
+  const refetch = useCallback(() => {
+    setEdges(null);
+    fetch(`/api/entities/${from.id}/edges`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d: { edges: Array<EdgeInfo & { other_id: number }> }) => {
+        const filtered = (d.edges || []).filter((e) => e.other_id === to.id);
+        setEdges(filtered);
+      })
+      .catch((e: Error) => setError(e.message));
+  }, [from.id, to.id]);
+
+  useEffect(() => { refetch(); }, [refetch]);
+
+  async function handleChangeRelation(edge: EdgeInfo) {
+    if (!newRelation || newRelation === edge.relation) {
+      setEditingId(null);
+      setNewRelation("");
+      return;
+    }
+    setBusy(`change-${edge.id}`);
+    setError(null);
+    try {
+      // 1. Delete the old edge (this also blocklists it so the worker won't
+      //    re-extract the wrong relation).
+      const delRes = await fetch("/api/edges", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_entity_id: edge.from_entity_id,
+          to_entity_id: edge.to_entity_id,
+          relation: edge.relation,
+        }),
+      });
+      if (!delRes.ok) {
+        const d = await delRes.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `delete ${delRes.status}`);
+      }
+      // 2. Add the new edge as a manual assertion.
+      const addRes = await fetch("/api/edges/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_entity_id: edge.from_entity_id,
+          to_entity_id: edge.to_entity_id,
+          relation: newRelation,
+        }),
+      });
+      if (!addRes.ok) {
+        const d = await addRes.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `add ${addRes.status}`);
+      }
+      setEditingId(null);
+      setNewRelation("");
+      refetch();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Change failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleRemoveAndBlock(edge: EdgeInfo) {
+    setBusy(`remove-${edge.id}`);
+    setError(null);
+    try {
+      const res = await fetch("/api/edges", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_entity_id: edge.from_entity_id,
+          to_entity_id: edge.to_entity_id,
+          relation: edge.relation,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      setEdges((prev) => (prev || []).filter((x) => x.id !== edge.id));
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Remove failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function sourceLabel(s: string | null, inferredFlag: boolean | undefined, manualFlag: boolean | undefined): { label: string; color: string } {
+    if (s === "manual" || manualFlag) return { label: "manual", color: "var(--violet-200)" };
+    if (s === "inferred" || inferredFlag) return { label: "inferred", color: "rgb(255,176,90)" };
+    return { label: "extracted", color: "var(--fg-3)" };
+  }
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%",
+          maxWidth: 540,
+          margin: "0 16px",
+          padding: 18,
+          background: "var(--bg-1)",
+          border: "1px solid var(--line-strong)",
+          borderRadius: 12,
+          display: "flex",
+          flexDirection: "column",
+          gap: 14,
+          maxHeight: "85vh",
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--violet-200)" }}>
+              edit edge
+            </div>
+            <div style={{ marginTop: 6, fontSize: 15, color: "var(--fg)", lineHeight: 1.4 }}>
+              <strong>{from.name}</strong>{" "}
+              <span style={{ color: "var(--fg-4)" }}>↔</span>{" "}
+              <strong>{to.name}</strong>
+            </div>
+            <div style={{ marginTop: 4, fontSize: 11, color: "var(--fg-4)", fontFamily: "var(--font-mono)" }}>
+              {from.type} #{from.id} · {to.type} #{to.id}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: "var(--fg-3)", fontSize: 22, cursor: "pointer", lineHeight: 1 }}>
+            ×
+          </button>
+        </div>
+
+        {edges === null && !error && (
+          <p style={{ fontSize: 12, color: "var(--fg-4)" }}>Loading edges…</p>
+        )}
+
+        {edges && edges.length === 0 && (
+          <div style={{ padding: 12, borderRadius: 8, border: "1px dashed var(--line-strong)", fontSize: 12, color: "var(--fg-3)" }}>
+            No typed edges between this pair. The visible line is co-occurrence only (they appear together in {visible.weight ?? "?"} thought(s)). To remove the co-occurrence you would need to edit the underlying thoughts.
+          </div>
+        )}
+
+        {(edges || []).map((edge) => {
+          const src = sourceLabel(edge.edge_source, visible.inferred, visible.manual);
+          const isSym = SYMMETRIC_REL.has(edge.relation);
+          const arrow = isSym ? "↔" : edge.direction === "out" ? "→" : "←";
+          const left = edge.direction === "out" ? from.name : to.name;
+          const right = edge.direction === "out" ? to.name : from.name;
+          return (
+            <div
+              key={edge.id}
+              style={{
+                padding: 12,
+                borderRadius: 10,
+                border: "1px solid var(--line)",
+                background: "var(--bg-2)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 13, color: "var(--fg)" }}>
+                  {left} <span style={{ color: "var(--fg-4)" }}>{arrow}</span> <strong>{edge.relation}</strong> <span style={{ color: "var(--fg-4)" }}>{arrow}</span> {right}
+                </span>
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontFamily: "var(--font-mono)",
+                    padding: "2px 6px",
+                    borderRadius: 4,
+                    border: `1px solid ${src.color}`,
+                    color: src.color,
+                    background: "transparent",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  {src.label}
+                </span>
+                <span style={{ fontSize: 10, color: "var(--fg-4)", fontFamily: "var(--font-mono)" }}>
+                  {edge.support_count} {edge.support_count === 1 ? "support" : "supports"}
+                  {edge.confidence !== null ? ` · ${Math.round(edge.confidence * 100)}%` : ""}
+                </span>
+              </div>
+
+              {editingId === edge.id ? (
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <select
+                    value={newRelation}
+                    onChange={(ev) => setNewRelation(ev.target.value)}
+                    style={{ flex: 1, padding: "5px 7px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg-1)", color: "var(--fg)", fontSize: 12 }}
+                  >
+                    {CONSTELLATION_ADD_RELATIONS.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.value} — {r.hint}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => handleChangeRelation(edge)}
+                    disabled={busy !== null}
+                    style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid rgba(157,131,255,0.5)", background: "rgba(157,131,255,0.2)", color: "var(--violet-100)", fontSize: 11, cursor: "pointer", opacity: busy ? 0.5 : 1 }}
+                  >
+                    {busy === `change-${edge.id}` ? "Saving…" : "Apply"}
+                  </button>
+                  <button
+                    onClick={() => { setEditingId(null); setNewRelation(""); }}
+                    disabled={busy !== null}
+                    style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "transparent", color: "var(--fg-3)", fontSize: 11, cursor: "pointer" }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    onClick={() => { setEditingId(edge.id); setNewRelation(edge.relation); }}
+                    disabled={busy !== null}
+                    style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "transparent", color: "var(--fg)", fontSize: 11, cursor: "pointer" }}
+                    title="Change the relation type. The old relation is blocklisted so the worker won't re-extract it; the new one is written as a manual assertion."
+                  >
+                    Change relation…
+                  </button>
+                  <button
+                    onClick={() => handleRemoveAndBlock(edge)}
+                    disabled={busy !== null}
+                    style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid rgba(255,100,100,0.4)", background: "rgba(255,100,100,0.1)", color: "rgba(255,160,160,0.95)", fontSize: 11, cursor: "pointer" }}
+                    title="Remove this edge and add to edge_blocklist so the worker won't recreate it from extraction."
+                  >
+                    {busy === `remove-${edge.id}` ? "Removing…" : "✕ Remove & block"}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {error && (
+          <p style={{ fontSize: 11, color: "#ff9b9b", margin: 0 }}>{error}</p>
+        )}
+
+        <p style={{ fontSize: 10.5, color: "var(--fg-4)", margin: 0, lineHeight: 1.5 }}>
+          Removing or changing a relation also writes to <code>edge_blocklist</code>. The local worker won't re-extract the old relation from existing thoughts, so the change sticks across regens.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 const CONSTELLATION_ADD_RELATIONS: { value: string; hint: string }[] = [
   { value: "works_on", hint: "person/org → project" },

@@ -1613,11 +1613,11 @@ app.get("/entities/:id/edges", async (c) => {
   const PER_SIDE_LIMIT = 5000;
   const [outRes, inRes] = await Promise.all([
     supabase.from("edges")
-      .select("id, from_entity_id, to_entity_id, relation, support_count, confidence, updated_at")
+      .select("id, from_entity_id, to_entity_id, relation, support_count, confidence, metadata, updated_at")
       .eq("from_entity_id", id)
       .limit(PER_SIDE_LIMIT),
     supabase.from("edges")
-      .select("id, from_entity_id, to_entity_id, relation, support_count, confidence, updated_at")
+      .select("id, from_entity_id, to_entity_id, relation, support_count, confidence, metadata, updated_at")
       .eq("to_entity_id", id)
       .limit(PER_SIDE_LIMIT),
   ]);
@@ -1671,6 +1671,11 @@ app.get("/entities/:id/edges", async (c) => {
       other_name: other.canonical_name,
       other_type: other.entity_type,
       other_slug: slugMap.get(otherId) ?? null,
+      // Source tag from metadata: 'manual' | 'inferred' | undefined (=thought-derived).
+      // Lets the edge-edit modal show a "where did this come from?" badge.
+      edge_source:
+        (e.metadata && typeof e.metadata === "object" && (e.metadata as { source?: string }).source) ||
+        null,
       // Backwards-compat: keep the nested shape used by the existing edit panel
       other: { id: otherId, canonical_name: other.canonical_name, entity_type: other.entity_type },
       symmetric: SYMMETRIC_RELATIONS.has(e.relation),

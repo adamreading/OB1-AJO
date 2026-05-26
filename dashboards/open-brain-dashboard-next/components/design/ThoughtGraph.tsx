@@ -54,6 +54,15 @@ interface Props {
    *  Used to open a "+ add edge from this entity" affordance at the page
    *  level. Suppresses the native browser context menu when set. */
   onNodeContextMenu?: (node: ConstellationNode, screen: { x: number; y: number }) => void;
+  /** Fires when the user right-clicks (or context-menus) an edge. Used to
+   *  open the edit-edge affordance — change relation, remove & block.
+   *  Receives the edge plus the two endpoint nodes (so the parent has names,
+   *  not just ids). */
+  onEdgeContextMenu?: (
+    edge: ConstellationEdge,
+    fromNode: ConstellationNode,
+    toNode: ConstellationNode,
+  ) => void;
   /** Compact strip mode — only renders selected node + first-degree neighbors in a row. */
   collapsed?: boolean;
 }
@@ -506,10 +515,12 @@ export function ThoughtGraph({
   bypassMinWeightIds,
   onNodeClick,
   onNodeContextMenu,
+  onEdgeContextMenu,
   collapsed = false,
 }: Props) {
   const router = useRouter();
   const [hover, setHover] = useState<number | null>(null);
+  const [hoverEdge, setHoverEdge] = useState<number | null>(null);
   const [focused, setFocused] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -1132,42 +1143,80 @@ export function ThoughtGraph({
               (used to scale down by 0.55 which made them invisible at
               weight=1 against the dark canvas). Manual edges render solid
               violet just like co-occurrence — they're highest-trust user
-              assertions, not LLM inference. */}
+              assertions, not LLM inference.
+              Each edge is drawn TWICE: a fat invisible overlay for hit
+              detection (so right-click and hover work despite the thin
+              visible stroke), then the visible line on top. The overlay
+              fires onMouseEnter/Leave + onContextMenu. */}
           {filteredEdges.map((e, i) => {
             const a = positions.get(e.source);
             const b = positions.get(e.target);
             if (!a || !b) return null;
-            const isHoverEdge =
+            const isNodeHover =
               hover !== null && (e.source === hover || e.target === hover);
+            const isThisEdgeHovered = hoverEdge === i;
+            const isHighlighted = isNodeHover || isThisEdgeHovered;
             const baseAlpha = Math.min(1, 0.45 + e.weight * 0.04);
             const dimmed =
-              hover !== null && focused === null && !isHoverEdge
+              (hover !== null || hoverEdge !== null) && focused === null && !isHighlighted
                 ? 0.12
                 : baseAlpha;
             const widthBase = e.inferred ? 0.7 : 0.8;
-            // Inferred = light orange so it pops against the violet
-            // co-occurrence/manual edges without fading into the background.
             const inferredRGB = "255,176,90";
             const violetRGB = "157,131,255";
             const colorRGB = e.inferred ? inferredRGB : violetRGB;
             const hoverAlpha = e.inferred ? 0.95 : 0.9;
+            // Hit-line stroke width is constant in screen px (~10) so
+            // right-click works at any zoom. pointerEvents='stroke' means
+            // only the line itself is hittable, not the implicit bounding
+            // box.
+            const hitWidth = 10 / Math.max(0.5, viewport.k);
+            const fromNode = visibleNodes.find((n) => n.id === e.source);
+            const toNode = visibleNodes.find((n) => n.id === e.target);
             return (
-              <line
-                key={i}
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-                stroke={
-                  isHoverEdge
-                    ? `rgba(${colorRGB},${hoverAlpha})`
-                    : `rgba(${colorRGB},${dimmed})`
-                }
-                strokeDasharray={e.inferred ? `${4 / Math.max(0.5, viewport.k)} ${3 / Math.max(0.5, viewport.k)}` : undefined}
-                // Scale stroke width inversely with zoom so edges stay 1px-ish
-                // at any zoom level rather than getting comically thick.
-                strokeWidth={(isHoverEdge ? 1.5 : widthBase) / Math.max(0.5, viewport.k)}
-              />
+              <g key={i}>
+                <line
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  stroke="transparent"
+                  strokeWidth={hitWidth}
+                  style={{ cursor: onEdgeContextMenu ? "context-menu" : "default", pointerEvents: "stroke" }}
+                  onMouseEnter={() => setHoverEdge(i)}
+                  onMouseLeave={() => setHoverEdge((h) => (h === i ? null : h))}
+                  onContextMenu={(ev) => {
+                    if (!onEdgeContextMenu || !fromNode || !toNode) return;
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    onEdgeContextMenu(e, fromNode, toNode);
+                  }}
+                >
+                  <title>
+                    {`${fromNode?.label ?? `#${e.source}`} ↔ ${toNode?.label ?? `#${e.target}`}${
+                      e.relation ? ` · ${e.relation}` : ""
+                    }${e.inferred ? " (inferred)" : e.manual ? " (manual)" : ""}${
+                      onEdgeContextMenu ? " · right-click to edit" : ""
+                    }`}
+                  </title>
+                </line>
+                <line
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  stroke={
+                    isHighlighted
+                      ? `rgba(${colorRGB},${hoverAlpha})`
+                      : `rgba(${colorRGB},${dimmed})`
+                  }
+                  strokeDasharray={e.inferred ? `${4 / Math.max(0.5, viewport.k)} ${3 / Math.max(0.5, viewport.k)}` : undefined}
+                  // Scale stroke width inversely with zoom so edges stay 1px-ish
+                  // at any zoom level rather than getting comically thick.
+                  strokeWidth={(isHighlighted ? 1.8 : widthBase) / Math.max(0.5, viewport.k)}
+                  style={{ pointerEvents: "none" }}
+                />
+              </g>
             );
           })}
 
