@@ -2,11 +2,6 @@
 
 > LLM-powered document extraction that turns raw text into atomic thoughts with fingerprint and semantic deduplication, dry-run preview, and safe job execution.
 
-> [!IMPORTANT]
-> **This folder ships the backend only. There is no bundled browser UI or Claude Desktop integration.**
->
-> Today you need a terminal or a CLI agent (Claude Code, Codex, Cursor) to send text to this Edge Function. If you want a paste-in-a-textarea experience, the Next.js dashboard at `dashboards/open-brain-dashboard-next` includes an "Add to Brain" page that wraps this function — install the dashboard separately. The planned `integrations/enhanced-mcp` (for Claude Desktop via MCP) is not yet built; that folder currently ships empty.
-
 ## What It Does
 
 Accepts raw text (meeting notes, articles, journal entries, email threads) and uses an LLM to extract atomic, self-contained thoughts. Each extracted thought is then deduplicated against your existing thoughts using both content fingerprinting and semantic similarity. The results can be previewed in dry-run mode before committing to the database.
