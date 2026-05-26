@@ -1126,22 +1126,31 @@ export function ThoughtGraph({
             Scaling/panning happens here; labels are rendered outside this
             group so they stay readable at any zoom level. */}
         <g transform={`translate(${viewport.x},${viewport.y}) scale(${viewport.k})`}>
-          {/* Edges — inferred ones render dashed + thinner + dimmer so the
-              user can tell at a glance which connections came from a thought
-              vs. cross-thought LLM inference (scripts/infer-entity-edges.mjs). */}
+          {/* Edges — inferred ones render dashed + light orange so they're
+              clearly distinguishable from thought-derived violet edges at
+              any zoom level. Same opacity floor as co-occurrence edges
+              (used to scale down by 0.55 which made them invisible at
+              weight=1 against the dark canvas). Manual edges render solid
+              violet just like co-occurrence — they're highest-trust user
+              assertions, not LLM inference. */}
           {filteredEdges.map((e, i) => {
             const a = positions.get(e.source);
             const b = positions.get(e.target);
             if (!a || !b) return null;
             const isHoverEdge =
               hover !== null && (e.source === hover || e.target === hover);
-            const baseAlpha = Math.min(1, 0.25 + e.weight * 0.04);
-            const inferredAlphaScale = e.inferred ? 0.55 : 1;
+            const baseAlpha = Math.min(1, 0.45 + e.weight * 0.04);
             const dimmed =
               hover !== null && focused === null && !isHoverEdge
-                ? 0.06
-                : baseAlpha * inferredAlphaScale;
-            const widthBase = e.inferred ? 0.5 : 0.8;
+                ? 0.12
+                : baseAlpha;
+            const widthBase = e.inferred ? 0.7 : 0.8;
+            // Inferred = light orange so it pops against the violet
+            // co-occurrence/manual edges without fading into the background.
+            const inferredRGB = "255,176,90";
+            const violetRGB = "157,131,255";
+            const colorRGB = e.inferred ? inferredRGB : violetRGB;
+            const hoverAlpha = e.inferred ? 0.95 : 0.9;
             return (
               <line
                 key={i}
@@ -1151,8 +1160,8 @@ export function ThoughtGraph({
                 y2={b.y}
                 stroke={
                   isHoverEdge
-                    ? `rgba(157,131,255,${e.inferred ? 0.7 : 0.9})`
-                    : `rgba(157,131,255,${dimmed})`
+                    ? `rgba(${colorRGB},${hoverAlpha})`
+                    : `rgba(${colorRGB},${dimmed})`
                 }
                 strokeDasharray={e.inferred ? `${4 / Math.max(0.5, viewport.k)} ${3 / Math.max(0.5, viewport.k)}` : undefined}
                 // Scale stroke width inversely with zoom so edges stay 1px-ish
