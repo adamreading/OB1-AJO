@@ -19,6 +19,23 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_RO
 const OLLAMA_BASE = (process.env.OLLAMA_URL || "http://localhost:11434/api").replace(/\/+$/, "");
 const OLLAMA_GENERATE_URL = `${OLLAMA_BASE}/generate`;
 const MODEL = process.env.OLLAMA_MODEL || "qwen3:30b";
+// Optional fallback chain. When the primary model produces unparseable JSON
+// or a runaway token-repetition loop (gemma4's classic failure mode —
+// "/task_details/task_details/task_details/…" until num_predict cuts it
+// off mid-string), the worker walks this list in order. Each subsequent
+// model is tried for the SAME thought. If none succeed the thought goes
+// through the normal retry/fail-with-attempt-cap path.
+// Set to comma-separated list, e.g.:
+//   WORKER_MODEL_CHAIN=qwen3:30b,gpt-oss:120b-cloud
+// Empty/unset → no fallback; only MODEL is tried.
+const MODEL_CHAIN = (process.env.WORKER_MODEL_CHAIN || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+// Maximum number of consecutive repetitions of any substring (4+ chars) we
+// tolerate in raw model output before flagging a token loop. Gemma loops
+// produce hundreds of repeats; legitimate output never repeats this much.
+const LOOP_REPEAT_THRESHOLD = Number(process.env.WORKER_LOOP_REPEAT_THRESHOLD || 8);
 const POLL_MS = Number(process.env.LOCAL_WORKER_POLL_MS || 10000);
 const INITIAL_KANBAN_STATUS = process.env.KANBAN_INITIAL_STATUS || "backlog";
 const WORKER_VERSION = "ajo-local-brain-worker-v2";
@@ -409,7 +426,37 @@ const OLLAMA_TEMPERATURE = Number(
     : 0
 );
 
-async function callOllama(content, opts = {}) {
+// Detect runaway token-repetition loops in raw model output. Gemma4 (and
+// occasionally qwen3) falls into "/task_details/task_details/task_details/…"
+// loops mid-string that consume the entire num_predict budget. JSON-repair
+// can't recover these because the offending string is genuinely truncated
+// mid-loop. Detecting in the raw response lets us fail fast and fall back
+// to a different model instead of wasting retry attempts on the same broken
+// deterministic output.
+//
+// Approach: scan the last 2KB. For each substring length 4-30, count
+// consecutive repetitions. If any repeats >= threshold, it's a loop.
+function detectTokenLoop(text, threshold = LOOP_REPEAT_THRESHOLD) {
+  if (!text || text.length < 200) return null;
+  const tail = text.slice(-3000);
+  for (let len = 4; len <= 30; len++) {
+    for (let start = 0; start <= tail.length - len * threshold; start += len) {
+      const pattern = tail.substr(start, len);
+      let reps = 1;
+      let pos = start + len;
+      while (pos + len <= tail.length && tail.substr(pos, len) === pattern) {
+        reps++;
+        pos += len;
+      }
+      if (reps >= threshold) {
+        return { pattern, repeats: reps };
+      }
+    }
+  }
+  return null;
+}
+
+async function callOllamaOnce(content, opts, modelName) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), OLLAMA_TIMEOUT_MS);
   let response;
@@ -418,7 +465,7 @@ async function callOllama(content, opts = {}) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: MODEL,
+        model: modelName,
         prompt: buildPrompt(content, opts),
         stream: false,
         format: "json",
@@ -432,7 +479,7 @@ async function callOllama(content, opts = {}) {
     });
   } catch (err) {
     if (err.name === "AbortError") {
-      throw new Error(`Ollama timeout after ${OLLAMA_TIMEOUT_MS}ms (likely token loop with ${MODEL})`);
+      throw new Error(`Ollama timeout after ${OLLAMA_TIMEOUT_MS}ms (likely token loop with ${modelName})`);
     }
     throw err;
   } finally {
@@ -442,7 +489,41 @@ async function callOllama(content, opts = {}) {
   if (!response.ok) throw new Error(`Ollama error ${response.status}: ${await response.text()}`);
   const result = await response.json();
   const raw = result.response || result.message?.content || result.thinking || "";
+  // Detect token loops BEFORE attempting parse. A looped response can't be
+  // repaired into valid JSON regardless of how aggressive the repair pass
+  // is — the string field that the loop is inside got truncated mid-loop.
+  const loop = detectTokenLoop(raw);
+  if (loop) {
+    throw new Error(
+      `Token loop in ${modelName} output: "${loop.pattern.slice(0, 40)}…" repeated ${loop.repeats}× — aborting parse, will fall back`
+    );
+  }
   return parseJsonObject(raw);
+}
+
+// Walks [MODEL, ...MODEL_CHAIN] until one succeeds. Loop detection or JSON
+// parse failure on a model is non-fatal — we try the next. Only when the
+// whole chain is exhausted do we throw, at which point processQueue's catch
+// block handles retry/fail with attempt cap.
+async function callOllama(content, opts = {}) {
+  const chain = [MODEL, ...MODEL_CHAIN];
+  const errors = [];
+  for (const modelName of chain) {
+    try {
+      const result = await callOllamaOnce(content, opts, modelName);
+      if (modelName !== MODEL) {
+        console.log(`[fallback] ${MODEL} failed — succeeded with ${modelName}`);
+      }
+      return result;
+    } catch (err) {
+      errors.push(`${modelName}: ${err.message}`);
+      // Continue to next model in the chain. The catch block in processQueue
+      // logs the final error if everything failed.
+    }
+  }
+  throw new Error(
+    `All models failed:\n  ${errors.join("\n  ")}`
+  );
 }
 
 function normalizeAnalysis(raw, existingThought) {
@@ -1064,7 +1145,10 @@ async function fetchEntityTypes(entityIds) {
 async function processQueue() {
   await resetFailedItems();
   await detectGraphTables();
-  console.log(`Starting Open Brain local worker using ${MODEL}. Poll interval: ${POLL_MS}ms. Max attempts: ${MAX_ATTEMPTS}. Infer-on-dirty: ${INFER_ON_DIRTY}.`);
+  const chainNote = MODEL_CHAIN.length > 0
+    ? ` Fallback chain: ${MODEL_CHAIN.join(" → ")}.`
+    : " No fallback chain (set WORKER_MODEL_CHAIN= for resilience to token loops).";
+  console.log(`Starting Open Brain local worker using ${MODEL}. Poll interval: ${POLL_MS}ms. Max attempts: ${MAX_ATTEMPTS}. Infer-on-dirty: ${INFER_ON_DIRTY}.${chainNote}`);
 
   while (true) {
     let item = null;
