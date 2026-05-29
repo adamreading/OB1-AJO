@@ -12,6 +12,12 @@ interface SourceThought {
   created_at: string;
 }
 
+interface MergeTarget {
+  id: number;
+  canonical_name: string;
+  entity_type: string;
+}
+
 interface Props {
   entity: { id: number; name: string; type: string };
   entityTypes: EntityTypeInfo[];
@@ -50,6 +56,16 @@ export function EntityQuickEditModal({
   const [sources, setSources] = useState<SourceThought[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(true);
   const [sourcesTotal, setSourcesTotal] = useState(0);
+  // Merge-into-another-entity state. The most common use is collapsing a
+  // sub-threshold typo/variant (FundaBot) into its canonical sibling
+  // (Funderbot). After merge the source entity is deleted (thought_entities
+  // + edges re-pointed, source canonical_name added as alias on target,
+  // source canonical_name blocklisted to prevent re-creation).
+  const [merging, setMerging] = useState(false);
+  const [mergeQuery, setMergeQuery] = useState("");
+  const [mergeResults, setMergeResults] = useState<MergeTarget[]>([]);
+  const [mergeTarget, setMergeTarget] = useState<MergeTarget | null>(null);
+  const [mergeLoading, setMergeLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,6 +114,47 @@ export function EntityQuickEditModal({
       setError(e instanceof Error ? e.message : "Save failed");
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Debounced search for a merge target. Skips the source itself.
+  useEffect(() => {
+    if (!merging) return;
+    const t = mergeQuery.trim();
+    if (t.length < 2) { setMergeResults([]); return; }
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/entities?search=${encodeURIComponent(t)}&limit=8`);
+        if (!res.ok) return;
+        const d = (await res.json()) as { entities?: MergeTarget[]; data?: MergeTarget[] };
+        const rows = (d.entities || d.data || []).filter((e) => e.id !== entity.id);
+        setMergeResults(rows);
+      } catch { /* ignore */ }
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [merging, mergeQuery, entity.id]);
+
+  async function handleMerge() {
+    if (!mergeTarget) return;
+    setMergeLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/entities/${entity.id}/merge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_id: mergeTarget.id }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(d.error || `HTTP ${res.status}`);
+      }
+      // Merge deletes the source entity; treat as a remove for parent state.
+      onDeleted();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Merge failed");
+    } finally {
+      setMergeLoading(false);
     }
   }
 
@@ -295,6 +352,120 @@ export function EntityQuickEditModal({
             be auto-removed if its name no longer appears.
           </span>
         </div>
+
+        {/* Merge into another entity. The canonical "Funderbot has 3 typos"
+            case: pick the surviving entity, the source gets absorbed (its
+            thought_entities + edges re-point to the target, its
+            canonical_name + aliases land on the target, then the source row
+            is deleted). Works regardless of whether the target has a wiki
+            page — the merge endpoint doesn't care. */}
+        {!merging ? (
+          <button
+            type="button"
+            onClick={() => { setMerging(true); setError(null); }}
+            style={{
+              ...ghostBtn,
+              color: "var(--violet-200)",
+              borderColor: "rgba(157,131,255,0.4)",
+              alignSelf: "flex-start",
+            }}
+          >
+            Merge into another entity…
+          </button>
+        ) : (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              padding: 12,
+              borderRadius: 10,
+              border: "1px solid rgba(157,131,255,0.4)",
+              background: "rgba(157,131,255,0.05)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--violet-200)" }}>
+                merge {entity.name} into…
+              </span>
+              <button
+                type="button"
+                onClick={() => { setMerging(false); setMergeQuery(""); setMergeResults([]); setMergeTarget(null); }}
+                style={{ background: "transparent", border: "none", color: "var(--fg-3)", fontSize: 16, cursor: "pointer", lineHeight: 1 }}
+              >
+                ×
+              </button>
+            </div>
+
+            <input
+              type="text"
+              value={mergeQuery}
+              onChange={(e) => { setMergeQuery(e.target.value); setMergeTarget(null); }}
+              placeholder="Search for the surviving entity by name or alias…"
+              style={{
+                background: "var(--bg-2)",
+                border: "1px solid var(--line-strong)",
+                borderRadius: 8,
+                padding: "7px 10px",
+                fontSize: 13,
+                color: "var(--fg)",
+                outline: "none",
+                fontFamily: "inherit",
+              }}
+            />
+
+            {!mergeTarget && mergeResults.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: 160, overflowY: "auto", border: "1px solid var(--line)", borderRadius: 8, background: "var(--bg-2)" }}>
+                {mergeResults.map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => { setMergeTarget(r); setMergeQuery(r.canonical_name); setMergeResults([]); }}
+                    style={{ textAlign: "left", padding: "7px 10px", background: "transparent", border: "none", color: "var(--fg)", cursor: "pointer", fontSize: 12.5, display: "flex", justifyContent: "space-between", gap: 8 }}
+                  >
+                    <span>{r.canonical_name}</span>
+                    <span style={{ fontSize: 10, color: "var(--fg-4)", fontFamily: "var(--font-mono)" }}>
+                      {r.entity_type} · #{r.id}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {mergeTarget && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12, color: "var(--fg-2)" }}>
+                  <strong>{entity.name}</strong> <span style={{ color: "var(--fg-4)" }}>→</span> <strong>{mergeTarget.canonical_name}</strong>
+                  <span style={{ marginLeft: 8, fontSize: 10, color: "var(--fg-4)", fontFamily: "var(--font-mono)" }}>
+                    #{entity.id} merges into #{mergeTarget.id}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleMerge}
+                  disabled={mergeLoading}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: 6,
+                    border: "1px solid rgba(157,131,255,0.5)",
+                    background: "rgba(157,131,255,0.25)",
+                    color: "var(--violet-100)",
+                    fontSize: 12,
+                    fontWeight: 500,
+                    cursor: mergeLoading ? "not-allowed" : "pointer",
+                    fontFamily: "inherit",
+                    opacity: mergeLoading ? 0.6 : 1,
+                  }}
+                >
+                  {mergeLoading ? "Merging…" : "Confirm merge"}
+                </button>
+              </div>
+            )}
+
+            <p style={{ fontSize: 10.5, color: "var(--fg-4)", margin: 0, lineHeight: 1.5 }}>
+              The source entity is <strong>deleted</strong> — its thoughts, edges, and aliases all re-point to the target. The source name is blocklisted on the worker so it can&apos;t re-emerge.
+            </p>
+          </div>
+        )}
 
         {error && (
           <div
