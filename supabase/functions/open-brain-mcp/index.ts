@@ -411,16 +411,20 @@ function createServer(): McpServer {
             return { content: [{ type: "text", text: `Already in brain: #${existing.serial_id} (skipped)` }] };
           }
 
+          const VALID_TYPES = ["task","idea","observation","reference","person_note","decision","lesson","meeting","journal","newsletter"];
+          const resolvedType = (typeof type === "string" && VALID_TYPES.includes(type)) ? type : "observation";
+          // Newsletter captures default to personal (professional reading, not work) —
+          // anything else falls back to work unless the caller said otherwise.
+          const classificationDefault = resolvedType === "newsletter" ? "personal" : "work";
+          const resolvedClassification = (classification === "work" || classification === "personal") ? classification : classificationDefault;
+
           const meta: Record<string, unknown> = {
             content_fingerprint: fp,
             review_status: "pending_review",
             ollama_decision: "NEW",
             source: finalSource,
+            classification: resolvedClassification,
           };
-          if (classification) meta.classification = classification;
-
-          const VALID_TYPES = ["task","idea","observation","reference","person_note","decision","lesson","meeting","journal"];
-          const resolvedType = (typeof type === "string" && VALID_TYPES.includes(type)) ? type : "observation";
 
           const { data: inserted, error } = await supabase
             .from("thoughts")
@@ -430,7 +434,7 @@ function createServer(): McpServer {
               status: null,
               importance: 3,
               quality_score: 50,
-              classification: classification || "work",
+              classification: resolvedClassification,
               source_type: "plaud",
               content_fingerprint: fp,
               metadata: meta,
@@ -480,11 +484,12 @@ function createServer(): McpServer {
         id: z.string().describe("UUID or Serial ID (as string)"),
         content: z.string(),
         classification: z.enum(["work", "personal"]).optional(),
+        type: z.string().optional().describe("Optional thought type override (e.g. 'newsletter'). If omitted, the target's existing type is preserved."),
         auto_review: z.boolean().optional().describe("If true, do NOT overwrite the target thought. Instead, create a pending UPDATE-decision row in the dashboard Review queue (the target's original content is captured for side-by-side comparison). Defaults to false — meaning a human is signing off on this update in real time."),
         source: z.string().optional().describe("Optional client name for provenance when auto_review=true (e.g. 'cowork-scheduler'). Stored in metadata.source as 'mcp-<name>'."),
       },
     },
-    async ({ id, content, classification, auto_review, source }) => {
+    async ({ id, content, classification, type, auto_review, source }) => {
       try {
         const filter = /^[0-9a-f]{8}-/.test(id) ? { id } : { serial_id: parseInt(id, 10) };
         const { data: current } = await supabase.from("thoughts").select("*").match(filter).single();
@@ -497,6 +502,13 @@ function createServer(): McpServer {
           const trimmed = content.trim();
           const fp = await fingerprint(trimmed);
 
+          const VALID_TYPES = ["task","idea","observation","reference","person_note","decision","lesson","meeting","journal","newsletter"];
+          const resolvedType = (typeof type === "string" && VALID_TYPES.includes(type)) ? type : (current.type || "observation");
+          // Newsletter updates default to personal; otherwise keep target's existing classification (or work).
+          const currentClass = current.classification || (current.metadata as Record<string, unknown> | null)?.classification;
+          const classificationDefault = resolvedType === "newsletter" ? "personal" : (currentClass || "work");
+          const resolvedClassification = (classification === "work" || classification === "personal") ? classification : classificationDefault;
+
           const meta: Record<string, unknown> = {
             content_fingerprint: fp,
             review_status: "pending_review",
@@ -504,15 +516,14 @@ function createServer(): McpServer {
             update_target_id: current.serial_id,
             original_content: current.content,
             source: source ? `mcp-${source}` : "mcp",
+            classification: resolvedClassification,
           };
-          const resolvedClassification = classification || current.classification || (current.metadata as Record<string, unknown> | null)?.classification || "work";
-          meta.classification = resolvedClassification;
 
           const { data: inserted, error: insertErr } = await supabase
             .from("thoughts")
             .insert({
               content: trimmed,
-              type: current.type || "observation",
+              type: resolvedType,
               status: null,
               importance: 3,
               quality_score: 50,
