@@ -1,5 +1,15 @@
 # Telegram Capture
 
+<div align="center">
+
+![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
+
+**Created by [@Reb-Elle-Art](https://github.com/Reb-Elle-Art)**
+
+*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
+
+</div>
+
 > **Add Telegram as a quick-capture interface for your Open Brain.** Send a message to your bot (DM or a private group) and it's automatically embedded, classified, and stored, with a threaded confirmation back in the chat.
 
 ---
