@@ -1,10 +1,14 @@
 # Typed Edge Classifier
 
-> An LLM classifier that reads pairs of thoughts and writes typed reasoning edges (`supports`, `contradicts`, `evolved_into`, `supersedes`, `depends_on`, `related_to`) into the `thought_edges` table. In the AJO fork it defaults to local Ollama via `qwen3:30b`; the upstream Anthropic hybrid mode still works when configured explicitly.
+![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
+
+**Created by [@sahwan11](https://github.com/sahwan11)**
+
+> An Opus/Haiku hybrid LLM classifier that reads pairs of thoughts and writes typed reasoning edges (`supports`, `contradicts`, `evolved_into`, `supersedes`, `depends_on`, `related_to`) into the `thought_edges` table.
 
 ## What It Does
 
-Walks candidate pairs of thoughts (pairs that share at least N entities via `thought_entities`), asks the selected model whether a relation exists, and inserts a row into `public.thought_edges` with the relation, direction, confidence, and (optionally) temporal bounds. With local Ollama it uses one model end-to-end by default; with direct Anthropic it can still use the original filter/classify hybrid.
+Walks candidate pairs of thoughts (pairs that share at least N entities via `thought_entities`), asks Haiku whether each pair is even worth looking at, then asks Opus to do the final classification on the pairs that pass. Inserts a row into `public.thought_edges` with the relation, direction, confidence, and (optionally) temporal bounds. Supports cost-capped batch runs.
 
 ## Prerequisites
 
@@ -12,7 +16,7 @@ Walks candidate pairs of thoughts (pairs that share at least N entities via `tho
 - [`schemas/typed-reasoning-edges/`](../../schemas/typed-reasoning-edges/) applied (this recipe writes to `thought_edges`)
 - [`entity-extraction` schema (PR #197)](https://github.com/NateBJones-Projects/OB1/pull/197) applied — this is where candidate pairs come from (thoughts that share entities via `thought_entities`). You can skip this if you only ever pass explicit `--pair UUID_A,UUID_B`.
 - Node.js 18+
-- Local Ollama with a chat-capable model, or a configured remote LLM provider
+- An LLM API key — `OPENROUTER_API_KEY` (preferred — one key covers every OB1 recipe) or `ANTHROPIC_API_KEY` (direct, retained for back-compat)
 
 ## Credential Tracker
 
@@ -26,10 +30,10 @@ FROM YOUR OPEN BRAIN SETUP
   Project URL:           ____________   -> OPEN_BRAIN_URL
   Service-role secret:   ____________   -> OPEN_BRAIN_SERVICE_KEY
 
-LOCAL OLLAMA
-  Base URL:              ____________   -> LLM_BASE_URL (default http://localhost:11434/v1)
-  Model:                 ____________   -> LLM_MODEL (default qwen3:30b)
-  API key placeholder:   ____________   -> LLM_API_KEY (use "ollama" locally)
+LLM PROVIDER (pick ONE)
+  OpenRouter key:        ____________   -> OPENROUTER_API_KEY   (preferred)
+  -- OR --
+  Anthropic key:         ____________   -> ANTHROPIC_API_KEY    (direct)
 
 COST CAP FOR FIRST RUN
   Max USD:               ____________   (recommend $1-2 for a dry run first)
@@ -40,23 +44,28 @@ COST CAP FOR FIRST RUN
 ## Steps
 
 1. Copy `classify-edges.mjs` into a local directory you control (or clone this recipe's folder)
-2. Set the required environment variables:
+2. Set the required environment variables. `OPEN_BRAIN_URL` and `OPEN_BRAIN_SERVICE_KEY` are always required; provide ONE LLM provider key:
 
    ```bash
    export OPEN_BRAIN_URL="https://YOUR-PROJECT.supabase.co"
    export OPEN_BRAIN_SERVICE_KEY="..."   # service_role key — server-side only
-   export LLM_BASE_URL="http://localhost:11434/v1"
-   export LLM_MODEL="qwen3:30b"
-   export LLM_API_KEY="ollama"
+
+   # Option A — OpenRouter (preferred; one key works across every OB1 recipe)
+   export OPENROUTER_API_KEY="sk-or-v1-..."
+
+   # Option B — Anthropic direct (retained for back-compat)
+   export ANTHROPIC_API_KEY="sk-ant-..."
    ```
 
-3. Run a **dry run** first with a small limit:
+   When OpenRouter is used, the default Anthropic model names (`claude-haiku-4-5-20251001`, `claude-opus-4-7`) are auto-prefixed with `anthropic/` so OpenRouter routes correctly. Pass an already-prefixed string via `--filter-model` / `--classify-model` to override. If both keys are set, OpenRouter wins (matches the priority order in `entity-extraction-worker`).
+
+3. Run a **dry run** first with a small limit and a low cost cap:
 
    ```bash
-   node classify-edges.mjs --limit 10 --dry-run
+   node classify-edges.mjs --limit 10 --dry-run --max-cost-usd 0.50
    ```
 
-   This prints what it *would* insert without writing anything.
+   This prints what it *would* insert without writing anything, and stops once estimated spend reaches the cap.
 
 4. Review the output. Look for:
    - Pairs with `[dry] would_insert` lines — these are the inserts you'd be approving
@@ -65,7 +74,7 @@ COST CAP FOR FIRST RUN
 5. Once you're happy with the output, run without `--dry-run`:
 
    ```bash
-   node classify-edges.mjs --limit 100
+   node classify-edges.mjs --limit 100 --max-cost-usd 3.00
    ```
 
 6. Inspect the table:
@@ -77,26 +86,18 @@ COST CAP FOR FIRST RUN
    ORDER BY count(*) DESC;
    ```
 
-## Model Modes
+## How the hybrid tiering works
 
-In AJO local mode, the default pipeline is single-model:
-
-```bash
-node classify-edges.mjs --model qwen3:30b
-```
-
-If `LLM_BASE_URL`/`OLLAMA_URL` is set and no explicit model flags are passed, the script chooses `qwen3:30b` from `LLM_MODEL`/`OLLAMA_MODEL` and disables hybrid mode.
-
-The legacy direct-Anthropic pipeline is two-stage:
+The default pipeline is two-stage:
 
 1. **Stage 1 — Haiku filter.** For each candidate pair, Haiku reads the two thoughts and answers a single strict-JSON question: "is there any meaningful relation here, yes or no?" This is ~10-20x cheaper than asking Opus to classify everything up front.
 2. **Stage 2 — Opus classify.** For pairs that pass the filter, Opus does the full classification with the six-label vocabulary + direction + confidence + optional temporal bounds.
 
-You can force any single model end-to-end with `--model <model>`.
+You can disable the hybrid and run a single model end-to-end with `--model <model>` (e.g., `--model claude-haiku-4-5-20251001` for a cheap pass).
 
 ## Cost bound
 
-> **Pricing disclaimer.** Local Ollama models are treated as zero API spend. Hosted model cost caps use a hand-maintained `PRICING` map in `classify-edges.mjs` that is updated manually. Check your provider pricing before large remote runs. If you run with a hosted model that is NOT in the `PRICING` map, the classifier will **refuse to run** when `--max-cost-usd` is set, and will log `WARNING: no pricing info for model "X"` otherwise. Pass `--no-cost-cap` to explicitly acknowledge an uncapped remote run; see "Pricing-unknown guard" below.
+> **Pricing disclaimer.** The `--max-cost-usd` cap uses a hand-maintained `PRICING` map in `classify-edges.mjs` that is updated manually. Check [Anthropic's pricing page](https://www.anthropic.com/pricing) before large runs. If you run with a model that is NOT in the PRICING map, the classifier will **refuse to run** when `--max-cost-usd` is set, and will log `WARNING: no pricing info for model "X"` otherwise. Pass `--no-cost-cap` to explicitly acknowledge an uncapped run; see "Pricing-unknown guard" below.
 
 | Stage | Rough tokens / pair | Model | Approx cost / pair |
 |---|---|---|---|
@@ -110,7 +111,7 @@ Typical filter pass rate: 20-40%. On 500 candidate pairs with a 30% pass rate, e
 The classifier refuses to start when all of these are true:
 
 1. `--max-cost-usd` is set (which is the default at $5.00).
-2. At least one hosted model actually going to be called (filter model, classify model, or `--model`) is not present in the `PRICING` map in `classify-edges.mjs`.
+2. At least one of the models actually going to be called (filter model, classify model, or `--model`) is not present in the `PRICING` map in `classify-edges.mjs`.
 
 Error looks like:
 
@@ -124,7 +125,7 @@ that the cap cannot be enforced.
 
 **Escape hatch:** pass `--no-cost-cap` to acknowledge that you know the cap won't be enforced for this run.
 
-For hosted models, the `--max-cost-usd` flag is a **hard cap** on estimated spend. The classifier tracks estimated token cost after every call and stops scheduling new pairs the moment the cap is reached. Always pass a cap on first remote runs.
+The `--max-cost-usd` flag is a **hard cap** on estimated spend. The classifier tracks estimated token cost after every call and stops scheduling new pairs the moment the cap is reached. Always pass a cap on first runs.
 
 **Hard-cap semantics under `--parallelism > 1`.** Before launching each chunk, the runner computes the remaining budget and clamps the chunk size so that `chunk_size * worst_case_per_pair <= remaining_budget`. As spend approaches the cap, parallelism drops to 1; once spend meets or exceeds the cap, no new pairs are scheduled. In hybrid mode `worst_case_per_pair` includes BOTH the Haiku filter leg AND the Opus classify leg (roughly `$0.0005 + $0.018 = $0.0185` on the default prompt), so a pair that spends on both legs is fully budgeted before any sibling task launches. Worst-case overshoot is bounded by the cost of the **single** in-flight task that discovers the cap has been hit, which is `worst_case_per_pair`. Previously, up to `parallelism - 1` extra pairs could spend past the cap because all in-flight tasks checked `costState.spent` before any of them had resolved, and the clamp only budgeted the classify leg. This is now fixed.
 
@@ -186,6 +187,7 @@ This recipe ships with a **`--mirror-supersedes`** flag that is **OFF by default
 - **Best-effort, no preflight.** Mirror is best-effort. If the column doesn't exist (e.g. `schemas/provenance-chains/` hasn't been applied), the edge still writes successfully and a `[warn] Mirror to thoughts.supersedes failed ...` line is logged. There is no startup preflight — PostgREST [does not expose `information_schema` over REST](https://docs.postgrest.org/en/latest/references/api/schemas.html), so a REST-based column probe is not available on standard Supabase deployments. Check logs for mirror warnings.
 - **Failure mode:** if the PATCH fails mid-run (column missing, network, 5xx, RLS), the edge is written but `thoughts.supersedes` is NOT updated. The run logs the warning and continues. Downstream readers that hit the edge table will see the relation; readers that hit `thoughts.supersedes` directly will not.
 - **Reconciliation (NOT automatic):** reruns will NOT retry a failed mirror PATCH. Once the `supersedes` edge exists in `thought_edges`, `processPair` short-circuits via `skip_already_classified` before reaching the mirror write, so `thought_edges_upsert` is never called and the PATCH is never re-issued. If the PATCH fails once, `thoughts.supersedes` stays stale until an operator runs the manual repair below. A one-off query to find all drifted rows:
+
   ```sql
   -- Supersedes edges whose mirror is missing or wrong.
   -- Contract: newer.supersedes = older (provenance-chains).
@@ -242,8 +244,8 @@ For now: flag off by default, behavior documented, decision deferred to dev-revi
 
 ## Troubleshooting
 
-**Issue: `Missing env vars`**
-Solution: Export `OPEN_BRAIN_URL`, `OPEN_BRAIN_SERVICE_KEY`, and either local Ollama settings (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`) or a configured hosted provider. The service-role key is required because the classifier writes to `thought_edges` directly via PostgREST; the anon key won't have permission. Never commit this key or paste it into any browser-facing app.
+**Issue: `Missing env vars: OPEN_BRAIN_URL, OPEN_BRAIN_SERVICE_KEY, OPENROUTER_API_KEY or ANTHROPIC_API_KEY`**
+Solution: Export `OPEN_BRAIN_URL` + `OPEN_BRAIN_SERVICE_KEY` plus one LLM provider key (either `OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`). The service-role key is required because the classifier writes to `thought_edges` directly via PostgREST; the anon key won't have permission. Never commit any of these keys or paste them into a browser-facing app.
 
 **Issue: `Candidate sampling requires thought_entities (from schemas/entity-extraction/)`**
 Solution: Either apply the `entity-extraction` schema (so this recipe has a pool to sample from), or skip sampling entirely by passing `--pair UUID_A,UUID_B` for each pair you want classified.
@@ -251,8 +253,8 @@ Solution: Either apply the `entity-extraction` schema (so this recipe has a pool
 **Issue: Classifier returns `filter_rejected` for most pairs**
 Solution: That's usually correct — most co-mentioning pairs don't have a reasoning relation. If you're sure there are real relations being missed, try `--no-hybrid` to send every pair to Opus directly. Be warned: cost goes up roughly 15-20x.
 
-**Issue: hosted provider returns 429**
-Solution: The classifier retries 429 and 5xx responses automatically with exponential backoff + jitter (base 1s, doubles each attempt, capped at 60s, up to 5 retries per call). If retries still run out, drop `--parallelism` to 1 or 2; sustained 429s usually mean the account-level rate limit is saturated, not a transient burst.
+**Issue: `Anthropic claude-opus-4-7: 429` or `OpenRouter anthropic/claude-opus-4-7: 429` (rate limit)**
+Solution: The classifier retries 429 and 5xx responses automatically with exponential backoff + jitter (base 1s, doubles each attempt, capped at 60s, up to 5 retries per call). You will see `[classify-edges] LLM ... 429: retry N/5 in Nms` lines on each retry. If retries still run out, drop `--parallelism` to 1 or 2; sustained 429s usually mean the account-level rate limit is saturated, not a transient burst.
 
 **Issue: Duplicate-key errors on insert**
 Solution: Should not occur in this recipe — the classifier calls the `thought_edges_upsert` RPC (from `schemas/typed-reasoning-edges/schema.sql`) which uses `INSERT ... ON CONFLICT DO UPDATE`. Repeat classifications of the same `(from, to, relation)` bump `support_count`, take the max confidence, and refresh the temporal bounds (GREATEST for `valid_until`, LEAST for `valid_from`, NULL-safe). If you see a duplicate-key error, the RPC is not installed — re-apply `schemas/typed-reasoning-edges/schema.sql`.
