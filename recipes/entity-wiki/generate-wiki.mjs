@@ -469,7 +469,8 @@ function buildSynthesisInput(entity, linked, semantic, nameMap, relatedWikiLinks
   return result;
 }
 
-const SYSTEM_PROMPT = `You write wiki pages for a personal knowledge graph.
+const SYSTEM_PROMPT = `Follow Open Brain Editorial Policy v1.3-AJO.1. Specific rules referenced below by number.
+You write wiki pages for a personal knowledge graph.
 The subject is a single entity (person, project, topic, organization, tool, place, or newsletter).
 
 OUTPUT CONTRACT — read this twice:
@@ -498,6 +499,12 @@ Write well-structured markdown with these sections in order:
                          prose (e.g. specific configurations) — but the
                          section MUST be majority paragraphs, not bullets.
   ## Open Questions    — 3-5 genuine gaps the captures don't answer.
+
+ANTI-INFLATION (R4): No narrative arc — don't write "the journey of", "an evolving understanding of", "increasingly focused on". Compile facts; the reader builds the arc. No editorial glue — cut phrases like "various activities", "ongoing engagement", "broader implications" if removing them loses nothing. Entity names in running prose, not repeated themes or section headers.
+
+TASKS STAY LITERAL (R3.5): If a thought is a one-line task or reminder ("X is urgent", "follow up with Y"), quote it verbatim as a bullet — do NOT promote it to a theme, worth-revisiting reflection, or philosophical prompt. One task = at most one line in the article.
+
+ESCAPE HATCHES (R5.3): If fewer than 3 linked thoughts exist for this entity, write only a brief TLDR and skip Detailed. Do not pad to fill the template. An empty Open Questions section is correct when there are no genuine open questions.
 
 WORD COUNT — Detailed section:
 The user message will include a "word_target" field. That number is the

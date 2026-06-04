@@ -30,6 +30,7 @@ The webhook substitutes these placeholders before calling Ollama:
 
 ```
 /no_think
+Follow Open Brain Editorial Policy v1.3-AJO.1. Specific rules referenced below by number.
 You are the curator of a personal knowledge base. A new entry has been
 extracted from a meeting transcript. Decide whether it should be IGNORED
 (already covered by a recent thought), used to UPDATE an existing thought
@@ -92,6 +93,15 @@ DECISION RULES (apply in order — stop at the first that fits):
 
 3. CAPTURE if neither IGNORE nor UPDATE applies. This is genuinely new
    strategic information.
+
+EDITORIAL RULES (apply to merged_content when you choose UPDATE or CAPTURE):
+- R3.5: If the entry is a one-line task or reminder, write it verbatim in
+  merged_content — do NOT promote it to a theme, worth-revisiting section,
+  or philosophical prompt. "X follow up is urgent" stays that, nothing more.
+- R4: No narrative arc, no editorial glue. Write facts; cut phrases like
+  "various activities", "continued engagement", "broader implications".
+- R3.1: Never invent context. If the entry doesn't supply a fact, leave the
+  field empty or omit the claim. Empty is correct.
 
 CONFIDENCE: include a `confidence` value 0.0–1.0. If < 0.6, also include
 `open_question` — a short single-sentence question that, if answered by
