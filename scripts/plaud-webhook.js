@@ -445,6 +445,30 @@ function applyCorrections(text) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// MEETING header parser — the Plaud template emits one line per
+// recording of the shape:
+//   MEETING: YYYY-MM-DD | participant1, participant2 | topic in <=60 chars
+// The date or participants block can be empty; the line is optional.
+// Returns { date, participants, topic } with whatever parts were present.
+// ─────────────────────────────────────────────────────────────────────
+
+function parseMeetingHeader(summaryMarkdown) {
+  if (!summaryMarkdown) return null;
+  // Look only in the prefix BEFORE the first ENTRY block.
+  const cutoff = summaryMarkdown.indexOf("---ENTRY---");
+  const region = cutoff >= 0 ? summaryMarkdown.slice(0, cutoff) : summaryMarkdown.slice(0, 1000);
+  const match = region.match(/^MEETING:\s*(.+)$/im);
+  if (!match) return null;
+  const parts = match[1].split("|").map((s) => s.trim());
+  const [datePart, peoplePart, topicPart] = [parts[0] || "", parts[1] || "", parts[2] || ""];
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(datePart) ? datePart : null;
+  const participants = peoplePart ? peoplePart.split(",").map((s) => s.trim()).filter(Boolean) : [];
+  const topic = topicPart ? topicPart.slice(0, 80) : null;
+  if (!date && participants.length === 0 && !topic) return null;
+  return { date, participants, topic };
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // ENTRY block parser — extended with ENTITIES + SEARCH_HINTS
 // ─────────────────────────────────────────────────────────────────────
 
@@ -851,10 +875,16 @@ async function processRecording(payload) {
 
   // Meeting-cluster context — one Plaud recording = one meeting; the dashboard
   // /review groups pending rows by meeting_id so 5 atomic captures show up as
-  // one cluster instead of 5 individual rows.
+  // one cluster instead of 5 individual rows. Prefer the topic from the
+  // template's MEETING: header when present; otherwise fall back to filename.
   const meetingId = fileId || dedupKey || null;
-  const meetingTitle = filename ? filename.replace(/\.[^/.]+$/, "") : null;
+  const meetingHeader = parseMeetingHeader(correctedMarkdown);
+  const meetingTitle = meetingHeader?.topic
+    || (filename ? filename.replace(/\.[^/.]+$/, "") : null);
   const meetingTotal = entries.length;
+  if (meetingHeader) {
+    console.log(`[plaud-webhook] MEETING header → date=${meetingHeader.date || "?"} participants=[${meetingHeader.participants.join(", ")}] topic="${meetingHeader.topic || ""}"`);
+  }
 
   // Surface flag_only triggers as open questions if any non-trivial entry uses them
   for (const f of flagsTriggered) {
