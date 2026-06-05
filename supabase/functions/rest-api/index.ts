@@ -359,11 +359,12 @@ app.get("/action-items", async (c) => {
   const sinceHoursRaw = c.req.query("since_hours");
   const sinceHours = sinceHoursRaw ? Number(sinceHoursRaw) : 0;
   const limit = Number(c.req.query("limit") ?? 50);
+  const withEntities = c.req.query("with_entities") === "true";
 
   try {
     let q = supabase
       .from("thoughts")
-      .select("serial_id, content, type, metadata, source_type, created_at, importance")
+      .select("id, serial_id, content, type, metadata, source_type, created_at, importance")
       .not("metadata->action_items", "is", null)
       .order("created_at", { ascending: false })
       .limit(limit);
@@ -379,6 +380,36 @@ app.get("/action-items", async (c) => {
     const withActions = (data || []).filter((t: any) =>
       Array.isArray(t.metadata?.action_items) && t.metadata.action_items.length > 0
     );
+
+    // Optional: pull linked entity canonical_names + aliases for each thought so
+    // the dashboard can aggregate by kanban-card @entity tag client-side.
+    if (withEntities && withActions.length > 0) {
+      const ids = withActions.map((t: any) => t.id);
+      const { data: links } = await supabase
+        .from("thought_entities")
+        .select("thought_id, entity_id")
+        .in("thought_id", ids);
+      const entityIds = [...new Set((links || []).map((l: any) => l.entity_id))];
+      const { data: ents } = await supabase
+        .from("entities")
+        .select("id, canonical_name, aliases, entity_type")
+        .in("id", entityIds);
+      const entById = new Map<number, any>((ents || []).map((e: any) => [e.id, e]));
+      const linkedByThought = new Map<string, any[]>();
+      for (const l of links || []) {
+        const e = entById.get((l as any).entity_id);
+        if (!e) continue;
+        if (!linkedByThought.has((l as any).thought_id)) linkedByThought.set((l as any).thought_id, []);
+        linkedByThought.get((l as any).thought_id)!.push({
+          canonical_name: e.canonical_name,
+          aliases: e.aliases || [],
+          entity_type: e.entity_type,
+        });
+      }
+      for (const t of withActions) {
+        (t as any).linked_entities = linkedByThought.get((t as any).id) || [];
+      }
+    }
 
     return c.json({ thoughts: withActions, total: withActions.length, since_hours: sinceHours }, 200, corsHeaders);
   } catch (err) {

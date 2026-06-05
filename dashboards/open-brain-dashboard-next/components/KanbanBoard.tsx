@@ -36,6 +36,13 @@ async function apiUpdateKanban(
   }
 }
 
+export type KanbanAction = {
+  thought_serial_id: number;
+  action: string;
+  type: string;
+  created_at: string;
+};
+
 export function KanbanBoard() {
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -44,6 +51,8 @@ export function KanbanBoard() {
   const [contextFilter, setContextFilter] = useState<"all" | "work" | "personal">("all");
   const [selectedThought, setSelectedThought] = useState<Thought | null>(null);
   const [activeDragThought, setActiveDragThought] = useState<Thought | null>(null);
+  // entity-name (lowercase) → list of pending actions from linked source thoughts
+  const [actionsByEntity, setActionsByEntity] = useState<Map<string, KanbanAction[]>>(new Map());
   const previousThoughts = useRef<Thought[]>([]);
   const originalStatus = useRef<string | null>(null);
   const finalStatus = useRef<string | null>(null);
@@ -56,12 +65,41 @@ export function KanbanBoard() {
   const fetchData = useCallback(async () => {
     try {
       setError(null);
-      const res = await fetch(
-        `/api/kanban${showArchived ? "?archived=true" : ""}`
-      );
-      if (!res.ok) throw new Error("Failed to load kanban data");
-      const data = await res.json();
-      setThoughts(data.thoughts || []);
+      const [kanbanRes, actionsRes] = await Promise.all([
+        fetch(`/api/kanban${showArchived ? "?archived=true" : ""}`),
+        // Last 30 days, with linked entities so we can attach actions to kanban cards.
+        fetch(`/api/actions?with_entities=true&since_hours=720&limit=500`),
+      ]);
+      if (!kanbanRes.ok) throw new Error("Failed to load kanban data");
+      const kanbanData = await kanbanRes.json();
+      setThoughts(kanbanData.thoughts || []);
+
+      if (actionsRes.ok) {
+        const actionsData = await actionsRes.json();
+        const map = new Map<string, KanbanAction[]>();
+        for (const t of actionsData.thoughts || []) {
+          const items: string[] = Array.isArray(t.metadata?.action_items) ? t.metadata.action_items : [];
+          const entities: Array<{ canonical_name: string; aliases?: string[] }> = t.linked_entities || [];
+          if (entities.length === 0) continue;
+          for (const item of items) {
+            const action: KanbanAction = {
+              thought_serial_id: t.serial_id,
+              action: String(item),
+              type: t.type,
+              created_at: t.created_at,
+            };
+            for (const e of entities) {
+              const keys = [e.canonical_name, ...(e.aliases || [])].map((s) => String(s).toLowerCase().trim());
+              for (const k of keys) {
+                if (!k) continue;
+                if (!map.has(k)) map.set(k, []);
+                map.get(k)!.push(action);
+              }
+            }
+          }
+        }
+        setActionsByEntity(map);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
@@ -425,6 +463,7 @@ export function KanbanBoard() {
               onCardClick={setSelectedThought}
               onPriorityChange={handlePriorityChange}
               onArchive={handleArchive}
+              actionsByEntity={actionsByEntity}
             />
           ))}
         </div>

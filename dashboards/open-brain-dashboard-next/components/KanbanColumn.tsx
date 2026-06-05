@@ -6,6 +6,7 @@ import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable"
 import type { Thought, KanbanStatus } from "@/lib/types";
 import { KANBAN_LABELS } from "@/lib/types";
 import { KanbanCard } from "@/components/KanbanCard";
+import type { KanbanAction } from "@/components/KanbanBoard";
 
 const COLUMN_DOT_COLOR: Record<string, string> = {
   backlog: "#8aa0c8",
@@ -27,6 +28,7 @@ interface KanbanColumnProps {
   onCardClick: (thought: Thought) => void;
   onPriorityChange: (thoughtId: number, importance: number) => void;
   onArchive: (thoughtId: number) => void;
+  actionsByEntity?: Map<string, KanbanAction[]>;
 }
 
 export function KanbanColumn({
@@ -35,6 +37,7 @@ export function KanbanColumn({
   onCardClick,
   onPriorityChange,
   onArchive,
+  actionsByEntity,
 }: KanbanColumnProps) {
   const [isCollapsed, setIsCollapsed] = useState(false);
 
@@ -223,16 +226,23 @@ export function KanbanColumn({
               Drop a card here…
             </div>
           ) : (
-            thoughts.map((thought) => (
-              <KanbanCard
-                key={thought.id}
-                thought={thought}
-                onCardClick={onCardClick}
-                onPriorityChange={onPriorityChange}
-                showArchiveButton={status === "done"}
-                onArchive={onArchive}
-              />
-            ))
+            thoughts.map((thought) => {
+              const topic = (thought.metadata?.topics as string[] | undefined)?.[0];
+              const actions = topic && actionsByEntity
+                ? actionsByEntity.get(String(topic).toLowerCase().trim()) || []
+                : [];
+              return (
+                <KanbanCard
+                  key={thought.id}
+                  thought={thought}
+                  onCardClick={onCardClick}
+                  onPriorityChange={onPriorityChange}
+                  showArchiveButton={status === "done"}
+                  onArchive={onArchive}
+                  actions={actions}
+                />
+              );
+            })
           )}
         </div>
       </SortableContext>

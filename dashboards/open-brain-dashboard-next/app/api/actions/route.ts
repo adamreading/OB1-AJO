@@ -16,10 +16,13 @@ export async function GET(request: NextRequest) {
   const sp = request.nextUrl.searchParams;
   const classification = sp.get("classification") || undefined;
   const sinceHoursRaw = sp.get("since_hours");
+  const withEntities = sp.get("with_entities") === "true";
+  const limit = sp.get("limit") || "200";
 
-  const params = new URLSearchParams({ limit: "200" });
+  const params = new URLSearchParams({ limit });
   if (sinceHoursRaw && sinceHoursRaw !== "0") params.set("since_hours", sinceHoursRaw);
   if (classification) params.set("classification", classification);
+  if (withEntities) params.set("with_entities", "true");
 
   try {
     const res = await fetch(`${API_URL}/action-items?${params}`, {
