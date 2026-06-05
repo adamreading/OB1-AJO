@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { TypeBadge } from "@/components/ThoughtCard";
@@ -13,8 +13,19 @@ interface PendingThought extends Thought {
     update_target_id?: number;
     original_content?: string;
     classification?: string;
+    meeting_id?: string;
+    meeting_title?: string;
+    meeting_position?: number;
+    meeting_total?: number;
   };
 }
+
+type ReviewGroup = {
+  key: string;
+  meetingId: string | null;
+  meetingTitle: string | null;
+  items: PendingThought[];
+};
 
 function DecisionBadge({ thought }: { thought: PendingThought }) {
   const decision = thought.metadata?.ollama_decision;
@@ -95,6 +106,79 @@ function ReviewPageInner() {
   useEffect(() => { setSelected(new Set()); }, [data]);
 
   const thoughts = (data?.data ?? []) as PendingThought[];
+
+  // Group by Plaud meeting_id — one recording = one cluster.
+  // Rows without a meeting_id (older captures, manual captures) become solo groups.
+  const groups: ReviewGroup[] = useMemo(() => {
+    const map = new Map<string, ReviewGroup>();
+    for (const t of thoughts) {
+      const mid = t.metadata?.meeting_id || null;
+      const key = mid ?? `_solo_${t.id}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          meetingId: mid,
+          meetingTitle: t.metadata?.meeting_title || null,
+          items: [],
+        });
+      }
+      map.get(key)!.items.push(t);
+    }
+    // Within each cluster, sort by meeting_position then created_at
+    for (const g of map.values()) {
+      g.items.sort((a, b) => {
+        const pa = a.metadata?.meeting_position ?? 999;
+        const pb = b.metadata?.meeting_position ?? 999;
+        if (pa !== pb) return pa - pb;
+        return a.created_at < b.created_at ? -1 : 1;
+      });
+    }
+    // Order clusters: real meetings (largest first) then solo rows by created_at desc
+    const out = [...map.values()];
+    out.sort((a, b) => {
+      const aIsSolo = a.meetingId == null;
+      const bIsSolo = b.meetingId == null;
+      if (aIsSolo !== bIsSolo) return aIsSolo ? 1 : -1;
+      if (!aIsSolo) {
+        if (a.items.length !== b.items.length) return b.items.length - a.items.length;
+      }
+      const aDate = a.items[0]?.created_at ?? "";
+      const bDate = b.items[0]?.created_at ?? "";
+      return bDate.localeCompare(aDate);
+    });
+    return out;
+  }, [thoughts]);
+
+  // Clusters collapsed by default; click header to expand. Solo rows always shown inline.
+  const [collapsedClusters, setCollapsedClusters] = useState<Set<string>>(new Set());
+
+  // When data loads, collapse every multi-item cluster by default.
+  useEffect(() => {
+    const next = new Set<string>();
+    for (const g of groups) {
+      if (g.meetingId && g.items.length > 1) next.add(g.key);
+    }
+    setCollapsedClusters(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  const toggleCluster = (key: string) =>
+    setCollapsedClusters((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+
+  const selectCluster = (group: ReviewGroup) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const ids = group.items.map((t) => t.id);
+      const allSelected = ids.every((id) => next.has(id));
+      if (allSelected) ids.forEach((id) => next.delete(id));
+      else ids.forEach((id) => next.add(id));
+      return next;
+    });
+  };
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -308,14 +392,91 @@ function ReviewPageInner() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border-subtle">
-              {thoughts.map((t) => {
+              {groups.flatMap((g) => {
+                const isCluster = g.meetingId != null && g.items.length > 1;
+                const isCollapsed = collapsedClusters.has(g.key);
+                const allInClusterSelected = g.items.every((t) => selected.has(t.id));
+
+                const rows: React.ReactNode[] = [];
+
+                if (isCluster) {
+                  // Aggregate cluster signals for the header
+                  const totalActions = g.items.reduce((n, t) => {
+                    const a = t.metadata?.action_items;
+                    return n + (Array.isArray(a) ? a.length : 0);
+                  }, 0);
+                  const typeCounts: Record<string, number> = {};
+                  for (const t of g.items) typeCounts[t.type] = (typeCounts[t.type] || 0) + 1;
+                  const typeSummary = Object.entries(typeCounts)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([t, n]) => `${n} ${t}`)
+                    .join(" · ");
+                  const meetingDate = g.items[0]?.created_at?.slice(0, 10) ?? "";
+                  const headerTitle = g.meetingTitle || `Meeting ${g.meetingId?.slice(0, 8)}`;
+
+                  rows.push(
+                    <tr
+                      key={`${g.key}_header`}
+                      className="bg-violet/5 border-l-2 border-violet/40 hover:bg-violet/10 cursor-pointer transition-colors"
+                      onClick={() => toggleCluster(g.key)}
+                    >
+                      <td className="px-4 py-3 align-top">
+                        <input
+                          type="checkbox"
+                          checked={allInClusterSelected}
+                          onChange={(e) => { e.stopPropagation(); selectCluster(g); }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="accent-violet mt-0.5"
+                        />
+                      </td>
+                      <td className="px-4 py-3" colSpan={4}>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-violet">{isCollapsed ? "▸" : "▾"}</span>
+                          <span className="font-medium text-text-primary">{headerTitle}</span>
+                          <span className="text-xs text-text-muted">{meetingDate}</span>
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-violet/15 text-violet font-medium">
+                            {g.items.length} captures
+                          </span>
+                          {totalActions > 0 && (
+                            <span className="text-xs text-text-muted">{totalActions} actions</span>
+                          )}
+                          <span className="text-xs text-text-muted">· {typeSummary}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            disabled={busy}
+                            onClick={() => approve(g.items.map((t) => t.id))}
+                            className="px-2 py-1 text-xs font-medium text-emerald-400 border border-emerald-500/30 rounded-lg hover:bg-emerald-500/10 transition-colors disabled:opacity-40"
+                            title="Approve all in this meeting"
+                          >
+                            Pass all
+                          </button>
+                          <button
+                            disabled={busy}
+                            onClick={() => reject(g.items.map((t) => t.id))}
+                            className="px-2 py-1 text-xs font-medium text-danger border border-danger/30 rounded-lg hover:bg-danger/10 transition-colors disabled:opacity-40"
+                            title="Delete all in this meeting"
+                          >
+                            Delete all
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+
+                  if (isCollapsed) return rows;
+                }
+
+                for (const t of g.items) {
                 const isExpanded = expanded.has(t.id);
                 const edit = edits[t.id];
                 const isSaving = saving.has(t.id);
                 const classificationVal = (t.metadata?.classification as string) || "personal";
 
-                return (
-                  <tr key={t.id} className={`transition-colors ${isExpanded ? "bg-bg-elevated" : "hover:bg-bg-hover"}`}>
+                rows.push(
+                  <tr key={t.id} className={`transition-colors ${isExpanded ? "bg-bg-elevated" : "hover:bg-bg-hover"} ${isCluster ? "border-l-2 border-violet/20" : ""}`}>
                     <td className="px-4 py-3 align-top">
                       <input
                         type="checkbox"
@@ -452,6 +613,8 @@ function ReviewPageInner() {
                     </td>
                   </tr>
                 );
+                }
+                return rows;
               })}
             </tbody>
           </table>

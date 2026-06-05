@@ -195,13 +195,17 @@ async function getThought(id) {
   return res.body;
 }
 
-async function capturePending({ content, decision, updateTargetId, originalContent, type, classification, actionItems }) {
+async function capturePending({ content, decision, updateTargetId, originalContent, type, classification, actionItems, meetingId, meetingTitle, meetingPosition, meetingTotal }) {
   const body = { content, source_type: "plaud", ollama_decision: decision };
   if (updateTargetId != null) body.update_target_id = updateTargetId;
   if (originalContent != null) body.original_content = originalContent;
   if (type) body.type = type;
   if (classification) body.classification = classification;
   if (Array.isArray(actionItems) && actionItems.length > 0) body.action_items = actionItems;
+  if (meetingId) body.meeting_id = meetingId;
+  if (meetingTitle) body.meeting_title = meetingTitle;
+  if (Number.isFinite(meetingPosition)) body.meeting_position = meetingPosition;
+  if (Number.isFinite(meetingTotal)) body.meeting_total = meetingTotal;
   return apiCall("POST", "/capture-pending", body);
 }
 
@@ -249,6 +253,10 @@ async function writeOrAmendPendingUpdate({
   classification,
   actionItems,
   existingPending,
+  meetingId,
+  meetingTitle,
+  meetingPosition,
+  meetingTotal,
 }) {
   if (existingPending) {
     const nextAmendCount = (existingPending.amend_count ?? 0) + 1;
@@ -294,6 +302,10 @@ async function writeOrAmendPendingUpdate({
     type,
     classification,
     actionItems,
+    meetingId,
+    meetingTitle,
+    meetingPosition,
+    meetingTotal,
   });
   if (r.status >= 200 && r.status < 300) {
     return { ok: true, amended: false, amend_count: 0, serial_id: r.body?.thought_id, status: r.status };
@@ -494,11 +506,13 @@ function parseEntries(summaryMarkdown) {
     if (bodyStart < 0) continue;
 
     const bodyLines = lines.slice(bodyStart, actionsStart >= 0 ? actionsStart : undefined);
-    // Strip a leading "Body:" / "BODY:" label — the Plaud template prompt
-    // includes a literal "[Body: 150–250 words...]" placeholder and GPT-5.5
-    // sometimes leaves the "Body:" prefix verbatim in the output instead of
-    // replacing it with prose. Anything else is left alone.
-    const body = bodyLines.join("\n").trim().replace(/^body:\s*/i, "");
+    // Strip Plaud's template-instruction leak. GPT-5.5 sometimes emits the
+    // full "[Body: 150–250 words. Write as a direct, factual capture. ... No padding.]"
+    // placeholder block verbatim before the actual prose. Other times it just
+    // leaves the "Body:" label. Strip both shapes; anything else is left alone.
+    const body = bodyLines.join("\n").trim()
+      .replace(/^\s*\[Body:[\s\S]*?No padding\.\]\s*\n+/i, "")
+      .replace(/^body:\s*/i, "");
     if (!body) continue;
 
     const actions = [];
@@ -835,6 +849,13 @@ async function processRecording(payload) {
   console.log(`[plaud-webhook] Processing ${entries.length} entries from: ${filename}`);
   const openQuestionsToAdd = [];
 
+  // Meeting-cluster context — one Plaud recording = one meeting; the dashboard
+  // /review groups pending rows by meeting_id so 5 atomic captures show up as
+  // one cluster instead of 5 individual rows.
+  const meetingId = fileId || dedupKey || null;
+  const meetingTitle = filename ? filename.replace(/\.[^/.]+$/, "") : null;
+  const meetingTotal = entries.length;
+
   // Surface flag_only triggers as open questions if any non-trivial entry uses them
   for (const f of flagsTriggered) {
     openQuestionsToAdd.push({
@@ -911,6 +932,10 @@ async function processRecording(payload) {
             type: entry.type,
             classification: entry.classification,
             actionItems: entry.action_items,
+            meetingId,
+            meetingTitle,
+            meetingPosition: i + 1,
+            meetingTotal,
           });
           runLog.actions.capture.push(`${label}: fallback (target not found) — ${r.body?.thought_id ?? r.status}`);
           continue;
@@ -927,6 +952,10 @@ async function processRecording(payload) {
           classification: entry.classification,
           actionItems: entry.action_items,
           existingPending,
+          meetingId,
+          meetingTitle,
+          meetingPosition: i + 1,
+          meetingTotal,
         });
         if (!w.ok) {
           console.error(`[plaud-webhook] ${label}: UPDATE write failed — ${w.error}`);
@@ -963,6 +992,10 @@ async function processRecording(payload) {
         type: entry.type,
         classification: entry.classification,
         actionItems: entry.action_items,
+        meetingId,
+        meetingTitle,
+        meetingPosition: i + 1,
+        meetingTotal,
       });
       runLog.actions.capture.push(`${label}: #${r.body?.thought_id ?? "?"}`);
     } catch (err) {
