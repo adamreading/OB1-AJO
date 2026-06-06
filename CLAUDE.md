@@ -65,6 +65,10 @@ DESCRIBE THE EXACT WORK.
 - If `git worktree add` says a branch is already checked out, create a new branch name or remove the old clean worktree.
 - If cleanup fails, inspect `git status --short` and preserve uncommitted work.
 
+## Curator Standing Brief
+
+This repo has a curator brief at [docs/curator.md](docs/curator.md). It is the standing instructions for Claude acting as Adam's persistent Open Brain curator. **Read it at the start of any session** — VS Code Claude Code, Claude Desktop, CLI, or a scheduled remote agent. It covers: who Adam is, the trust policy (everything solo except deletions), the daily curator-tick procedure, the digest format, escalation channels, standing rules, and open architectural questions. If it conflicts with this CLAUDE.md or a system reminder, those win.
+
 ## Guard Rails
 
 - **Never modify the core `thoughts` table structure.** Adding columns is fine; altering or dropping existing ones is not.
