@@ -540,6 +540,138 @@ async function callOllama(content, opts = {}) {
   );
 }
 
+// Cascade extraction — Cognee-inspired second-round prompt that targets the
+// failure mode where the model stops at 5-8 entities on a long transcript.
+// Only fires when content is long AND round-1 recall looks low; otherwise
+// round-2 is wasted latency. The second round is entity-recall only — round 1
+// keeps authority over type/context/summary/importance, and relationships
+// from round 2 are merged in only if they reference an entity from either round.
+const CASCADE_ENABLED = String(process.env.WORKER_CASCADE_ENABLED ?? "true").toLowerCase() !== "false";
+const CASCADE_MIN_CHARS = Number(process.env.WORKER_CASCADE_MIN_CHARS || 3000);
+const CASCADE_TRIGGER_ENTITY_COUNT = Number(process.env.WORKER_CASCADE_TRIGGER_ENTITIES || 8);
+
+function buildCascadePrompt(content, round1Entities) {
+  const wrapped = String(content || "")
+    .slice(0, 6000)
+    .replace(/<thought_content>/gi, "<thought_content_escaped>")
+    .replace(/<\/thought_content>/gi, "</thought_content_escaped>");
+  const knownList = (round1Entities || [])
+    .map((e) => `- ${e.name} (${e.type})`)
+    .join("\n");
+  return `/no_think
+You previously extracted entities from this thought. Now find entities you MISSED.
+
+Already-found entities (DO NOT duplicate any of these, even with different casing or spacing):
+${knownList || "(none)"}
+
+<thought_content>
+${wrapped}
+</thought_content>
+
+Review the content and return ONLY entities not already in the list above. The same entity-type rules and exclusions apply (no dates, no filenames, no generic nouns, no STT mishearings; use canonical names; omit below 0.5 confidence). If you also find relationships involving any new entity (or between a new entity and an already-found one), include them.
+
+Return this exact JSON shape:
+{
+  "entities": [
+    {"name": "specific name", "type": "person|project|topic|tool|organization|place|newsletter", "confidence": 0.0}
+  ],
+  "relationships": [
+    {"from": "entity_name", "to": "entity_name", "relation": "relation_name", "confidence": 0.0}
+  ]
+}
+
+If you missed nothing, return {"entities": [], "relationships": []}.`;
+}
+
+async function callOllamaCascade(content, opts = {}) {
+  // Always do round 1 with the standard extraction prompt.
+  const round1 = await callOllama(content, opts);
+
+  if (!CASCADE_ENABLED) return round1;
+  // Curator notes are already aggressive-extraction — round 2 is overkill.
+  if (opts.sourceType === "curator_note") return round1;
+
+  const round1Entities = Array.isArray(round1?.entities) ? round1.entities : [];
+  const contentLen = String(content || "").length;
+  if (contentLen < CASCADE_MIN_CHARS) return round1;
+  if (round1Entities.length >= CASCADE_TRIGGER_ENTITY_COUNT) return round1;
+
+  // Gating met — do round 2.
+  console.log(`[cascade] Round 1 returned ${round1Entities.length} entities on ${contentLen}-char content — running round 2...`);
+
+  let round2;
+  try {
+    // Use callOllamaOnce directly so we can pass a custom prompt without
+    // changing buildPrompt's signature. Walk the same fallback chain.
+    const chain = [MODEL, ...MODEL_CHAIN];
+    const cascadePrompt = buildCascadePrompt(content, round1Entities);
+    for (const modelName of chain) {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), OLLAMA_TIMEOUT_MS);
+        const response = await fetch(OLLAMA_GENERATE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: modelName,
+            prompt: cascadePrompt,
+            stream: false,
+            format: "json",
+            options: { temperature: OLLAMA_TEMPERATURE, num_predict: OLLAMA_NUM_PREDICT, num_ctx: OLLAMA_NUM_CTX },
+          }),
+          signal: ctrl.signal,
+        }).finally(() => clearTimeout(timer));
+        if (!response.ok) throw new Error(`Ollama error ${response.status}`);
+        const result = await response.json();
+        const raw = result.response || result.message?.content || "";
+        const loop = detectTokenLoop(raw);
+        if (loop) throw new Error(`Token loop in cascade round-2 (${modelName})`);
+        round2 = parseJsonObject(raw);
+        break;
+      } catch (err) {
+        console.log(`[cascade] Round 2 ${modelName} failed: ${err.message} — continuing`);
+      }
+    }
+  } catch (err) {
+    console.log(`[cascade] Round 2 failed entirely: ${err.message} — keeping round-1 result`);
+    return round1;
+  }
+
+  if (!round2) return round1;
+
+  // Merge round 2 into round 1. Dedup entities by lowercase name. Append
+  // any new relationships that reference an entity from either round.
+  const r2Entities = Array.isArray(round2?.entities) ? round2.entities : [];
+  const r2Relationships = Array.isArray(round2?.relationships) ? round2.relationships : [];
+  const knownNames = new Set(round1Entities.map((e) => String(e.name || "").trim().toLowerCase()));
+  const mergedEntities = [...round1Entities];
+  let added = 0;
+  for (const e of r2Entities) {
+    const key = String(e?.name || "").trim().toLowerCase();
+    if (!key || knownNames.has(key)) continue;
+    knownNames.add(key);
+    mergedEntities.push(e);
+    added++;
+  }
+  // Only merge round-2 relationships that touch a known entity (round-1 or
+  // newly-added). Round-2 can propose edges between two of its own new
+  // entities, which is the most valuable add.
+  const allKnown = new Set(mergedEntities.map((e) => String(e.name || "").trim().toLowerCase()));
+  const r1Relationships = Array.isArray(round1?.relationships) ? round1.relationships : [];
+  const mergedRels = [...r1Relationships];
+  let addedRels = 0;
+  for (const r of r2Relationships) {
+    const fromKey = String(r?.from || "").trim().toLowerCase();
+    const toKey = String(r?.to || "").trim().toLowerCase();
+    if (!allKnown.has(fromKey) || !allKnown.has(toKey)) continue;
+    mergedRels.push(r);
+    addedRels++;
+  }
+  console.log(`[cascade] Round 2 added ${added} entit${added === 1 ? "y" : "ies"} and ${addedRels} relationship${addedRels === 1 ? "" : "s"}.`);
+
+  return { ...round1, entities: mergedEntities, relationships: mergedRels };
+}
+
 function normalizeAnalysis(raw, existingThought) {
   const metadata = existingThought?.metadata || {};
   const existingClassification = metadata.classification || existingThought?.classification;
@@ -1081,7 +1213,7 @@ async function processItem(queueItem) {
   const sourceTypeLabel = sourceType === "curator_note" ? " [curator-note]" : "";
   console.log(`Processing ${thoughtId.slice(0, 8)} with ${MODEL}${sourceTypeLabel}...`);
 
-  const raw = await callOllama(content, { sourceType });
+  const raw = await callOllamaCascade(content, { sourceType });
   const analysis = normalizeAnalysis(raw, thought);
 
   await updateThought(thoughtId, thought, analysis);
@@ -1171,14 +1303,71 @@ async function fetchEntityTypes(entityIds) {
   return new Map((data ?? []).map((r) => [r.id, r.entity_type]));
 }
 
+// Run-once-on-startup orphan cleanup: delete entities older than
+// CLEANUP_MIN_AGE_HOURS that have zero linked thoughts. Older-than threshold
+// avoids racing with in-flight merges where an entity briefly has zero
+// thought_entities rows between the re-point and the next link insert. Opt
+// out with WORKER_CLEANUP_ON_START=false. Wiki-page cleanup intentionally
+// is NOT done here — the worker doesn't own wiki state and the cleanup
+// script in scripts/cleanup-orphans.mjs covers the deeper sweep.
+const CLEANUP_ON_START = String(process.env.WORKER_CLEANUP_ON_START ?? "true").toLowerCase() !== "false";
+const CLEANUP_MIN_AGE_HOURS = Number(process.env.WORKER_CLEANUP_MIN_AGE_HOURS || 24);
+
+async function cleanupOrphansOnStart() {
+  if (!CLEANUP_ON_START) return;
+  const cutoff = new Date(Date.now() - CLEANUP_MIN_AGE_HOURS * 3600 * 1000).toISOString();
+  // Pull older-than-cutoff entities (paginated past PostgREST 1000-cap)
+  const candidates = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("entities")
+      .select("id, canonical_name")
+      .lt("created_at", cutoff)
+      .range(from, from + 999);
+    if (error || !data || data.length === 0) break;
+    candidates.push(...data);
+    if (data.length < 1000) break;
+    from += 1000;
+  }
+  if (candidates.length === 0) return;
+  // Pull thought_entities for these candidates, also paginated
+  const linkCount = new Map();
+  from = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("thought_entities")
+      .select("entity_id")
+      .range(from, from + 999);
+    if (error || !data || data.length === 0) break;
+    for (const l of data) linkCount.set(l.entity_id, (linkCount.get(l.entity_id) || 0) + 1);
+    if (data.length < 1000) break;
+    from += 1000;
+  }
+  const orphans = candidates.filter((e) => (linkCount.get(e.id) || 0) === 0);
+  if (orphans.length === 0) {
+    console.log(`[startup-cleanup] No orphan entities older than ${CLEANUP_MIN_AGE_HOURS}h — skipping.`);
+    return;
+  }
+  console.log(`[startup-cleanup] Deleting ${orphans.length} orphan entit${orphans.length === 1 ? "y" : "ies"} older than ${CLEANUP_MIN_AGE_HOURS}h...`);
+  let ok = 0, fail = 0;
+  for (const e of orphans) {
+    const { error } = await supabase.from("entities").delete().eq("id", e.id);
+    if (error) fail++; else ok++;
+  }
+  console.log(`[startup-cleanup] Deleted: ${ok}, failed: ${fail}`);
+}
+
 async function processQueue() {
   await resetFailedItems();
   await detectGraphTables();
+  await cleanupOrphansOnStart();
   const chainNote = MODEL_CHAIN.length > 0
     ? ` Fallback chain: ${MODEL_CHAIN.join(" → ")}.`
     : " No fallback chain (set WORKER_MODEL_CHAIN= for resilience to token loops).";
   const concurrencyNote = CONCURRENCY > 1 ? ` Concurrency: ${CONCURRENCY} (set OLLAMA_NUM_PARALLEL>=${CONCURRENCY} on the Ollama service).` : "";
-  console.log(`Starting Open Brain local worker using ${MODEL}. Poll interval: ${POLL_MS}ms. Max attempts: ${MAX_ATTEMPTS}. Infer-on-dirty: ${INFER_ON_DIRTY}.${chainNote}${concurrencyNote}`);
+  const cascadeNote = CASCADE_ENABLED ? ` Cascade extraction: on (min ${CASCADE_MIN_CHARS} chars, trigger <${CASCADE_TRIGGER_ENTITY_COUNT} entities).` : " Cascade extraction: off.";
+  console.log(`Starting Open Brain local worker using ${MODEL}. Poll interval: ${POLL_MS}ms. Max attempts: ${MAX_ATTEMPTS}. Infer-on-dirty: ${INFER_ON_DIRTY}.${chainNote}${concurrencyNote}${cascadeNote}`);
 
   while (true) {
     // Claim up to CONCURRENCY items serially. Each claim marks the item
