@@ -59,6 +59,12 @@ const INFER_ENTITY_TYPES = new Set(
 // from spinning the worker forever, while transient Ollama / network
 // blips self-heal without waiting for a restart.
 const MAX_ATTEMPTS = Number(process.env.WORKER_MAX_ATTEMPTS || 3);
+// Parallel Ollama extractions per poll tick. Default 1 (serial). Set higher
+// to keep the GPU busy across multiple pending thoughts. Pair with the
+// Ollama service's OLLAMA_NUM_PARALLEL env var so the server can actually
+// serve them in parallel (otherwise they queue internally and you get no
+// speedup). Recommended max: WORKER_CONCURRENCY <= OLLAMA_NUM_PARALLEL.
+const CONCURRENCY = Math.max(1, Number(process.env.WORKER_CONCURRENCY || 1));
 
 // Entity IDs touched since the last queue drain — wiki is regenerated for these when queue empties
 const dirtyEntityIds = new Set();
@@ -1171,93 +1177,123 @@ async function processQueue() {
   const chainNote = MODEL_CHAIN.length > 0
     ? ` Fallback chain: ${MODEL_CHAIN.join(" → ")}.`
     : " No fallback chain (set WORKER_MODEL_CHAIN= for resilience to token loops).";
-  console.log(`Starting Open Brain local worker using ${MODEL}. Poll interval: ${POLL_MS}ms. Max attempts: ${MAX_ATTEMPTS}. Infer-on-dirty: ${INFER_ON_DIRTY}.${chainNote}`);
+  const concurrencyNote = CONCURRENCY > 1 ? ` Concurrency: ${CONCURRENCY} (set OLLAMA_NUM_PARALLEL>=${CONCURRENCY} on the Ollama service).` : "";
+  console.log(`Starting Open Brain local worker using ${MODEL}. Poll interval: ${POLL_MS}ms. Max attempts: ${MAX_ATTEMPTS}. Infer-on-dirty: ${INFER_ON_DIRTY}.${chainNote}${concurrencyNote}`);
 
   while (true) {
-    let item = null;
-    try {
-      item = await claimNextItem();
-      if (!item) {
-        if (dirtyEntityIds.size > 0) {
-          const ids = [...dirtyEntityIds];
-          dirtyEntityIds.clear();
-          // Filter to entities that actually have enough linked thoughts to be
-          // worth a wiki page. Single-mention entities create noise; the page
-          // can be generated later once the entity accumulates enough material.
-          const eligible = await filterEntitiesByLinkCount(ids, MIN_LINKED_FOR_WIKI);
-          const skipped = ids.length - eligible.length;
-          if (skipped > 0) {
-            console.log(`[wiki] Skipping ${skipped} entit${skipped === 1 ? "y" : "ies"} below min-linked threshold (${MIN_LINKED_FOR_WIKI})`);
-          }
-          if (eligible.length > 0) {
-            // Cross-thought edge inference BEFORE wiki regen so the article
-            // sees the new edges in its Relationships section on this pass.
-            // Only runs for entity_types in INFER_ENTITY_TYPES (default:
-            // person/place/organization) — tool/topic/newsletter entities
-            // don't benefit, and inference takes ~30-60s per entity. The
-            // script itself respects edge_blocklist and skips pairs that
-            // already have an edge, so re-running is cheap.
-            if (INFER_ON_DIRTY) {
-              const typeMap = await fetchEntityTypes(eligible);
-              const inferrable = eligible.filter((id) => INFER_ENTITY_TYPES.has(String(typeMap.get(id) || "").toLowerCase()));
-              if (inferrable.length > 0) {
-                console.log(`[infer] Running cross-thought inference for ${inferrable.length} entit${inferrable.length === 1 ? "y" : "ies"} before wiki regen...`);
-                for (const id of inferrable) await spawnInference(id);
-                console.log("[infer] Done.");
-              }
+    // Claim up to CONCURRENCY items serially. Each claim marks the item
+    // status='processing' so two claims in the same tick can't pick the
+    // same row. Sequential claims are race-free within a single worker
+    // process; concurrency comes from processing them in parallel below.
+    const items = [];
+    for (let i = 0; i < CONCURRENCY; i++) {
+      try {
+        const it = await claimNextItem();
+        if (!it) break;
+        items.push(it);
+      } catch (err) {
+        console.error("Worker claim error:", err.message || err);
+        await sleep(5000);
+        break;
+      }
+    }
+
+    if (items.length === 0) {
+      if (dirtyEntityIds.size > 0) {
+        const ids = [...dirtyEntityIds];
+        dirtyEntityIds.clear();
+        // Filter to entities that actually have enough linked thoughts to be
+        // worth a wiki page. Single-mention entities create noise; the page
+        // can be generated later once the entity accumulates enough material.
+        const eligible = await filterEntitiesByLinkCount(ids, MIN_LINKED_FOR_WIKI);
+        const skipped = ids.length - eligible.length;
+        if (skipped > 0) {
+          console.log(`[wiki] Skipping ${skipped} entit${skipped === 1 ? "y" : "ies"} below min-linked threshold (${MIN_LINKED_FOR_WIKI})`);
+        }
+        if (eligible.length > 0) {
+          // Cross-thought edge inference BEFORE wiki regen so the article
+          // sees the new edges in its Relationships section on this pass.
+          // Only runs for entity_types in INFER_ENTITY_TYPES (default:
+          // person/place/organization) — tool/topic/newsletter entities
+          // don't benefit, and inference takes ~30-60s per entity. The
+          // script itself respects edge_blocklist and skips pairs that
+          // already have an edge, so re-running is cheap.
+          if (INFER_ON_DIRTY) {
+            const typeMap = await fetchEntityTypes(eligible);
+            const inferrable = eligible.filter((id) => INFER_ENTITY_TYPES.has(String(typeMap.get(id) || "").toLowerCase()));
+            if (inferrable.length > 0) {
+              console.log(`[infer] Running cross-thought inference for ${inferrable.length} entit${inferrable.length === 1 ? "y" : "ies"} before wiki regen...`);
+              for (const id of inferrable) await spawnInference(id);
+              console.log("[infer] Done.");
             }
-            console.log(`[wiki] Queue drained — regenerating wiki for ${eligible.length} entit${eligible.length === 1 ? "y" : "ies"}...`);
-            for (const id of eligible) await spawnWiki(id);
-            console.log("[wiki] Done.");
           }
-        }
-        console.log(`Queue empty. Waiting ${Math.round(POLL_MS / 1000)}s...`);
-        await sleep(POLL_MS);
-        continue;
-      }
-      await processItem(item);
-    } catch (err) {
-      // Surface err.cause and err.code so failures aren't all the same
-      // bare "fetch failed". Node's fetch wraps network errors in a
-      // TypeError whose .cause holds the real ECONNREFUSED / EAI_AGAIN
-      // / AbortError. Without this every entry in queue.last_error
-      // reads "fetch failed" and you can't tell Ollama-hangs from
-      // PostgREST blips from network outages.
-      const causeMsg =
-        err && err.cause
-          ? `${err.cause.code || err.cause.name || ""} ${err.cause.message || err.cause}`.trim()
-          : "";
-      const fullMsg = causeMsg ? `${err.message} (cause: ${causeMsg})` : String(err.message || err);
-      console.error("Worker error:", fullMsg);
-      if (item?.thought_id) {
-        try {
-          // In-process retry: read current attempt_count, increment, requeue
-          // as 'pending' if under MAX_ATTEMPTS. Only stamp 'failed' at the
-          // cap. Previously we always marked failed and waited for restart
-          // — transient Ollama timeouts spun up a giant manual-restart
-          // backlog. Now they self-heal.
-          const { data: existing } = await supabase
-            .from("entity_extraction_queue")
-            .select("attempt_count")
-            .eq("thought_id", item.thought_id)
-            .maybeSingle();
-          const nextAttempt = (existing?.attempt_count ?? 0) + 1;
-          const willRetry = nextAttempt < MAX_ATTEMPTS;
-          await queueUpdate(item.thought_id, {
-            status: willRetry ? "pending" : "failed",
-            attempt_count: nextAttempt,
-            last_error: fullMsg.slice(0, 500),
-            processed_at: willRetry ? null : new Date().toISOString(),
-            started_at: null,
-          });
-          console.log(
-            `[retry] ${item.thought_id.slice(0, 8)}: attempt ${nextAttempt}/${MAX_ATTEMPTS} — ${willRetry ? "requeued" : "marked failed (cap reached)"}`
-          );
-        } catch (queueErr) {
-          console.error("Failed to update queue item:", queueErr.message);
+          console.log(`[wiki] Queue drained — regenerating wiki for ${eligible.length} entit${eligible.length === 1 ? "y" : "ies"}...`);
+          for (const id of eligible) await spawnWiki(id);
+          console.log("[wiki] Done.");
         }
       }
-      await sleep(5000);
+      console.log(`Queue empty. Waiting ${Math.round(POLL_MS / 1000)}s...`);
+      await sleep(POLL_MS);
+      continue;
+    }
+
+    if (items.length > 1) {
+      console.log(`[batch] Processing ${items.length} thoughts in parallel...`);
+    }
+
+    // Process all claimed items in parallel. Each item handles its own
+    // error + retry-requeue independently so one failure doesn't poison
+    // the rest of the batch.
+    await Promise.all(items.map((item) => processItemWithRetry(item)));
+  }
+}
+
+// Wraps processItem with the in-process retry / requeue logic so it can
+// be called concurrently from the batched main loop without one failure
+// taking down the whole batch.
+async function processItemWithRetry(item) {
+  try {
+    await processItem(item);
+  } catch (err) {
+    // Surface err.cause and err.code so failures aren't all the same
+    // bare "fetch failed". Node's fetch wraps network errors in a
+    // TypeError whose .cause holds the real ECONNREFUSED / EAI_AGAIN
+    // / AbortError. Without this every entry in queue.last_error
+    // reads "fetch failed" and you can't tell Ollama-hangs from
+    // PostgREST blips from network outages.
+    const causeMsg =
+      err && err.cause
+        ? `${err.cause.code || err.cause.name || ""} ${err.cause.message || err.cause}`.trim()
+        : "";
+    const fullMsg = causeMsg ? `${err.message} (cause: ${causeMsg})` : String(err.message || err);
+    console.error("Worker error:", fullMsg);
+    if (item?.thought_id) {
+      try {
+        // In-process retry: read current attempt_count, increment, requeue
+        // as 'pending' if under MAX_ATTEMPTS. Only stamp 'failed' at the
+        // cap. Previously we always marked failed and waited for restart
+        // — transient Ollama timeouts spun up a giant manual-restart
+        // backlog. Now they self-heal.
+        const { data: existing } = await supabase
+          .from("entity_extraction_queue")
+          .select("attempt_count")
+          .eq("thought_id", item.thought_id)
+          .maybeSingle();
+        const nextAttempt = (existing?.attempt_count ?? 0) + 1;
+        const willRetry = nextAttempt < MAX_ATTEMPTS;
+        await queueUpdate(item.thought_id, {
+          status: willRetry ? "pending" : "failed",
+          attempt_count: nextAttempt,
+          last_error: fullMsg.slice(0, 500),
+          processed_at: willRetry ? null : new Date().toISOString(),
+          started_at: null,
+        });
+        console.log(
+          `[retry] ${item.thought_id.slice(0, 8)}: attempt ${nextAttempt}/${MAX_ATTEMPTS} — ${willRetry ? "requeued" : "marked failed (cap reached)"}`
+        );
+      } catch (queueErr) {
+        console.error("Failed to update queue item:", queueErr.message);
+      }
     }
   }
 }
