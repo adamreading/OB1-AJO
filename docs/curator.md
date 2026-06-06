@@ -159,6 +159,41 @@ These need his sign-off before you act on them autonomously. Carry them in §"I 
 2. **Prompt vs. tool entity type**: Demotion Audit, Prototype Classifier and similar are stored as `entity_type=tool` today. Adam asked for a dedicated `prompt` type. Migration is small but unshipped.
 3. **Notification channels**: Claude Desktop notification API may or may not exist for scheduled agents. Research in flight.
 
+## 11a. Persistent scheduling — how the curator actually runs
+
+The curator runs as a Claude **Routine** ([claude.ai/code/routines](https://claude.ai/code/routines)) — a scheduled Claude Code session executed on Anthropic's cloud infrastructure, not on Adam's local machine. The routine prompt lives at [`routines/curator-daily.md`](../routines/curator-daily.md), version-controlled in this repo.
+
+**One-time setup Adam does:**
+1. Register the Open Brain MCP as a web connector at [claude.ai/customize/connectors](https://claude.ai/customize/connectors).
+   - URL: `https://upqfzpnywlxeidlcjpbc.supabase.co/functions/v1/open-brain-mcp`
+   - Auth header: `x-brain-key: <MCP_ACCESS_KEY from .env>`
+2. Ensure the Gmail connector is connected at claude.ai (probably is, from the Cowork newsletter pipeline).
+3. In any Claude Code session, run `/web-setup` once to grant routines access to GitHub + connectors.
+4. Then `/schedule daily curator review at 8am` (or whatever cadence). Pick this repo, select connectors (Open Brain + Gmail), use the routine prompt from `routines/curator-daily.md`.
+
+**Constraints (read these so the routine never tries something impossible):**
+- **Minimum cadence: 1 hour.** Pick 2-3 ticks/day, not minute-by-minute.
+- **No local file access.** Routine cannot read `.env`, `processor_prompt/`, or hit local Ollama. Local pipeline (Plaud webhook, worker, wiki regen) stays on Adam's 5090 and is invisible to the routine.
+- **MCP servers added via local `claude mcp add` are NOT visible.** Only claude.ai web connectors. This is why we register Open Brain via the web UI even though it's already wired locally.
+- **No PushNotification / mobile alerts.** The `PushNotification` tool needs a local Claude Code session running. Routines must notify via Gmail/Slack/Telegram from inside the run.
+- **Sandbox is ephemeral.** Each tick is a fresh clone — no state persists between runs except what's in the repo or the brain itself.
+
+**What goes where:**
+
+| Concern | Local (5090) | Routine (Anthropic cloud) |
+|---|---|---|
+| Plaud webhook ingestion | ✓ | ✗ |
+| Local Ollama entity extraction | ✓ | ✗ |
+| Local Ollama wiki regen | ✓ | ✗ |
+| Cross-thought edge inference | ✓ | ✗ |
+| Triage pending review | — | ✓ |
+| Dedup detection | — | ✓ |
+| Stale-action sweep | — | ✓ |
+| Daily digest + email | — | ✓ |
+| Anomaly detection | — | ✓ |
+
+**Cost note:** routine runs consume Adam's Claude subscription compute. Keep ticks lightweight — they should read, decide, write a short digest, and exit. Don't have the routine call expensive multi-step deep-research.
+
 ## 12. Audit log
 
 Every curator action writes a row to `curator_audit_log` (table to be created). Schema:
