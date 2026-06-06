@@ -401,8 +401,13 @@ async function classifyAndUpdate(thought, config) {
   }
   classified.importance = clampInt(classified.importance, 1, 5, 3);
   classified.confidence = clampFloat(classified.confidence, 0, 1, 0.5);
-  if (!ALLOWED_SOURCE_TYPES.has(classified.detected_source_type)) {
-    classified.detected_source_type = existingSource || "generic_import";
+  // AJO fork: preserve existing source_type (plaud, mcp-claude, mcp-perplexity,
+  // curator_note, manual, …) rather than overwriting it with the LLM's
+  // content-derived guess. Upstream's ALLOWED list is upstream-import-only.
+  if (existingSource) {
+    classified.detected_source_type = existingSource;
+  } else if (!ALLOWED_SOURCE_TYPES.has(classified.detected_source_type)) {
+    classified.detected_source_type = "generic_import";
   }
   if (!Array.isArray(classified.topics)) classified.topics = [];
   if (!Array.isArray(classified.tags)) classified.tags = [];
