@@ -485,10 +485,12 @@ async function fetchByIds(config, ids) {
 async function patchThought(id, patch, config) {
   const url = `${config.supabaseUrl}/rest/v1/thoughts?id=eq.${id}`;
   const body = { ...patch };
-  if (body.metadata) {
-    body.metadata = JSON.stringify(body.metadata);
-  }
-
+  // Upstream's previous code JSON.stringify'd body.metadata here before the
+  // outer fetch's body-stringify, which double-encoded it — Postgres ended up
+  // storing the metadata column as a JSONB STRING scalar instead of a JSONB
+  // OBJECT, breaking every metadata->'topics' / ->'action_items' query
+  // downstream. Pass the metadata object as-is; PostgREST handles JSONB
+  // natively when Content-Type is application/json.
   const res = await fetch(url, {
     method: "PATCH",
     headers: {
