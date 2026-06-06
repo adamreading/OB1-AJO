@@ -78,7 +78,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const VALID_TYPES = new Set(["idea", "task", "meeting", "reference", "journal", "decision", "lesson", "observation", "newsletter"]);
 const VALID_CONTEXTS = new Set(["work", "personal"]);
-const VALID_ENTITY_TYPES = new Set(["person", "project", "topic", "tool", "organization", "place", "newsletter"]);
+const VALID_ENTITY_TYPES = new Set(["person", "project", "topic", "tool", "organization", "place", "newsletter", "prompt"]);
 
 // Belt-and-braces filter for junk topic entities the prompt is supposed to
 // reject but Ollama sometimes returns anyway. Run AFTER the prompt-side
@@ -324,7 +324,7 @@ Return this exact JSON shape:
   "summary": "short plain-language summary",
   "tags": [],
   "entities": [
-    {"name": "specific name", "type": "person|project|topic|tool|organization|place|newsletter", "confidence": 0.0}
+    {"name": "specific name", "type": "person|project|topic|tool|organization|place|newsletter|prompt", "confidence": 0.0}
   ],
   "relationships": [
     {"from": "entity_name", "to": "entity_name", "relation": "relation_name", "confidence": 0.0}
@@ -352,6 +352,7 @@ What each entity type means:
 - place        → a named geographic location. "Reading", "London". Not "the office" or "the meeting room".
 - topic        → a DURABLE concept, methodology, idea, or theme that recurs across captures and would deserve a wiki page in three months. "Agentic AI", "Vector embeddings", "Per-funder concurrency". The durability test is the key gate: would you write a wiki page about this in 3 months?
 - newsletter   → a NAMED PUBLICATION the user reads — a Substack newsletter, blog, trade journal, or similar serial publication. "Nate's Newsletter", "Ken Huang's Substack", "The Pragmatic Engineer". Use the PUBLICATION name, not a specific issue title. NOT individual articles, NOT one-off blog posts on someone's personal page.
+- prompt       → a NAMED, REUSABLE LLM prompt or prompt template — a durable text artifact designed to be pasted into an LLM and run on inputs to produce a defined output. "Demotion Audit", "Prototype Classifier", "Six-Field Brief". The thought usually contains the prompt's full text. NOT a one-off question the user asked an LLM. NOT a UI for editing prompts (that's a tool). NOT a collection or kit (that's a topic). A prompt is a single reusable piece of LLM-input text with stable behaviour.
 
 DO NOT extract as a topic (or any entity type):
 - Dates or date-like strings — "2026-05-19", "Q1 2026", "early November", "end of quarter".
@@ -573,7 +574,7 @@ Review the content and return ONLY entities not already in the list above. The s
 Return this exact JSON shape:
 {
   "entities": [
-    {"name": "specific name", "type": "person|project|topic|tool|organization|place|newsletter", "confidence": 0.0}
+    {"name": "specific name", "type": "person|project|topic|tool|organization|place|newsletter|prompt", "confidence": 0.0}
   ],
   "relationships": [
     {"from": "entity_name", "to": "entity_name", "relation": "relation_name", "confidence": 0.0}

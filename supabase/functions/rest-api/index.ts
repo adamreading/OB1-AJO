@@ -1256,7 +1256,7 @@ app.patch("/entities/:id", async (c) => {
     return c.json({ error: "canonical_name or entity_type is required" }, 400, corsHeaders);
   }
 
-  const VALID_TYPES = ["person", "organization", "org", "project", "tool", "place", "topic", "entity", "newsletter"];
+  const VALID_TYPES = ["person", "organization", "org", "project", "tool", "place", "topic", "entity", "newsletter", "prompt"];
   if (newType && !VALID_TYPES.includes(newType)) {
     return c.json({ error: `Invalid entity_type. Must be one of: ${VALID_TYPES.join(", ")}` }, 400, corsHeaders);
   }
@@ -1412,6 +1412,7 @@ app.get("/entity-types", async (c) => {
     place: "#ffd870",
     topic: "#b8a6ff",
     entity: "#a8b8d0",
+    prompt: "#e070b0",  // pink — distinct from tool's teal, signals "LLM artifact" tier
   };
 
   function hashedHue(name: string): number {

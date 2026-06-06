@@ -136,10 +136,13 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
         },
       ],
     },
-    {
-      label: "Discover",
-      items: [{ href: "/actions", label: "Actions", icon: "actions" }],
-    },
+    // Discover group removed 2026-06-06. The /actions page surfaced
+    // metadata.action_items as a worklist; most of those items are
+    // about other people, not Adam, and the pile grew without a
+    // completion-tracking mechanism. Per docs/curator.md §10 it stays
+    // informational only — populated by the worker, ignored by the UI.
+    // The /actions route still exists for direct URL access if needed,
+    // and KanbanCard's aggregated-actions pill is removed below.
   ];
 
   return (

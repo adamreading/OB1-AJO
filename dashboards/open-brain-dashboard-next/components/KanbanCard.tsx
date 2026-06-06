@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { getThoughtContext } from "@/lib/types";
@@ -47,9 +46,8 @@ export function KanbanCard({
   onPriorityChange: _onPriorityChange,
   showArchiveButton = false,
   onArchive,
-  actions = [],
+  actions: _actions = [],
 }: KanbanCardProps) {
-  const [actionsOpen, setActionsOpen] = useState(false);
   const {
     attributes,
     listeners,
@@ -206,61 +204,10 @@ export function KanbanCard({
         </div>
       )}
 
-      {/* Aggregated actions from source thoughts linked to this card's @entity */}
-      {(() => {
-        const dedup = new Map<string, KanbanAction>();
-        for (const a of actions) dedup.set(`${a.thought_serial_id}::${a.action}`, a);
-        const list = [...dedup.values()];
-        if (list.length === 0) return null;
-        return (
-          <div
-            onClick={(e) => { e.stopPropagation(); setActionsOpen((v) => !v); }}
-            onPointerDown={(e) => e.stopPropagation()}
-            style={{
-              fontSize: 10.5,
-              fontFamily: "var(--font-mono)",
-              color: "var(--violet-300)",
-              padding: "3px 6px",
-              background: "rgba(157,131,255,0.07)",
-              borderRadius: 4,
-              border: "1px solid rgba(157,131,255,0.18)",
-              cursor: "pointer",
-              alignSelf: "flex-start",
-              display: "flex",
-              flexDirection: "column",
-              gap: 4,
-              maxWidth: "100%",
-            }}
-            title={actionsOpen ? "Hide actions" : "Show linked actions"}
-          >
-            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <span style={{ fontSize: 10 }}>{actionsOpen ? "▾" : "▸"}</span>
-              {list.length} action{list.length === 1 ? "" : "s"}
-            </span>
-            {actionsOpen && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 3, paddingTop: 2 }}>
-                {list.slice(0, 20).map((a, i) => (
-                  <div key={i} style={{ display: "flex", gap: 4, color: "var(--fg-2)", lineHeight: 1.35 }}>
-                    <a
-                      href={`/thoughts/${a.thought_serial_id}`}
-                      onClick={(e) => e.stopPropagation()}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      style={{ color: "var(--violet-300)", textDecoration: "none", flexShrink: 0 }}
-                      title={`Open source thought #${a.thought_serial_id}`}
-                    >
-                      #{a.thought_serial_id}
-                    </a>
-                    <span style={{ flex: 1, minWidth: 0, wordBreak: "break-word" }}>{a.action}</span>
-                  </div>
-                ))}
-                {list.length > 20 && (
-                  <span style={{ color: "var(--fg-4)" }}>… +{list.length - 20} more</span>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })()}
+      {/* Aggregated action pill removed 2026-06-06 — per docs/curator.md §10,
+          action_items in metadata are kept informational only because most
+          are about other people, not Adam. The data still flows from worker
+          → metadata, but the card no longer surfaces it as a worklist. */}
 
       <div
         style={{
