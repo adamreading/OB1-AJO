@@ -1,5 +1,9 @@
 # Hermes Agent Memory (OB1)
 
+![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
+
+**Created by [@MicScalise](https://github.com/MicScalise)**
+
 > Native Hermes `MemoryProvider` for the OB1 governed memory system. Gives Hermes agents the same auto-recall, auto-writeback, and governance that OpenClaw agents get from `integrations/openclaw-agent-memory`.
 
 ## What It Does
