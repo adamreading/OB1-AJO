@@ -185,7 +185,6 @@ The provider auto-disables writes when invoked with `agent_context in ("subagent
 integrations/hermes-agent-memory/
 ├── README.md            # this file
 ├── metadata.json        # OB1 contribution metadata
-├── LICENSE              # MIT
 ├── CHANGELOG.md         # release notes
 └── plugin/
     ├── __init__.py      # OB1MemoryProvider implementation
