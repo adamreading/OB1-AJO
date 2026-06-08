@@ -1,5 +1,9 @@
 # Smart Ingest
 
+![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
+
+**Created by [@alanshurafa](https://github.com/alanshurafa)**
+
 > LLM-powered document extraction that turns raw text into atomic thoughts with fingerprint and semantic deduplication, dry-run preview, and safe job execution.
 
 ## What It Does
