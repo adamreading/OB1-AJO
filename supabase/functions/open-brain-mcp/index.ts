@@ -111,7 +111,7 @@ function distillHeuristic(text: string): Array<{ content: string; type: string }
 function createServer(): McpServer {
   const server = new McpServer({
     name: "open-brain",
-    version: "1.5.2",
+    version: "1.6.0",
   });
 
   // ChatGPT compatibility aliases — restricted ChatGPT connectors look for exact `search` / `fetch` shapes
@@ -1217,6 +1217,134 @@ function createServer(): McpServer {
         lines.push(`_${total} action items from ${withActions.length} thoughts_`);
 
         return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 17: List Pending Review — curator triage tool
+  server.registerTool(
+    "list_pending_review",
+    {
+      title: "List Pending Review",
+      description: "List thoughts queued for review (metadata.review_status = 'pending_review'). Used by the curator for daily triage. Returns serial ID, source, decision type (NEW or UPDATE), sensitivity tier, content length, and a content preview so the curator can decide approve vs. hold.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        limit: z.number().optional().default(50),
+      },
+    },
+    async ({ limit }) => {
+      try {
+        const { data, error } = await supabase
+          .from("thoughts")
+          .select("serial_id, content, source_type, classification, metadata, created_at")
+          .filter("metadata->>review_status", "eq", "pending_review")
+          .order("created_at", { ascending: false })
+          .limit(limit);
+
+        if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+        if (!data?.length) return { content: [{ type: "text" as const, text: "No thoughts pending review." }] };
+
+        const results = data.map((t: any) => {
+          const m = t.metadata || {};
+          const decision = m.ollama_decision ? ` [${m.ollama_decision}]` : "";
+          const sensitivity = m.sensitivity_tier && m.sensitivity_tier !== "standard" ? ` ⚠️ ${m.sensitivity_tier}` : "";
+          const targetNote = m.update_target_id ? ` → updates #${m.update_target_id}` : "";
+          const entityCount = Array.isArray(m.entities) ? ` entities:${m.entities.length}` : "";
+          return `#${t.serial_id}${decision}${sensitivity}${targetNote} (${t.source_type}, ${t.content.length} chars${entityCount}, ${t.created_at.slice(0, 10)})\n${t.content.slice(0, 150)}…`;
+        });
+
+        return { content: [{ type: "text" as const, text: `${data.length} thought(s) pending review:\n\n${results.join("\n\n")}` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 18: Approve Pending — delegates to REST API (single source of truth for approve logic)
+  server.registerTool(
+    "approve_pending",
+    {
+      title: "Approve Pending Thoughts",
+      description: "Approve one or more pending-review thoughts by serial ID. Delegates to the REST API /review/approve endpoint — same path the dashboard uses. NEW decisions: clears review_status and queues for entity extraction + embedding. UPDATE decisions: applies proposed content to the target thought, archives old version, re-queues extraction, deletes the pending vessel. Only call after list_pending_review — do not approve sensitivity_tier='personal' or 'restricted' captures without Adam's explicit sign-off.",
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: {
+        ids: z.array(z.number()).describe("Serial IDs of pending thoughts to approve"),
+      },
+    },
+    async ({ ids }) => {
+      try {
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/rest-api/review/approve`, {
+          method: "POST",
+          headers: {
+            "x-brain-key": MCP_ACCESS_KEY,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ids }),
+        });
+        if (!res.ok) {
+          const msg = await res.text().catch(() => res.statusText);
+          return { content: [{ type: "text" as const, text: `Approval failed (${res.status}): ${msg}` }], isError: true };
+        }
+        const { results } = await res.json();
+        const summary = (results as any[]).map((r: any) => `#${r.id}: ${r.action}${r.message ? ` (${r.message})` : ""}`).join(", ");
+        return { content: [{ type: "text" as const, text: `Processed ${results.length} thought(s): ${summary}` }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 19: Dismiss Action Item — delegates to REST API PUT /thought/:id (same path as dashboard)
+  server.registerTool(
+    "dismiss_action_item",
+    {
+      title: "Dismiss Action Item",
+      description: "Remove a specific action item from a thought's metadata.action_items array. Use for the curator stale-action sweep — items older than 90 days where no linked entity has been mentioned in 60 days. Fetches the thought, strips the item by exact text match, then calls PUT /thought/:id on the REST API. Does NOT delete the thought itself.",
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: {
+        thought_id: z.string().describe("Serial ID of the thought containing the action item"),
+        item_text: z.string().describe("Exact text of the action item to remove"),
+      },
+    },
+    async ({ thought_id, item_text }) => {
+      try {
+        // Read current metadata
+        const { data: thought, error: fetchErr } = await supabase
+          .from("thoughts")
+          .select("id, serial_id, content, metadata, classification")
+          .eq("serial_id", parseInt(thought_id, 10))
+          .single();
+
+        if (fetchErr || !thought) return { content: [{ type: "text" as const, text: "Thought not found" }], isError: true };
+
+        const currentItems: string[] = (thought as any).metadata?.action_items ?? [];
+        const updatedItems = currentItems.filter((t: string) => t !== item_text);
+
+        if (updatedItems.length === currentItems.length) {
+          return { content: [{ type: "text" as const, text: `Item not found in #${(thought as any).serial_id}: "${item_text}"` }], isError: true };
+        }
+
+        // Delegate the write to the REST API
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/rest-api/thought/${(thought as any).serial_id}`, {
+          method: "PUT",
+          headers: {
+            "x-brain-key": MCP_ACCESS_KEY,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            content: (thought as any).content,
+            metadata: { ...(thought as any).metadata, action_items: updatedItems },
+          }),
+        });
+
+        if (!res.ok) {
+          const msg = await res.text().catch(() => res.statusText);
+          return { content: [{ type: "text" as const, text: `Failed (${res.status}): ${msg}` }], isError: true };
+        }
+
+        return { content: [{ type: "text" as const, text: `Dismissed from #${(thought as any).serial_id}. ${updatedItems.length} item(s) remaining.` }] };
       } catch (err: unknown) {
         return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
       }

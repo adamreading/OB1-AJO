@@ -22,21 +22,21 @@ Call `get_context_brief(scope='all', hours=24)`. Note: top-of-mind entities, rec
 
 ### Step 2 — Triage pending review
 
-Use `list_thoughts({ classification: undefined })` with a filter on metadata.review_status. (If the MCP exposes a `pending_review` tool, use it; otherwise fall back to `search_thoughts` for "pending_review" and sift by source_type=plaud.)
+Call `list_pending_review({ limit: 50 })`. This is the dedicated curator tool — it returns each pending thought with serial_id, source, decision type (NEW / UPDATE), sensitivity tier, content length, entity count, and a 150-char preview.
 
-For each pending thought:
+For each pending thought, decide:
 
-- **Auto-approve via `/review/approve` (REST call through the brain's REST endpoint exposed by the MCP) if ALL true:**
+- **Auto-approve** (add to the `approve_pending({ ids: [...] })` batch) if ALL true:
   - source_type is `plaud`, `mcp-claude`, `mcp-chatgpt`, `mcp-perplexity`, `mcp-perplexity-import`, `mcp-cowork-scheduler`, or `manual`
   - content length ≥ 200 chars
   - sensitivity_tier is `standard` (NOT personal or restricted)
   - at least one linked entity is present
-- **Leave pending (surface in digest §"I need your input on") if:**
+- **Leave pending** (surface in digest §"I need your input on") if:
   - sensitivity_tier is `personal` or `restricted`
   - content < 200 chars (likely fragment)
   - zero entity links (likely junk extraction)
 
-If you successfully auto-approve, tally the count. If you leave items pending, capture their serial_ids for the digest.
+After scanning the full list, call `approve_pending({ ids: [...] })` once with the full approve-batch (single round-trip is cheaper than per-item calls). Record the result counts for the digest.
 
 ### Step 3 — Dedup pass
 
@@ -49,9 +49,9 @@ Call `find_duplicates({ threshold: 0.92, limit: 20 })`. Each returned pair is tw
 Pull action items via `list_action_items({ since_hours: 4320 })` (180 days). For each item:
 
 - If the action references at least one entity that has been mentioned in any thought in the last 60 days → **leave it**.
-- If no linked entity has been mentioned in 60 days AND the parent thought is older than 90 days → it's stale. Mark for dismissal in the digest. (Until the `action_completions` table exists, you can only flag; the digest will summarize counts.)
+- If no linked entity has been mentioned in 60 days AND the parent thought is older than 90 days → it's stale. Call `dismiss_action_item({ thought_id, item_text })` to strip just that item from `metadata.action_items` (the thought stays, only the action goes). Per `docs/curator.md` §3 this is in your solo-act remit — you're not deleting the thought.
 
-Note: per `docs/curator.md` §10, action items are low-signal because most are about other people. Treat with skepticism. Don't tell Adam "you have 47 actions" — tell him "of N captured actions in the last 180 days, M are stale enough to dismiss."
+Note: per `docs/curator.md` §10, action items are low-signal because most are about other people. Treat with skepticism. Don't tell Adam "you have 47 actions" — tell him "of N captured actions in the last 180 days, M were stale and I dismissed them."
 
 ### Step 5 — Anomaly scan
 
@@ -98,7 +98,13 @@ The routine clones the repo fresh on every run, so a push to `docs/curator.md` o
 
 In a routine you have:
 
-- The Open Brain MCP web connector → all `mcp__open-brain__*` tools (`get_context_brief`, `list_thoughts`, `search_thoughts`, `search_wiki`, `read_wiki_page`, `thought_stats`, `find_duplicates`, `list_action_items`, `capture_thought`, `update_thought`, `delete_thought`, `add_reflection`, `get_entity_connections`, `capture_review`, `distill_transcript`, `resume`, `search`, `fetch`).
+- The Open Brain MCP web connector → all `mcp__open-brain__*` tools, including curator-specific ones:
+  - `list_pending_review` — returns pending-review thoughts with decision/source/sensitivity/preview (Step 2 input)
+  - `approve_pending` — batch-approve by serial IDs, delegates to REST `/review/approve` (Step 2 write)
+  - `dismiss_action_item` — strip one action item from a thought's metadata.action_items (Step 4 write)
+  - Read tools: `get_context_brief`, `list_thoughts`, `search_thoughts`, `search_wiki`, `read_wiki_page`, `thought_stats`, `find_duplicates`, `list_action_items`, `get_entity_connections`
+  - Write tools: `capture_thought`, `update_thought`, `delete_thought`, `add_reflection`, `capture_review`
+  - Other: `distill_transcript`, `resume`, `search`, `fetch`
 - The Gmail connector → `gmail_create_draft`, `gmail_send` (or whatever surface claude.ai exposes — use what's there).
 - Web fetch + bash for the cloned repo.
 
