@@ -622,6 +622,46 @@ app.get("/memories", async (c) => {
   return c.json({ memories: (data || []).map(responseMemory), count: data?.length || 0 }, 200, corsHeaders);
 });
 
+// POST aliases for the two read routes. The upstream hermes-agent-memory
+// plugin POSTs to /memories/review and /memories/list (encoding scope in the
+// JSON body to avoid URL-encoding workspace ids) while the GET variants above
+// read the same params from the query string. Same query logic, body-sourced.
+app.post("/memories/review", async (c) => {
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  const workspace_id = body.workspace_id as string | undefined;
+  if (!workspace_id) return c.json({ error: "workspace_id is required" }, 400, corsHeaders);
+  let q = supabase.from("agent_memories").select("*").eq("workspace_id", workspace_id).eq("review_status", "pending").order("created_at", { ascending: false }).limit(100);
+  if (body.project_id) q = q.eq("project_id", body.project_id as string);
+  const { data, error } = await q;
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  return c.json({ memories: (data || []).map(responseMemory) }, 200, corsHeaders);
+});
+
+app.post("/memories/list", async (c) => {
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  const workspace_id = body.workspace_id as string | undefined;
+  if (!workspace_id) return c.json({ error: "workspace_id is required" }, 400, corsHeaders);
+
+  const limit = Math.min(Math.max(parseInt(String(body.limit ?? "50"), 10) || 50, 1), 200);
+  let q = supabase
+    .from("agent_memories")
+    .select("*")
+    .eq("workspace_id", workspace_id)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (body.project_id) q = q.eq("project_id", body.project_id as string);
+  if (body.review_status) q = q.eq("review_status", body.review_status as string);
+  if (body.lifecycle_status) q = q.eq("lifecycle_status", body.lifecycle_status as string);
+  if (body.runtime_name) q = q.eq("runtime_name", body.runtime_name as string);
+  if (body.memory_type) q = q.eq("memory_type", body.memory_type as string);
+  if (body.task_id_prefix) q = q.like("task_id", `${body.task_id_prefix as string}%`);
+
+  const { data, error } = await q;
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  return c.json({ memories: (data || []).map(responseMemory), count: data?.length || 0 }, 200, corsHeaders);
+});
+
 app.get("/memories/:id", async (c) => {
   const id = c.req.param("id");
   const { data, error } = await supabase.from("agent_memories").select("*, agent_memory_source_refs(*), agent_memory_artifacts(*)").eq("id", id).single();
