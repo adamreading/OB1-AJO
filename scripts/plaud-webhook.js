@@ -39,6 +39,7 @@ const BRAIN_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_ROLE_
 const supabase = createClient(SUPABASE_URL, BRAIN_KEY);
 const OLLAMA_BASE = (process.env.OLLAMA_URL || "http://localhost:11434/api").replace(/\/+$/, "");
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:30b";
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX || 32768);
 
 const API_BASE = `${SUPABASE_URL}/functions/v1/rest-api`;
 
@@ -149,7 +150,7 @@ function apiCall(method, urlPath, body) {
 
 function ollamaGenerate(prompt) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model: OLLAMA_MODEL, prompt, stream: false });
+    const body = JSON.stringify({ model: OLLAMA_MODEL, prompt, stream: false, options: { num_ctx: OLLAMA_NUM_CTX } });
     const url = new URL(`${OLLAMA_BASE}/generate`);
     const isHttps = url.protocol === "https:";
     const options = {
@@ -1163,7 +1164,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, "127.0.0.1", () => {
   const cursor = readCursor();
   console.log(`[plaud-webhook] Listening on http://127.0.0.1:${PORT}/webhook`);
-  console.log(`[plaud-webhook] Ollama model: ${OLLAMA_MODEL}`);
+  console.log(`[plaud-webhook] Ollama model: ${OLLAMA_MODEL} (num_ctx=${OLLAMA_NUM_CTX})`);
   console.log(`[plaud-webhook] Processed file IDs loaded: ${cursor.processed_file_ids.length}`);
   console.log(`[plaud-webhook] Curator prompt: ${CURATOR_PROMPT_PATH}`);
   console.log(`[plaud-webhook] Corrections: ${CORRECTIONS_PATH}`);

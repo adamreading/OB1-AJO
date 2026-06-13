@@ -36,6 +36,7 @@
  *   INFER_MAX_THOUGHTS      default 60 — cap on snippets per entity
  *   INFER_SNIPPET_CHARS     default 800 — chars per snippet
  *   INFER_MIN_CONFIDENCE    default 0.6 — drop suggestions below this
+ *   INFER_NUM_CTX           default OLLAMA_NUM_CTX or 32768 — Ollama input context
  */
 import { createClient } from "@supabase/supabase-js";
 
@@ -72,6 +73,7 @@ const rateMs = Number(process.env.INFER_RATE_MS || 800);
 const MAX_THOUGHTS = Number(process.env.INFER_MAX_THOUGHTS || 60);
 const SNIPPET_CHARS = Number(process.env.INFER_SNIPPET_CHARS || 800);
 const MIN_CONFIDENCE = Number(process.env.INFER_MIN_CONFIDENCE || 0.6);
+const NUM_CTX = Number(process.env.INFER_NUM_CTX || process.env.OLLAMA_NUM_CTX || 32768);
 
 if (!url || !key) { console.error("SUPABASE_URL / SUPABASE_KEY required"); process.exit(1); }
 
@@ -148,7 +150,7 @@ async function callLLMOnce(modelName, userPrompt, attemptHint) {
       prompt: fullPrompt,
       stream: false,
       format: "json",
-      options: { temperature: 0.1, num_predict: 2048, num_ctx: 32768 },
+      options: { temperature: 0.1, num_predict: 2048, num_ctx: NUM_CTX },
     }),
   });
   if (!res.ok) {
