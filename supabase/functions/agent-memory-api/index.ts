@@ -342,17 +342,17 @@ app.post("/recall", async (c) => {
   const req = parsed.data;
 
   const embedding = await getEmbedding(req.query);
-  const { data: matches, error: matchError } = await supabase.rpc("match_thoughts", {
+  const { data: matches, error: matchError } = await supabase.rpc("match_agent_memories", {
     query_embedding: embedding,
     match_threshold: 0.25,
     match_count: Math.max(req.limits.max_items * 4, 20),
-    filter: {},
+    p_workspace_id: req.workspace_id,
   });
   if (matchError) return c.json({ error: matchError.message }, 500, corsHeaders);
 
-  const similarityByThought = new Map<string, number>();
-  for (const item of matches || []) similarityByThought.set(item.id, item.similarity);
-  const thoughtIds = Array.from(similarityByThought.keys());
+  const similarityById = new Map<string, number>();
+  for (const item of matches || []) similarityById.set(item.id, item.similarity);
+  const memoryIds = Array.from(similarityById.keys());
 
   let memoryQuery = supabase
     .from("agent_memories")
@@ -360,7 +360,7 @@ app.post("/recall", async (c) => {
     .eq("workspace_id", req.workspace_id)
     .order("created_at", { ascending: false })
     .limit(100);
-  if (thoughtIds.length > 0) memoryQuery = memoryQuery.in("thought_id", thoughtIds);
+  if (memoryIds.length > 0) memoryQuery = memoryQuery.in("id", memoryIds);
 
   const { data: rawMemories, error: memoryError } = await memoryQuery;
   if (memoryError) return c.json({ error: memoryError.message }, 500, corsHeaders);
@@ -368,7 +368,7 @@ app.post("/recall", async (c) => {
   const ranked = ((rawMemories || []) as AgentMemory[])
     .filter((m) => scopeMatches(m, req))
     .map((m) => {
-      const similarity = similarityByThought.get(m.thought_id || "") || 0;
+      const similarity = similarityById.get(m.id) || 0;
       return { ...m, similarity, ranking_score: rankMemory(m, similarity) };
     })
     .sort((a, b) => b.ranking_score - a.ranking_score)
@@ -462,32 +462,13 @@ app.post("/writeback", async (c) => {
       continue;
     }
 
+    // Self-contained: embed the memory text into agent_memories.embedding.
+    // No thoughts row is created — agent memory never lands in the main brain.
     const embedding = await getEmbedding(row.content);
-    const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
-      p_content: row.content,
-      p_payload: {
-        metadata: {
-          source: "agent_memory",
-          source_type: "agent_memory",
-          type: row.memory_type,
-          topics: req.memory_payload.entities.topics || [],
-          people: req.memory_payload.entities.people || [],
-          agent_memory: {
-            runtime: req.runtime.name,
-            task_id: req.task_id,
-            flow_id: req.flow_id,
-            provenance_status: req.provenance.default_status,
-          },
-        },
-      },
-    });
-    if (upsertError) return c.json({ error: upsertError.message }, 500, corsHeaders);
-
-    const thoughtId = upsertResult?.id;
-    if (thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);
 
     const { data: memory, error: memoryError } = await supabase.from("agent_memories").insert({
-      thought_id: thoughtId ?? null,
+      thought_id: null,
+      embedding,
       workspace_id: req.workspace_id,
       project_id: req.project_id ?? null,
       channel_kind: req.channel.kind ?? null,
